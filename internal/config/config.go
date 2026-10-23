@@ -9,8 +9,12 @@ import (
 )
 
 type Config struct {
-	Port            string
-	ShutdownTimeout time.Duration
+	Port                   string
+	ShutdownTimeout        time.Duration
+	PlatformDatabaseURL    string
+	BootstrapAdminUsername string
+	BootstrapAdminPassword string
+	SecureCookie           bool
 }
 
 // Load reads configuration from process environment variables.
@@ -30,7 +34,22 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("SHUTDOWN_TIMEOUT must be a positive duration, for example 10s")
 		}
 	}
-	return Config{Port: port, ShutdownTimeout: timeout}, nil
+	secureCookie := os.Getenv("APP_ENV") == "production"
+	if value := os.Getenv("COOKIE_SECURE"); value != "" {
+		configured, parseErr := strconv.ParseBool(value)
+		if parseErr != nil {
+			return Config{}, fmt.Errorf("COOKIE_SECURE must be true or false")
+		}
+		secureCookie = secureCookie || configured
+	}
+	return Config{
+		Port:                   port,
+		ShutdownTimeout:        timeout,
+		PlatformDatabaseURL:    os.Getenv("PLATFORM_DATABASE_URL"),
+		BootstrapAdminUsername: os.Getenv("BOOTSTRAP_ADMIN_USERNAME"),
+		BootstrapAdminPassword: os.Getenv("BOOTSTRAP_ADMIN_PASSWORD"),
+		SecureCookie:           secureCookie,
+	}, nil
 }
 
 func (c Config) Address() string { return net.JoinHostPort("", c.Port) }

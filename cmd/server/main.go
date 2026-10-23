@@ -11,8 +11,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wafhr/IF3110_K01-13/internal/access"
 	"github.com/wafhr/IF3110_K01-13/internal/app"
 	"github.com/wafhr/IF3110_K01-13/internal/config"
+	"github.com/wafhr/IF3110_K01-13/internal/platformdb"
 )
 
 func main() {
@@ -27,11 +29,22 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelStartup()
+	db, err := platformdb.Open(startupCtx, cfg.PlatformDatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	accessService := access.NewService(db)
+	if err := accessService.Initialize(startupCtx, cfg.BootstrapAdminUsername, cfg.BootstrapAdminPassword); err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	server := &http.Server{
 		Addr:              cfg.Address(),
-		Handler:           app.Routes(),
+		Handler:           app.RoutesWithAccess(access.NewHTTPHandler(accessService, cfg.SecureCookie)),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

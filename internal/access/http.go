@@ -1,0 +1,438 @@
+package access
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+type HTTPHandler struct {
+	service      *Service
+	secureCookie bool
+	mux          *http.ServeMux
+}
+
+type principalKey struct{}
+
+func NewHTTPHandler(service *Service, secureCookie bool) *HTTPHandler {
+	h := &HTTPHandler{service: service, secureCookie: secureCookie, mux: http.NewServeMux()}
+	h.routes()
+	return h
+}
+
+func (h *HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	h.mux.ServeHTTP(w, r)
+}
+
+func (h *HTTPHandler) routes() {
+	h.mux.HandleFunc("POST /auth/login", h.login)
+	h.mux.Handle("GET /auth/me", h.protected(false, false, http.HandlerFunc(h.me)))
+	h.mux.Handle("GET /auth/csrf", h.protected(false, false, http.HandlerFunc(h.csrf)))
+	h.mux.Handle("POST /auth/logout", h.protected(false, true, http.HandlerFunc(h.logout)))
+
+	h.mux.Handle("GET /admin/users", h.protected(true, false, http.HandlerFunc(h.listUsers)))
+	h.mux.Handle("POST /admin/users", h.protected(true, true, http.HandlerFunc(h.createUser)))
+	h.mux.Handle("PATCH /admin/users/{userID}", h.protected(true, true, http.HandlerFunc(h.updateUser)))
+	h.mux.Handle("GET /admin/groups", h.protected(true, false, http.HandlerFunc(h.listGroups)))
+	h.mux.Handle("POST /admin/groups", h.protected(true, true, http.HandlerFunc(h.createGroup)))
+	h.mux.Handle("DELETE /admin/groups/{groupID}", h.protected(true, true, http.HandlerFunc(h.deleteGroup)))
+	h.mux.Handle("GET /admin/groups/{groupID}/members", h.protected(true, false, http.HandlerFunc(h.listGroupMembers)))
+	h.mux.Handle("GET /admin/groups/{groupID}/databases", h.protected(true, false, http.HandlerFunc(h.listDatabaseGrants)))
+	h.mux.Handle("PUT /admin/groups/{groupID}/members/{userID}", h.protected(true, true, http.HandlerFunc(h.addMember)))
+	h.mux.Handle("DELETE /admin/groups/{groupID}/members/{userID}", h.protected(true, true, http.HandlerFunc(h.removeMember)))
+	h.mux.Handle("PUT /admin/groups/{groupID}/databases/{databaseID}", h.protected(true, true, http.HandlerFunc(h.setPermission)))
+	h.mux.Handle("DELETE /admin/groups/{groupID}/databases/{databaseID}", h.protected(true, true, http.HandlerFunc(h.deletePermission)))
+	h.mux.Handle("GET /databases/{databaseID}/access", h.protected(false, false, http.HandlerFunc(h.databaseAccess)))
+}
+
+// RequireDatabaseAccess can protect downstream schema, data, or migration handlers.
+// The handler route must include a {databaseID} path value.
+func (h *HTTPHandler) RequireDatabaseAccess(minimum Permission, next http.Handler) http.Handler {
+	return h.protected(false, true, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user := currentUser(r.Context())
+		if err := h.service.AuthorizeDatabase(r.Context(), user.ID, r.PathValue("databaseID"), minimum); err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		next.ServeHTTP(w, r)
+	}))
+}
+
+func (h *HTTPHandler) protected(admin, csrfRequired bool, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie(sessionCookieName)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		session, err := h.service.Authenticate(r.Context(), cookie.Value)
+		if errors.Is(err, ErrUnauthenticated) {
+			h.clearCookie(w, r)
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if err != nil {
+			slog.Error("access session lookup failed")
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if session.RotatedToken != "" {
+			h.setCookie(w, r, session.RotatedToken, session.AbsoluteExpiry)
+		}
+		if admin && !session.User.PlatformAdmin {
+			writeError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		stateChanging := r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions
+		if csrfRequired && stateChanging && !h.validRequestOrigin(r) {
+			writeError(w, http.StatusForbidden, "request origin rejected")
+			return
+		}
+		if csrfRequired && stateChanging && !validCSRF(r.Header.Get("X-CSRF-Token"), session.CSRFToken) {
+			writeError(w, http.StatusForbidden, "csrf token required")
+			return
+		}
+		ctx := context.WithValue(r.Context(), principalKey{}, session.User)
+		ctx = context.WithValue(ctx, csrfContextKey{}, session.CSRFToken)
+		ctx = context.WithValue(ctx, sessionTokenContextKey{}, cookie.Value)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+type csrfContextKey struct{}
+type sessionTokenContextKey struct{}
+
+const sessionCookieName = "platform_session"
+
+func (h *HTTPHandler) login(w http.ResponseWriter, r *http.Request) {
+	if !h.validRequestOrigin(r) {
+		writeError(w, http.StatusForbidden, "request origin rejected")
+		return
+	}
+	var input struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.Username == "" || input.Password == "" {
+		writeError(w, http.StatusBadRequest, "invalid login request")
+		return
+	}
+	oldToken := ""
+	if oldCookie, err := r.Cookie(sessionCookieName); err == nil {
+		oldToken = oldCookie.Value
+	}
+	session, err := h.service.Login(r.Context(), input.Username, input.Password)
+	if errors.Is(err, ErrUnauthenticated) {
+		writeError(w, http.StatusUnauthorized, "invalid username or password")
+		return
+	}
+	if err != nil {
+		slog.Error("access login failed")
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if oldToken != "" {
+		if err := h.service.Logout(r.Context(), oldToken); err != nil {
+			slog.Error("revoke previous login session failed")
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+	}
+	h.setCookie(w, r, session.RotatedToken, session.AbsoluteExpiry)
+	writeJSON(w, http.StatusOK, map[string]any{"user": session.User})
+}
+
+func (h *HTTPHandler) me(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"user": currentUser(r.Context())})
+}
+
+func (h *HTTPHandler) csrf(w http.ResponseWriter, r *http.Request) {
+	token, _ := r.Context().Value(csrfContextKey{}).(string)
+	writeJSON(w, http.StatusOK, map[string]string{"csrf_token": token})
+}
+
+func (h *HTTPHandler) logout(w http.ResponseWriter, r *http.Request) {
+	token, _ := r.Context().Value(sessionTokenContextKey{}).(string)
+	if err := h.service.Logout(r.Context(), token); err != nil {
+		slog.Error("access logout failed")
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	h.clearCookie(w, r)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *HTTPHandler) listUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := h.service.ListUsers(r.Context())
+	if err != nil {
+		internalError(w, "list users")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": users})
+}
+
+func (h *HTTPHandler) createUser(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Username      string `json:"username"`
+		Password      string `json:"password"`
+		PlatformAdmin bool   `json:"platform_admin"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	user, err := h.service.CreateUser(r.Context(), input.Username, input.Password, input.PlatformAdmin)
+	if errors.Is(err, ErrConflict) {
+		writeError(w, http.StatusConflict, "username already exists")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"user": user})
+}
+
+func (h *HTTPHandler) updateUser(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Active        *bool `json:"active"`
+		PlatformAdmin *bool `json:"platform_admin"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.Active == nil || input.PlatformAdmin == nil {
+		writeError(w, http.StatusBadRequest, "active and platform_admin are required")
+		return
+	}
+	actor := currentUser(r.Context())
+	if strings.EqualFold(actor.ID, r.PathValue("userID")) && (!*input.Active || !*input.PlatformAdmin) {
+		writeError(w, http.StatusConflict, "cannot disable or demote the current admin")
+		return
+	}
+	if err := h.service.UpdateUser(r.Context(), r.PathValue("userID"), *input.Active, *input.PlatformAdmin); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *HTTPHandler) listGroups(w http.ResponseWriter, r *http.Request) {
+	groups, err := h.service.ListGroups(r.Context())
+	if err != nil {
+		internalError(w, "list groups")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"groups": groups})
+}
+
+func (h *HTTPHandler) createGroup(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Name string `json:"name"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	group, err := h.service.CreateGroup(r.Context(), input.Name)
+	if errors.Is(err, ErrConflict) {
+		writeError(w, http.StatusConflict, "group name already exists")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"group": group})
+}
+
+func (h *HTTPHandler) deleteGroup(w http.ResponseWriter, r *http.Request) {
+	if err := h.service.DeleteGroup(r.Context(), r.PathValue("groupID")); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *HTTPHandler) listGroupMembers(w http.ResponseWriter, r *http.Request) {
+	members, err := h.service.ListGroupMembers(r.Context(), r.PathValue("groupID"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"members": members})
+}
+
+func (h *HTTPHandler) listDatabaseGrants(w http.ResponseWriter, r *http.Request) {
+	grants, err := h.service.ListDatabaseGrants(r.Context(), r.PathValue("groupID"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"databases": grants})
+}
+
+func (h *HTTPHandler) addMember(w http.ResponseWriter, r *http.Request) {
+	if err := h.service.SetMembership(r.Context(), r.PathValue("groupID"), r.PathValue("userID"), true); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *HTTPHandler) removeMember(w http.ResponseWriter, r *http.Request) {
+	if err := h.service.SetMembership(r.Context(), r.PathValue("groupID"), r.PathValue("userID"), false); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *HTTPHandler) setPermission(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Permission Permission `json:"permission"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if err := h.service.SetDatabasePermission(r.Context(), r.PathValue("groupID"), r.PathValue("databaseID"), input.Permission); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *HTTPHandler) deletePermission(w http.ResponseWriter, r *http.Request) {
+	if err := h.service.DeleteDatabasePermission(r.Context(), r.PathValue("groupID"), r.PathValue("databaseID")); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *HTTPHandler) databaseAccess(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	permission, err := h.service.EffectivePermission(r.Context(), user.ID, r.PathValue("databaseID"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if permission == "" {
+		writeError(w, http.StatusForbidden, "no database access")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]Permission{"permission": permission})
+}
+
+func (h *HTTPHandler) setCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
+	maxAge := int(time.Until(expires).Seconds())
+	if maxAge < 1 {
+		maxAge = 1
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookieName, Value: token, Path: "/", Expires: expires,
+		MaxAge: maxAge, HttpOnly: true, Secure: h.secureCookie || r.TLS != nil,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (h *HTTPHandler) clearCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: h.secureCookie || r.TLS != nil, SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (h *HTTPHandler) validRequestOrigin(r *http.Request) bool {
+	if !validRequestOrigin(r) {
+		return false
+	}
+	if r.Header.Get("Origin") == "" || (!h.secureCookie && r.TLS == nil) {
+		return true
+	}
+	u, err := url.Parse(r.Header.Get("Origin"))
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "https"
+}
+
+func validCSRF(provided, expected string) bool {
+	return provided != "" && len(provided) == len(expected) && subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
+func validRequestOrigin(r *http.Request) bool {
+	if strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
+		return false
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || !strings.EqualFold(u.Host, r.Host) {
+		return false
+	}
+	return true
+}
+
+func currentUser(ctx context.Context) User {
+	user, _ := ctx.Value(principalKey{}).(User)
+	return user
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON request")
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "request must contain one JSON value")
+		return false
+	}
+	return true
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func internalError(w http.ResponseWriter, operation string) {
+	slog.Error("access operation failed", "operation", operation)
+	writeError(w, http.StatusInternalServerError, "internal error")
+}
+
+func writeServiceError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrNotFound):
+		writeError(w, http.StatusNotFound, "not found")
+	case errors.Is(err, ErrConflict):
+		writeError(w, http.StatusConflict, "conflict")
+	case errors.Is(err, ErrForbidden):
+		writeError(w, http.StatusForbidden, "forbidden")
+	case errors.Is(err, ErrInvalidInput):
+		writeError(w, http.StatusBadRequest, "invalid request")
+	default:
+		slog.Error("access operation failed")
+		writeError(w, http.StatusInternalServerError, "internal error")
+	}
+}
