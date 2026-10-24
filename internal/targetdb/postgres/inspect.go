@@ -104,19 +104,11 @@ func (i *Inspector) Table(ctx context.Context, id, schema, name string) (databas
 		return database.TableDetails{}, inspectionError(err)
 	}
 	defer tx.Rollback()
-	detail := database.TableDetails{Table: database.Table{Schema: schema, Name: name}}
-	var oid uint32
-	var allowed bool
-	err = tx.QueryRowContext(ctx, `SELECT c.oid, `+tableType+`, pg_catalog.has_schema_privilege(n.oid, 'USAGE')
-		FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2 AND `+visibleSchema+` AND `+tableKinds, schema, name).
-		Scan(&oid, &detail.Type, &allowed)
+	table, oid, err := readRelation(ctx, tx, schema, name)
 	if err != nil {
 		return database.TableDetails{}, inspectionError(err)
 	}
-	if !allowed {
-		return database.TableDetails{}, targetdb.ErrPermissionDenied
-	}
+	detail := database.TableDetails{Table: table}
 	if detail.Columns, err = readColumns(ctx, tx, oid); err != nil {
 		return database.TableDetails{}, inspectionError(err)
 	}
@@ -130,6 +122,23 @@ func (i *Inspector) Table(ctx context.Context, id, schema, name string) (databas
 		return database.TableDetails{}, inspectionError(err)
 	}
 	return detail, nil
+}
+
+func readRelation(ctx context.Context, tx *sql.Tx, schema, name string) (database.Table, uint32, error) {
+	table := database.Table{Schema: schema, Name: name}
+	var oid uint32
+	var allowed bool
+	err := tx.QueryRowContext(ctx, `SELECT c.oid, `+tableType+`, pg_catalog.has_schema_privilege(n.oid, 'USAGE')
+		FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = $2 AND `+visibleSchema+` AND `+tableKinds, schema, name).
+		Scan(&oid, &table.Type, &allowed)
+	if err != nil {
+		return database.Table{}, 0, err
+	}
+	if !allowed {
+		return database.Table{}, 0, targetdb.ErrPermissionDenied
+	}
+	return table, oid, nil
 }
 
 func readColumns(ctx context.Context, tx *sql.Tx, oid uint32) ([]database.Column, error) {

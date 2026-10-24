@@ -18,6 +18,7 @@ type SchemaReader interface {
 	Schemas(context.Context, string) ([]database.Schema, error)
 	Tables(context.Context, string, string) ([]database.Table, error)
 	Table(context.Context, string, string, string) (database.TableDetails, error)
+	Data(context.Context, string, string, string, database.PageOptions) (database.DataPage, error)
 }
 
 type ViewerHandler struct {
@@ -33,6 +34,7 @@ func NewViewerHandler(registry AccessibleRegistry, schemas SchemaReader, auth *a
 	mux.Handle("GET /databases/{databaseID}/schemas", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.listSchemas)))
 	mux.Handle("GET /databases/{databaseID}/schemas/{schema}/tables", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.listTables)))
 	mux.Handle("GET /databases/{databaseID}/schemas/{schema}/tables/{table}", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.tableDetails)))
+	mux.Handle("GET /databases/{databaseID}/schemas/{schema}/tables/{table}/data", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.tableData)))
 	h.handler = mux
 	return h
 }
@@ -91,7 +93,7 @@ func (h *ViewerHandler) tableDetails(w http.ResponseWriter, r *http.Request) {
 
 func writeViewerError(w http.ResponseWriter, err error) {
 	if errors.Is(err, targetdb.ErrPermissionDenied) {
-		writeError(w, http.StatusForbidden, "target schema access denied")
+		writeError(w, http.StatusForbidden, "target database access denied")
 		return
 	}
 	if errors.Is(err, database.ErrInvalidInput) {
