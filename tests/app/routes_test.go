@@ -1,9 +1,11 @@
-package app
+package app_test
 
 import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/wafhr/IF3110_K01-13/internal/app"
 )
 
 func TestRoutes(t *testing.T) {
@@ -17,7 +19,7 @@ func TestRoutes(t *testing.T) {
 	} {
 		t.Run(tc.method+tc.path, func(t *testing.T) {
 			response := httptest.NewRecorder()
-			Routes().ServeHTTP(response, httptest.NewRequest(tc.method, tc.path, nil))
+			app.Routes().ServeHTTP(response, httptest.NewRequest(tc.method, tc.path, nil))
 			if response.Code != tc.status {
 				t.Fatalf("status = %d, want %d", response.Code, tc.status)
 			}
