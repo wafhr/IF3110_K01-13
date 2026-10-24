@@ -58,14 +58,18 @@ func (h *HTTPHandler) routes() {
 // The handler route must include a {databaseID} path value.
 func (h *HTTPHandler) RequireDatabaseAccess(minimum Permission, next http.Handler) http.Handler {
 	return h.protected(false, true, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user := currentUser(r.Context())
-		if err := h.service.AuthorizeDatabase(r.Context(), user.ID, r.PathValue("databaseID"), minimum); err != nil {
-			writeServiceError(w, err)
+		if minimum != ViewOnly && minimum != ViewEdit {
+			writeServiceError(w, ErrInvalidInput)
 			return
 		}
+		user := currentUser(r.Context())
 		permission, err := h.service.EffectivePermission(r.Context(), user.ID, r.PathValue("databaseID"))
 		if err != nil {
 			writeServiceError(w, err)
+			return
+		}
+		if permission == "" || (minimum == ViewEdit && permission != ViewEdit) {
+			writeServiceError(w, ErrForbidden)
 			return
 		}
 		ctx := context.WithValue(r.Context(), databasePermissionKey{}, permission)
