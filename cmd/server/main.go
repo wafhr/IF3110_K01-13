@@ -15,6 +15,7 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/app"
 	"github.com/wafhr/IF3110_K01-13/internal/config"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
+	databasehttp "github.com/wafhr/IF3110_K01-13/internal/database/http"
 	"github.com/wafhr/IF3110_K01-13/internal/platformdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb/postgres"
@@ -61,9 +62,11 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	accessHandler := access.NewHTTPHandler(accessService, cfg.SecureCookie)
+	databaseHandler := databasehttp.NewHandler(databaseRegistry, targetConnections, accessHandler)
 	server := &http.Server{
 		Addr:              cfg.Address(),
-		Handler:           app.RoutesWithAccess(access.NewHTTPHandler(accessService, cfg.SecureCookie)),
+		Handler:           app.RoutesWithDatabaseManagement(accessHandler, databaseHandler),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

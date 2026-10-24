@@ -201,6 +201,11 @@ func (r *Repository) decryptPassword(encrypted []byte) (string, error) {
 // Driver errors can contain SQL values or connection details. Preserve a stable
 // error category without propagating those details to responses or application logs.
 func storageError(operation string, err error) error {
+	for _, cancellation := range []error{context.Canceled, context.DeadlineExceeded} {
+		if errors.Is(err, cancellation) {
+			return cancellation
+		}
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}

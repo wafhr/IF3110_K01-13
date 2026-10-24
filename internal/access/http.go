@@ -67,6 +67,12 @@ func (h *HTTPHandler) RequireDatabaseAccess(minimum Permission, next http.Handle
 	}))
 }
 
+// RequirePlatformAdmin protects management handlers with the same session,
+// admin, origin, and state-changing request CSRF checks as the access API.
+func (h *HTTPHandler) RequirePlatformAdmin(next http.Handler) http.Handler {
+	return h.protected(true, true, next)
+}
+
 func (h *HTTPHandler) protected(admin, csrfRequired bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie(sessionCookieName)
