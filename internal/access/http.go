@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -102,15 +103,32 @@ func (h *HTTPHandler) RequirePlatformAdmin(csrfRequired bool, next http.Handler)
 }
 
 func (h *HTTPHandler) protected(admin, csrfRequired bool, next http.Handler) http.Handler {
+	return h.protectedWithRedirect(admin, csrfRequired, next, false)
+}
+
+// RequireBrowserPage protects server-rendered pages and their form submissions.
+func (h *HTTPHandler) RequireBrowserPage(admin, csrfRequired bool, next http.Handler) http.Handler {
+	return h.protectedWithRedirect(admin, csrfRequired, next, true)
+}
+
+func (h *HTTPHandler) protectedWithRedirect(admin, csrfRequired bool, next http.Handler, redirectToLogin bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie(sessionCookieName)
 		if err != nil {
+			if redirectToLogin {
+				http.Redirect(w, r, "/login", http.StatusSeeOther)
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		session, err := h.service.Authenticate(r.Context(), cookie.Value)
 		if errors.Is(err, ErrUnauthenticated) {
 			h.clearCookie(w, r)
+			if redirectToLogin {
+				http.Redirect(w, r, "/login", http.StatusSeeOther)
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -123,6 +141,10 @@ func (h *HTTPHandler) protected(admin, csrfRequired bool, next http.Handler) htt
 			h.setCookie(w, r, session.RotatedToken, session.AbsoluteExpiry)
 		}
 		if admin && !session.User.PlatformAdmin {
+			if redirectToLogin {
+				http.Redirect(w, r, "/", http.StatusSeeOther)
+				return
+			}
 			writeError(w, http.StatusForbidden, "forbidden")
 			return
 		}
@@ -131,9 +153,12 @@ func (h *HTTPHandler) protected(admin, csrfRequired bool, next http.Handler) htt
 			writeError(w, http.StatusForbidden, "request origin rejected")
 			return
 		}
-		if csrfRequired && stateChanging && !validCSRF(r.Header.Get("X-CSRF-Token"), session.CSRFToken) {
-			writeError(w, http.StatusForbidden, "csrf token required")
-			return
+		if csrfRequired && stateChanging {
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+			if !validCSRF(requestCSRF(r), session.CSRFToken) {
+				writeError(w, http.StatusForbidden, "csrf token required")
+				return
+			}
 		}
 		ctx := context.WithValue(r.Context(), principalKey{}, session.User)
 		ctx = context.WithValue(ctx, csrfContextKey{}, session.CSRFToken)
@@ -149,6 +174,10 @@ const sessionCookieName = "platform_session"
 
 func (h *HTTPHandler) login(w http.ResponseWriter, r *http.Request) {
 	if !h.validRequestOrigin(r) {
+		if isHTMLRequest(r) {
+			http.Redirect(w, r, "/login?notice=login-error", http.StatusSeeOther)
+			return
+		}
 		writeError(w, http.StatusForbidden, "request origin rejected")
 		return
 	}
@@ -156,10 +185,21 @@ func (h *HTTPHandler) login(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if !decodeJSON(w, r, &input) {
+	if isFormRequest(r) {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		if r.ParseForm() != nil {
+			http.Redirect(w, r, "/login?notice=login-error", http.StatusSeeOther)
+			return
+		}
+		input.Username, input.Password = r.PostForm.Get("username"), r.PostForm.Get("password")
+	} else if !decodeJSON(w, r, &input) {
 		return
 	}
 	if input.Username == "" || input.Password == "" {
+		if isHTMLRequest(r) {
+			http.Redirect(w, r, "/login?notice=login-error", http.StatusSeeOther)
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid login request")
 		return
 	}
@@ -169,22 +209,38 @@ func (h *HTTPHandler) login(w http.ResponseWriter, r *http.Request) {
 	}
 	session, err := h.service.Login(r.Context(), input.Username, input.Password)
 	if errors.Is(err, ErrUnauthenticated) {
+		if isHTMLRequest(r) {
+			http.Redirect(w, r, "/login?notice=login-error", http.StatusSeeOther)
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
 	if err != nil {
 		slog.Error("access login failed")
+		if isHTMLRequest(r) {
+			http.Error(w, "The page could not be loaded.", http.StatusInternalServerError)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	if oldToken != "" {
 		if err := h.service.Logout(r.Context(), oldToken); err != nil {
 			slog.Error("revoke previous login session failed")
+			if isHTMLRequest(r) {
+				http.Error(w, "The page could not be loaded.", http.StatusInternalServerError)
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 	}
 	h.setCookie(w, r, session.RotatedToken, session.AbsoluteExpiry)
+	if isHTMLRequest(r) {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"user": session.User})
 }
 
@@ -205,7 +261,39 @@ func (h *HTTPHandler) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.clearCookie(w, r)
+	if isHTMLRequest(r) {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func isFormRequest(r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && mediaType == "application/x-www-form-urlencoded"
+}
+
+func isHTMLRequest(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+func requestCSRF(r *http.Request) string {
+	if token := r.Header.Get("X-CSRF-Token"); token != "" {
+		return token
+	}
+	if !isFormRequest(r) || r.ParseForm() != nil {
+		return ""
+	}
+	return r.PostForm.Get("csrf_token")
+}
+
+// CurrentUser returns the authenticated user attached by the page middleware.
+func CurrentUser(ctx context.Context) User { return currentUser(ctx) }
+
+// CSRFToken returns the request token attached by the page middleware.
+func CSRFToken(ctx context.Context) string {
+	token, _ := ctx.Value(csrfContextKey{}).(string)
+	return token
 }
 
 func (h *HTTPHandler) listUsers(w http.ResponseWriter, r *http.Request) {
