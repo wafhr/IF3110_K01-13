@@ -80,3 +80,14 @@ Database viewer and migration handlers should use
 and `HTTPHandler.RequireDatabaseAccess(access.ViewEdit, next)` for edits or
 migrations. The wrapped route must have a `{databaseID}` path value. This keeps
 the authorization check on the backend for each operation.
+
+## Browser interface
+
+Open `/login` to sign in. Platform Admins can manage users, groups, group
+membership, and database grants from the browser interface. Grants are keyed
+by database UUID. Database registration, schema/data viewing, and migration
+pages are not included in this branch because their backend endpoints have not
+been integrated here yet.
+
+The server-rendered UI lives in `web/`: page handlers, access templates, shared
+layouts, and static assets are kept in their corresponding subdirectories.
