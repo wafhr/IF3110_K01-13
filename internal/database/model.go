@@ -42,6 +42,16 @@ type ConnectionConfig struct {
 
 func normalizeRegistration(name string, config ConnectionConfig) (string, ConnectionConfig, error) {
 	name = strings.TrimSpace(name)
+	if err := validateText("name", name, 100); err != nil {
+		return "", ConnectionConfig{}, err
+	}
+	config, err := NormalizeConnectionConfig(config)
+	return name, config, err
+}
+
+// NormalizeConnectionConfig validates settings for both saved registrations and
+// connection checks performed before registration. It never modifies passwords.
+func NormalizeConnectionConfig(config ConnectionConfig) (ConnectionConfig, error) {
 	config.Host = strings.TrimSpace(config.Host)
 	config.DatabaseName = strings.TrimSpace(config.DatabaseName)
 	config.Username = strings.TrimSpace(config.Username)
@@ -56,28 +66,34 @@ func normalizeRegistration(name string, config ConnectionConfig) (string, Connec
 		name, value string
 		max         int
 	}{
-		{"name", name, 100},
 		{"host", config.Host, 253},
 		{"database_name", config.DatabaseName, 63},
 		{"username", config.Username, 63},
 	} {
-		if !utf8.ValidString(field.value) || strings.ContainsRune(field.value, '\x00') ||
-			field.value == "" || utf8.RuneCountInString(field.value) > field.max {
-			return "", ConnectionConfig{}, fmt.Errorf("%w: %s must contain 1 to %d characters without NUL", ErrInvalidInput, field.name, field.max)
+		if err := validateText(field.name, field.value, field.max); err != nil {
+			return ConnectionConfig{}, err
 		}
 	}
 	if config.Port < 1 || config.Port > 65535 {
-		return "", ConnectionConfig{}, fmt.Errorf("%w: port must be between 1 and 65535", ErrInvalidInput)
+		return ConnectionConfig{}, fmt.Errorf("%w: port must be between 1 and 65535", ErrInvalidInput)
 	}
 	if !utf8.ValidString(config.Password) || strings.ContainsRune(config.Password, '\x00') {
-		return "", ConnectionConfig{}, fmt.Errorf("%w: password must be valid UTF-8 without NUL", ErrInvalidInput)
+		return ConnectionConfig{}, fmt.Errorf("%w: password must be valid UTF-8 without NUL", ErrInvalidInput)
 	}
 	switch config.SSLMode {
 	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
 	default:
-		return "", ConnectionConfig{}, fmt.Errorf("%w: unsupported ssl_mode", ErrInvalidInput)
+		return ConnectionConfig{}, fmt.Errorf("%w: unsupported ssl_mode", ErrInvalidInput)
 	}
-	return name, config, nil
+	return config, nil
+}
+
+func validateText(name, value string, max int) error {
+	if !utf8.ValidString(value) || strings.ContainsRune(value, '\x00') ||
+		value == "" || utf8.RuneCountInString(value) > max {
+		return fmt.Errorf("%w: %s must contain 1 to %d characters without NUL", ErrInvalidInput, name, max)
+	}
+	return nil
 }
 
 func validID(id string) bool {

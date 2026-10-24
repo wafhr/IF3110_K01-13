@@ -16,6 +16,8 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/config"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
 	"github.com/wafhr/IF3110_K01-13/internal/platformdb"
+	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
+	"github.com/wafhr/IF3110_K01-13/internal/targetdb/postgres"
 )
 
 func main() {
@@ -44,6 +46,15 @@ func run() error {
 	if err := databaseRegistry.Initialize(startupCtx); err != nil {
 		return err
 	}
+	targetConnector, err := postgres.NewConnector(postgres.Options{})
+	if err != nil {
+		return err
+	}
+	targetConnections, err := targetdb.NewManager(databaseRegistry, targetConnector)
+	if err != nil {
+		return err
+	}
+	defer targetConnections.Close()
 	accessService := access.NewService(db)
 	if err := accessService.Initialize(startupCtx, cfg.BootstrapAdminUsername, cfg.BootstrapAdminPassword); err != nil {
 		return err
