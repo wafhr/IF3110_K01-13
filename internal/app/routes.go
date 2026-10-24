@@ -3,13 +3,20 @@ package app
 import "net/http"
 
 func Routes() http.Handler {
+	return routes(nil, nil)
 	return routes(nil, nil, nil, nil)
 }
 
 func RoutesWithAccess(accessHandler http.Handler) http.Handler {
+	return routes(accessHandler, nil)
+}
+
+func RoutesWithFrontend(accessHandler, frontendHandler http.Handler) http.Handler {
+	return routes(accessHandler, frontendHandler)
 	return routes(accessHandler, nil, nil, nil)
 }
 
+func routes(accessHandler, frontendHandler http.Handler) http.Handler {
 func RoutesWithDatabaseManagement(accessHandler, databaseHandler http.Handler) http.Handler {
 	return routes(accessHandler, databaseHandler, nil, nil)
 }
@@ -58,6 +65,9 @@ func routes(accessHandler, databaseHandler, viewerHandler, migrationHandler http
 		if databaseHandler == nil {
 			mux.Handle("POST /admin/databases", migrationHandler)
 		}
+	}
+	if frontendHandler != nil {
+		mux.Handle("/", frontendHandler)
 	}
 	return mux
 }
