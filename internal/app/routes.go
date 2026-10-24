@@ -3,14 +3,18 @@ package app
 import "net/http"
 
 func Routes() http.Handler {
-	return routes(nil)
+	return routes(nil, nil)
 }
 
 func RoutesWithAccess(accessHandler http.Handler) http.Handler {
-	return routes(accessHandler)
+	return routes(accessHandler, nil)
 }
 
-func routes(accessHandler http.Handler) http.Handler {
+func RoutesWithFrontend(accessHandler, frontendHandler http.Handler) http.Handler {
+	return routes(accessHandler, frontendHandler)
+}
+
+func routes(accessHandler, frontendHandler http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -22,6 +26,9 @@ func routes(accessHandler http.Handler) http.Handler {
 		mux.Handle("/auth/", accessHandler)
 		mux.Handle("/admin/", accessHandler)
 		mux.Handle("/databases/", accessHandler)
+	}
+	if frontendHandler != nil {
+		mux.Handle("/", frontendHandler)
 	}
 	return mux
 }
