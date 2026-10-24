@@ -1,0 +1,14 @@
+services:
+  postgres-test:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: if3110_test_admin
+      POSTGRES_PASSWORD: if3110-integration-password
+      POSTGRES_DB: postgres
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U if3110_test_admin -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 15

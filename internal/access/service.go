@@ -487,6 +487,16 @@ func (s *Service) SetDatabasePermission(ctx context.Context, groupID, databaseID
 		return err
 	}
 	defer tx.Rollback()
+	// Keep the registration alive until the grant commits. Admin deletion locks
+	// this same row before removing grants and revoking the affected sessions.
+	var registeredID string
+	err = tx.QueryRowContext(ctx, `SELECT id::text FROM managed_databases WHERE id = $1 FOR KEY SHARE`, databaseID).Scan(&registeredID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("check registered database before grant: %w", err)
+	}
 	var oldPermission string
 	err = tx.QueryRowContext(ctx, `SELECT permission FROM access_group_database_permissions WHERE group_id = $1 AND database_id = $2 FOR UPDATE`, groupID, databaseID).Scan(&oldPermission)
 	grantExists := err == nil

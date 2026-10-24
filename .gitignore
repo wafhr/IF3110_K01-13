@@ -28,6 +28,9 @@ go.work.sum
 # env file
 .env
 
+# Disposable native PostgreSQL integration cluster
+/tmp/postgres-integration/
+
 # Editor/IDE
 # .idea/
 # .vscode/
