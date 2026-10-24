@@ -15,6 +15,7 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/app"
 	"github.com/wafhr/IF3110_K01-13/internal/config"
 	"github.com/wafhr/IF3110_K01-13/internal/platformdb"
+	"github.com/wafhr/IF3110_K01-13/web"
 )
 
 func main() {
@@ -42,9 +43,10 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	authHandler := access.NewHTTPHandler(accessService, cfg.SecureCookie)
 	server := &http.Server{
 		Addr:              cfg.Address(),
-		Handler:           app.RoutesWithAccess(access.NewHTTPHandler(accessService, cfg.SecureCookie)),
+		Handler:           app.RoutesWithFrontend(authHandler, web.NewHandler(accessService, authHandler)),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
