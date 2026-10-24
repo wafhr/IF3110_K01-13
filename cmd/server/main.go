@@ -14,6 +14,7 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/access"
 	"github.com/wafhr/IF3110_K01-13/internal/app"
 	"github.com/wafhr/IF3110_K01-13/internal/config"
+	"github.com/wafhr/IF3110_K01-13/internal/database"
 	"github.com/wafhr/IF3110_K01-13/internal/platformdb"
 )
 
@@ -36,6 +37,13 @@ func run() error {
 		return err
 	}
 	defer db.Close()
+	databaseRegistry, err := database.NewRepository(db, cfg.DatabaseEncryptionKey)
+	if err != nil {
+		return err
+	}
+	if err := databaseRegistry.Initialize(startupCtx); err != nil {
+		return err
+	}
 	accessService := access.NewService(db)
 	if err := accessService.Initialize(startupCtx, cfg.BootstrapAdminUsername, cfg.BootstrapAdminPassword); err != nil {
 		return err

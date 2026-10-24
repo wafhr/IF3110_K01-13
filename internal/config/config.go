@@ -12,6 +12,7 @@ type Config struct {
 	Port                   string
 	ShutdownTimeout        time.Duration
 	PlatformDatabaseURL    string
+	DatabaseEncryptionKey  string
 	BootstrapAdminUsername string
 	BootstrapAdminPassword string
 	SecureCookie           bool
@@ -46,6 +47,7 @@ func Load() (Config, error) {
 		Port:                   port,
 		ShutdownTimeout:        timeout,
 		PlatformDatabaseURL:    os.Getenv("PLATFORM_DATABASE_URL"),
+		DatabaseEncryptionKey:  os.Getenv("DATABASE_ENCRYPTION_KEY"),
 		BootstrapAdminUsername: os.Getenv("BOOTSTRAP_ADMIN_USERNAME"),
 		BootstrapAdminPassword: os.Getenv("BOOTSTRAP_ADMIN_PASSWORD"),
 		SecureCookie:           secureCookie,

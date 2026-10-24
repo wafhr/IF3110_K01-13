@@ -39,3 +39,17 @@ func TestLoad(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadDatabaseEncryptionKey(t *testing.T) {
+	t.Setenv("PORT", "8080")
+	t.Setenv("SHUTDOWN_TIMEOUT", "10s")
+	t.Setenv("COOKIE_SECURE", "false")
+	t.Setenv("DATABASE_ENCRYPTION_KEY", "configured-registry-key")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabaseEncryptionKey != "configured-registry-key" {
+		t.Fatal("database encryption key was not loaded from the environment")
+	}
+}
