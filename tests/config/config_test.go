@@ -1,8 +1,10 @@
-package config
+package config_test
 
 import (
 	"testing"
 	"time"
+
+	"github.com/wafhr/IF3110_K01-13/internal/config"
 )
 
 func TestLoad(t *testing.T) {
@@ -20,7 +22,7 @@ func TestLoad(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("PORT", tc.port)
 			t.Setenv("SHUTDOWN_TIMEOUT", tc.timeout)
-			cfg, err := Load()
+			cfg, err := config.Load()
 			if tc.invalid {
 				if err == nil {
 					t.Fatal("expected configuration error")
