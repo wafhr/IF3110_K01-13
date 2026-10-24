@@ -14,6 +14,7 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/access"
 	"github.com/wafhr/IF3110_K01-13/internal/app"
 	"github.com/wafhr/IF3110_K01-13/internal/config"
+	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/platformdb"
 )
 
@@ -40,11 +41,16 @@ func run() error {
 	if err := accessService.Initialize(startupCtx, cfg.BootstrapAdminUsername, cfg.BootstrapAdminPassword); err != nil {
 		return err
 	}
+	migrationService := migration.NewService(db)
+	if err := migrationService.Initialize(startupCtx); err != nil {
+		return err
+	}
+	authHandler := access.NewHTTPHandler(accessService, cfg.SecureCookie)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	server := &http.Server{
 		Addr:              cfg.Address(),
-		Handler:           app.RoutesWithAccess(access.NewHTTPHandler(accessService, cfg.SecureCookie)),
+		Handler:           app.RoutesWithMigration(authHandler, migration.NewHTTPHandler(migrationService, authHandler)),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

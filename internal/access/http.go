@@ -63,8 +63,27 @@ func (h *HTTPHandler) RequireDatabaseAccess(minimum Permission, next http.Handle
 			writeServiceError(w, err)
 			return
 		}
-		next.ServeHTTP(w, r)
+		permission, err := h.service.EffectivePermission(r.Context(), user.ID, r.PathValue("databaseID"))
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		ctx := context.WithValue(r.Context(), databasePermissionKey{}, permission)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	}))
+}
+
+type databasePermissionKey struct{}
+
+// DatabasePermissionFromContext reports the permission verified for the current database request.
+func DatabasePermissionFromContext(ctx context.Context) Permission {
+	permission, _ := ctx.Value(databasePermissionKey{}).(Permission)
+	return permission
+}
+
+// RequirePlatformAdmin protects platform configuration endpoints.
+func (h *HTTPHandler) RequirePlatformAdmin(csrfRequired bool, next http.Handler) http.Handler {
+	return h.protected(true, csrfRequired, next)
 }
 
 func (h *HTTPHandler) protected(admin, csrfRequired bool, next http.Handler) http.Handler {
@@ -389,6 +408,15 @@ func validRequestOrigin(r *http.Request) bool {
 func currentUser(ctx context.Context) User {
 	user, _ := ctx.Value(principalKey{}).(User)
 	return user
+}
+
+// CurrentUser returns the authenticated principal attached by the access middleware.
+func CurrentUser(ctx context.Context) User { return currentUser(ctx) }
+
+// CSRFToken returns the session-bound token attached by the access middleware.
+func CSRFToken(ctx context.Context) string {
+	token, _ := ctx.Value(csrfContextKey{}).(string)
+	return token
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
