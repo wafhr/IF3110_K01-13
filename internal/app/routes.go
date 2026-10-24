@@ -3,18 +3,22 @@ package app
 import "net/http"
 
 func Routes() http.Handler {
-	return routes(nil, nil)
+	return routes(nil, nil, nil)
 }
 
 func RoutesWithAccess(accessHandler http.Handler) http.Handler {
-	return routes(accessHandler, nil)
+	return routes(accessHandler, nil, nil)
 }
 
 func RoutesWithDatabaseManagement(accessHandler, databaseHandler http.Handler) http.Handler {
-	return routes(accessHandler, databaseHandler)
+	return routes(accessHandler, databaseHandler, nil)
 }
 
-func routes(accessHandler, databaseHandler http.Handler) http.Handler {
+func RoutesWithDatabaseViewer(accessHandler, databaseHandler, viewerHandler http.Handler) http.Handler {
+	return routes(accessHandler, databaseHandler, viewerHandler)
+}
+
+func routes(accessHandler, databaseHandler, viewerHandler http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -29,7 +33,15 @@ func routes(accessHandler, databaseHandler http.Handler) http.Handler {
 	if accessHandler != nil {
 		mux.Handle("/auth/", accessHandler)
 		mux.Handle("/admin/", accessHandler)
-		mux.Handle("/databases/", accessHandler)
+		if viewerHandler == nil {
+			mux.Handle("/databases/", accessHandler)
+		} else {
+			mux.Handle("GET /databases/{databaseID}/access", accessHandler)
+		}
+	}
+	if viewerHandler != nil {
+		mux.Handle("/databases", viewerHandler)
+		mux.Handle("/databases/", viewerHandler)
 	}
 	return mux
 }

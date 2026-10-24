@@ -53,11 +53,15 @@ func NewHandler(registry Registry, connections Connections, auth *access.HTTPHan
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	serveAPI(w, r, h.handler)
+}
+
+func serveAPI(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	h.handler.ServeHTTP(w, r.WithContext(ctx))
+	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
 type connectionInput struct {
@@ -237,6 +241,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "invalid database configuration")
 	case errors.Is(err, database.ErrNotFound):
 		writeError(w, http.StatusNotFound, "database not found")
+	case errors.Is(err, database.ErrObjectNotFound):
+		writeError(w, http.StatusNotFound, "schema or table not found")
 	case errors.Is(err, database.ErrConflict):
 		writeError(w, http.StatusConflict, "database name already exists")
 	case errors.Is(err, context.DeadlineExceeded):

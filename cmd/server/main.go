@@ -64,9 +64,10 @@ func run() error {
 	defer stop()
 	accessHandler := access.NewHTTPHandler(accessService, cfg.SecureCookie)
 	databaseHandler := databasehttp.NewHandler(databaseRegistry, targetConnections, accessHandler)
+	viewerHandler := databasehttp.NewViewerHandler(databaseRegistry, postgres.NewInspector(targetConnections), accessHandler)
 	server := &http.Server{
 		Addr:              cfg.Address(),
-		Handler:           app.RoutesWithDatabaseManagement(accessHandler, databaseHandler),
+		Handler:           app.RoutesWithDatabaseViewer(accessHandler, databaseHandler, viewerHandler),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

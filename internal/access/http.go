@@ -73,6 +73,17 @@ func (h *HTTPHandler) RequirePlatformAdmin(next http.Handler) http.Handler {
 	return h.protected(true, true, next)
 }
 
+// RequireAuthenticated makes the session principal available to user-facing APIs.
+func (h *HTTPHandler) RequireAuthenticated(next http.Handler) http.Handler {
+	return h.protected(false, true, next)
+}
+
+// UserFromContext returns only the principal set by the authentication middleware.
+func UserFromContext(ctx context.Context) (User, bool) {
+	user, ok := ctx.Value(principalKey{}).(User)
+	return user, ok
+}
+
 func (h *HTTPHandler) protected(admin, csrfRequired bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie(sessionCookieName)
@@ -393,7 +404,7 @@ func validRequestOrigin(r *http.Request) bool {
 }
 
 func currentUser(ctx context.Context) User {
-	user, _ := ctx.Value(principalKey{}).(User)
+	user, _ := UserFromContext(ctx)
 	return user
 }
 
