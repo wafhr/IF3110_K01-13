@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"net/url"
 	"strings"
 	"time"
 
@@ -51,11 +52,22 @@ func (s *Service) Initialize(ctx context.Context) error {
 
 func (s *Service) RegisterDatabase(ctx context.Context, name, connectionURL string) (string, error) {
 	name = strings.TrimSpace(name)
-	if name == "" || len(name) > 120 || !strings.HasPrefix(connectionURL, "postgres://") && !strings.HasPrefix(connectionURL, "postgresql://") {
+	parsed, parseErr := url.Parse(connectionURL)
+	if name == "" || len(name) > 120 || parseErr != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") || parsed.Host == "" {
 		return "", errors.New("name and PostgreSQL connection URL are required")
 	}
+	target, err := sql.Open("pgx", connectionURL)
+	if err != nil {
+		return "", errors.New("invalid PostgreSQL connection URL")
+	}
+	defer target.Close()
+	pingCtx, cancelPing := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelPing()
+	if err := target.PingContext(pingCtx); err != nil {
+		return "", errors.New("could not connect to the PostgreSQL database")
+	}
 	var id string
-	err := s.platform.QueryRowContext(ctx, `INSERT INTO managed_databases(name, connection_url) VALUES ($1,$2) RETURNING id::text`, name, connectionURL).Scan(&id)
+	err = s.platform.QueryRowContext(ctx, `INSERT INTO managed_databases(name, connection_url) VALUES ($1,$2) RETURNING id::text`, name, connectionURL).Scan(&id)
 	return id, err
 }
 
@@ -218,6 +230,8 @@ func ensureHistory(ctx context.Context, db interface {
 }
 
 func (s *Service) markFailed(ctx context.Context, conn *sql.Conn, version int64) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	_, _ = conn.ExecContext(ctx, `UPDATE platform_migrations SET status='failed',finished_at=now() WHERE version=$1 AND status='running'`, version)
 }
 func databaseLock(id string) uint32 { h := fnv.New32a(); _, _ = h.Write([]byte(id)); return h.Sum32() }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"html/template"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -66,8 +67,7 @@ func (h *HTTPHandler) execute(w http.ResponseWriter, r *http.Request) {
 		SQL  string `json:"sql"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON request"})
+	if !decodeRequestJSON(w, r, &input) {
 		return
 	}
 	user := access.CurrentUser(r.Context())
@@ -88,8 +88,7 @@ func (h *HTTPHandler) registerDatabase(w http.ResponseWriter, r *http.Request) {
 		ConnectionURL string `json:"connection_url"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON request"})
+	if !decodeRequestJSON(w, r, &input) {
 		return
 	}
 	id, err := h.service.RegisterDatabase(r.Context(), input.Name, input.ConnectionURL)
@@ -98,6 +97,20 @@ func (h *HTTPHandler) registerDatabase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusCreated, map[string]string{"database_id": id})
+}
+
+func decodeRequestJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON request"})
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "request must contain one JSON value"})
+		return false
+	}
+	return true
 }
 
 var editorTemplate = template.Must(template.New("migration").Parse(`<!doctype html><html><head><meta charset="utf-8"><title>Database migrations</title><style>body{font:15px system-ui;max-width:1000px;margin:2rem auto;padding:0 1rem;color:#18212b}textarea{width:100%;height:18rem;font:14px monospace}input{padding:.5rem;width:60%}button{padding:.6rem 1rem}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:.5rem;text-align:left}pre{white-space:pre-wrap}</style></head><body><h1>Migrations</h1>{{if .Error}}<p role="alert">{{.Error}}</p>{{end}}<h2>History</h2><table><tr><th>Version</th><th>Name</th><th>Status</th><th>Executed by</th><th>Started</th></tr>{{range .Rows}}<tr><td><a href="/databases/{{$.DatabaseID}}/migrations/{{.Version}}">{{.Version}}</a></td><td>{{.Name}}</td><td>{{.Status}}</td><td>{{.ExecutedBy}}</td><td>{{.StartedAt}}</td></tr>{{end}}</table>{{if .CanEdit}}<h2>New migration</h2><p>Submit JSON to POST this endpoint with the session CSRF token in X-CSRF-Token.</p><label>Name <input id="name" maxlength="160"></label><textarea id="sql" placeholder="-- Write migration SQL"></textarea><button id="run">Run migration</button><pre id="result"></pre><script>document.getElementById('run').onclick=async()=>{const c=await fetch('/auth/csrf');const t=(await c.json()).csrf_token;const r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':t},body:JSON.stringify({name:document.getElementById('name').value,sql:document.getElementById('sql').value})});document.getElementById('result').textContent=await r.text();if(r.ok)location.reload()};</script>{{end}}</body></html>`))
