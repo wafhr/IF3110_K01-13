@@ -3,37 +3,40 @@ package app
 import "net/http"
 
 func Routes() http.Handler {
-	return routes(nil, nil)
-	return routes(nil, nil, nil, nil)
+	return routes(nil, nil, nil, nil, nil)
 }
 
 func RoutesWithAccess(accessHandler http.Handler) http.Handler {
-	return routes(accessHandler, nil)
+	return routes(accessHandler, nil, nil, nil, nil)
 }
 
 func RoutesWithFrontend(accessHandler, frontendHandler http.Handler) http.Handler {
-	return routes(accessHandler, frontendHandler)
-	return routes(accessHandler, nil, nil, nil)
+	return routes(accessHandler, nil, nil, nil, frontendHandler)
 }
 
-func routes(accessHandler, frontendHandler http.Handler) http.Handler {
 func RoutesWithDatabaseManagement(accessHandler, databaseHandler http.Handler) http.Handler {
-	return routes(accessHandler, databaseHandler, nil, nil)
+	return routes(accessHandler, databaseHandler, nil, nil, nil)
 }
 
 func RoutesWithDatabaseViewer(accessHandler, databaseHandler, viewerHandler http.Handler) http.Handler {
-	return routes(accessHandler, databaseHandler, viewerHandler, nil)
+	return routes(accessHandler, databaseHandler, viewerHandler, nil, nil)
 }
 
 func RoutesWithMigration(accessHandler, migrationHandler http.Handler) http.Handler {
-	return routes(accessHandler, nil, nil, migrationHandler)
+	return routes(accessHandler, nil, nil, migrationHandler, nil)
 }
 
 func RoutesWithModules(accessHandler, databaseHandler, viewerHandler, migrationHandler http.Handler) http.Handler {
-	return routes(accessHandler, databaseHandler, viewerHandler, migrationHandler)
+	return routes(accessHandler, databaseHandler, viewerHandler, migrationHandler, nil)
 }
 
-func routes(accessHandler, databaseHandler, viewerHandler, migrationHandler http.Handler) http.Handler {
+// RoutesWithModulesAndFrontend wires every API module and the browser UI.
+// The frontend is mounted last; Go's ServeMux selects more-specific API routes.
+func RoutesWithModulesAndFrontend(accessHandler, databaseHandler, viewerHandler, migrationHandler, frontendHandler http.Handler) http.Handler {
+	return routes(accessHandler, databaseHandler, viewerHandler, migrationHandler, frontendHandler)
+}
+
+func routes(accessHandler, databaseHandler, viewerHandler, migrationHandler, frontendHandler http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

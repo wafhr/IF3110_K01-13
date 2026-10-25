@@ -41,7 +41,7 @@ func TestModuleRouting(t *testing.T) {
 			_, _ = w.Write([]byte(name))
 		})
 	}
-	handler := RoutesWithModules(module("access"), module("database"), module("viewer"), module("migration"))
+	handler := app.RoutesWithModules(module("access"), module("database"), module("viewer"), module("migration"))
 	for _, tc := range []struct{ method, path, module string }{
 		{"POST", "/auth/login", "access"},
 		{"GET", "/admin/groups", "access"},
@@ -68,10 +68,36 @@ func TestModuleRouting(t *testing.T) {
 	}
 
 	// Existing migration-only callers retain their registration route.
-	legacy := RoutesWithMigration(module("access"), module("migration"))
+	legacy := app.RoutesWithMigration(module("access"), module("migration"))
 	response := httptest.NewRecorder()
 	legacy.ServeHTTP(response, httptest.NewRequest("POST", "/admin/databases", nil))
 	if response.Body.String() != "migration" {
 		t.Fatalf("migration-only registration routed to %q", response.Body.String())
+	}
+}
+
+func TestCombinedModuleAndFrontendRouting(t *testing.T) {
+	module := func(name string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(name))
+		})
+	}
+	handler := app.RoutesWithModulesAndFrontend(
+		module("access"), module("database"), module("viewer"), module("migration"), module("frontend"),
+	)
+	for _, tc := range []struct{ path, want string }{
+		{"/login", "frontend"},
+		{"/admin/databases", "database"},
+		{"/databases/id/access", "access"},
+		{"/databases/id/schemas", "viewer"},
+		{"/databases/id/migrations", "migration"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			if response.Code != http.StatusOK || response.Body.String() != tc.want {
+				t.Fatalf("status/body = %d/%q, want 200/%q", response.Code, response.Body.String(), tc.want)
+			}
+		})
 	}
 }

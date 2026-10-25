@@ -287,15 +287,6 @@ func requestCSRF(r *http.Request) string {
 	return r.PostForm.Get("csrf_token")
 }
 
-// CurrentUser returns the authenticated user attached by the page middleware.
-func CurrentUser(ctx context.Context) User { return currentUser(ctx) }
-
-// CSRFToken returns the request token attached by the page middleware.
-func CSRFToken(ctx context.Context) string {
-	token, _ := ctx.Value(csrfContextKey{}).(string)
-	return token
-}
-
 func (h *HTTPHandler) listUsers(w http.ResponseWriter, r *http.Request) {
 	users, err := h.service.ListUsers(r.Context())
 	if err != nil {

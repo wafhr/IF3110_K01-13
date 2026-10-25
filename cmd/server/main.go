@@ -21,6 +21,7 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/platformdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb/postgres"
+	"github.com/wafhr/IF3110_K01-13/web"
 )
 
 func main() {
@@ -80,7 +81,7 @@ func run() error {
 	migrationHandler := migration.NewHTTPHandler(migrationService, accessHandler)
 	server := &http.Server{
 		Addr:              cfg.Address(),
-		Handler:           app.RoutesWithModules(accessHandler, databaseHandler, viewerHandler, migrationHandler),
+		Handler:           app.RoutesWithModulesAndFrontend(accessHandler, databaseHandler, viewerHandler, migrationHandler, web.NewHandler(accessService, accessHandler)),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

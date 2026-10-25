@@ -47,7 +47,7 @@ func TestLoadDatabaseEncryptionKey(t *testing.T) {
 	t.Setenv("SHUTDOWN_TIMEOUT", "10s")
 	t.Setenv("COOKIE_SECURE", "false")
 	t.Setenv("DATABASE_ENCRYPTION_KEY", "configured-registry-key")
-	cfg, err := Load()
+	cfg, err := config.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
