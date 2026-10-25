@@ -18,12 +18,23 @@ import (
 type HTTPHandler struct {
 	service *Service
 	routes  *http.ServeMux
+	schemas SchemaReader
 }
 
-func NewHTTPHandler(service *Service, auth *access.HTTPHandler) *HTTPHandler {
+type SchemaReader interface {
+	Schemas(context.Context, string) ([]database.Schema, error)
+	Tables(context.Context, string, string) ([]database.Table, error)
+	Table(context.Context, string, string, string) (database.TableDetails, error)
+}
+
+func NewHTTPHandler(service *Service, auth *access.HTTPHandler, readers ...SchemaReader) *HTTPHandler {
 	h := &HTTPHandler{service: service, routes: http.NewServeMux()}
+	if len(readers) > 0 {
+		h.schemas = readers[0]
+	}
 	h.routes.Handle("GET /databases/{databaseID}/migrations", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.list)))
 	h.routes.Handle("POST /databases/{databaseID}/migrations", auth.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(h.execute)))
+	h.routes.Handle("POST /databases/{databaseID}/migrations/schema-diff", auth.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(h.schemaDiff)))
 	h.routes.Handle("POST /databases/{databaseID}/migrations/explain", auth.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(h.explain)))
 	h.routes.Handle("GET /databases/{databaseID}/migrations/{version}", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.detail)))
 	return h
@@ -71,6 +82,73 @@ func (h *HTTPHandler) execute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusCreated, map[string]any{"migration": row})
+}
+
+func (h *HTTPHandler) schemaDiff(w http.ResponseWriter, r *http.Request) {
+	if h.schemas == nil {
+		jsonResponse(w, http.StatusNotImplemented, map[string]string{"error": "schema diff is unavailable"})
+		return
+	}
+	var input struct {
+		Desired json.RawMessage `json:"desired_schema"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if !decodeRequestJSON(w, r, &input) {
+		return
+	}
+	desired, err := parseDesiredSchema(input.Desired)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid desired schema JSON"})
+		return
+	}
+	databaseID := r.PathValue("databaseID")
+	probe, dbms, err := h.service.target(r.Context(), databaseID)
+	if err != nil {
+		migrationError(w, err)
+		return
+	}
+	_ = probe.Close()
+	schemas := map[string]bool{}
+	for _, table := range desired.Tables {
+		schemas[table.Schema] = true
+	}
+	current := []database.TableDetails{}
+	for schema := range schemas {
+		tables, err := h.schemas.Tables(r.Context(), databaseID, schema)
+		if err != nil {
+			writeViewerSchemaError(w, err)
+			return
+		}
+		for _, table := range tables {
+			if table.Type != "table" && table.Type != "partitioned_table" {
+				continue
+			}
+			detail, err := h.schemas.Table(r.Context(), databaseID, schema, table.Name)
+			if err != nil {
+				writeViewerSchemaError(w, err)
+				return
+			}
+			current = append(current, detail)
+		}
+	}
+	diff, err := BuildSchemaDiff(dbms, current, desired)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid desired schema"})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"schema_diff": diff})
+}
+
+func writeViewerSchemaError(w http.ResponseWriter, err error) {
+	if errors.Is(err, targetdb.ErrPermissionDenied) {
+		jsonResponse(w, http.StatusForbidden, map[string]string{"error": "target database access denied"})
+		return
+	}
+	if errors.Is(err, database.ErrInvalidInput) {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid desired schema"})
+		return
+	}
+	migrationError(w, err)
 }
 
 func (h *HTTPHandler) explain(w http.ResponseWriter, r *http.Request) {
