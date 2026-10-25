@@ -1,0 +1,14 @@
+{{define "content"}}
+<main class="container">
+  <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/">Workspace</a><span aria-hidden="true">/</span><span>Databases</span></nav>
+  <div class="page-heading"><div><p class="eyebrow">PLATFORM ADMINISTRATION</p><h1>Target databases</h1><p class="muted">Register and maintain PostgreSQL or MySQL connections. Passwords are never displayed.</p></div></div>
+  <p id="database-notice" class="notice" hidden role="status"></p>
+  <section class="panel form-panel"><div class="panel-heading"><div><h2 id="database-form-title">Register database</h2><p class="muted">Use Test connection before saving new settings.</p></div></div>
+    <form id="database-form" class="form-row">
+      <input id="database-id" type="hidden"><label>Name<input id="name" maxlength="100" required></label><label>DBMS<select id="dbms"><option value="postgres">PostgreSQL</option><option value="mysql">MySQL</option></select></label><label>Host<input id="host" maxlength="253" required></label><label>Port<input id="port" type="number" min="1" max="65535" value="5432" required></label><label>Database<input id="database-name" maxlength="64" required></label><label>Username<input id="username" maxlength="63" required></label><label>Password<input id="password" type="password" required autocomplete="new-password"></label><label>SSL/TLS mode<select id="ssl-mode"><option value="require">Require</option><option value="disable">Disable</option><option value="allow">Allow</option><option value="prefer">Prefer</option><option value="verify-ca">Verify CA</option><option value="verify-full">Verify full</option></select></label><button class="button" type="button" id="test-connection">Test connection</button><button class="button primary" type="submit">Save database</button><button class="button ghost" type="button" id="cancel-edit" hidden>Cancel</button>
+    </form>
+  </section>
+  <section class="panel table-panel"><div class="panel-heading"><div><h2>Registered databases</h2><p class="muted">Deleting a registration does not delete the real database.</p></div></div><div class="table-wrap"><table><thead><tr><th>Name</th><th>DBMS</th><th>Connection</th><th>SSL/TLS</th><th>Actions</th></tr></thead><tbody id="database-list"><tr><td colspan="5" class="empty-cell">Loading databases…</td></tr></tbody></table></div></section>
+</main>
+<script src="/assets/js/platform.js" defer></script><script src="/assets/js/database-admin.js" defer></script>
+{{end}}

@@ -1,0 +1,28 @@
+services:
+  postgres-test:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: if3110_test_admin
+      POSTGRES_PASSWORD: if3110-integration-password
+      POSTGRES_DB: postgres
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U if3110_test_admin -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+  mysql-test:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: if3110-mysql-root-password
+      MYSQL_DATABASE: if3110_mysql_test
+      MYSQL_USER: if3110_test_admin
+      MYSQL_PASSWORD: if3110-mysql-test-password
+    ports:
+      - "127.0.0.1:53306:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

@@ -1,0 +1,12 @@
+{{define "content"}}
+<main class="container" id="database-workspace" data-database-id="{{.DatabaseID}}">
+  <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/">Workspace</a><span aria-hidden="true">/</span><span>Database</span></nav>
+  <div class="page-heading"><div><p class="eyebrow">DATABASE WORKSPACE</p><h1 id="database-title">Loading database…</h1><p id="database-permission" class="muted"></p></div><a class="button" href="/workspace/databases/{{.DatabaseID}}/migrations">Migrations</a></div>
+  <p id="viewer-notice" class="notice" hidden role="status"></p>
+  <section class="panel"><div class="panel-heading"><div><p class="eyebrow">SCHEMA EXPLORER</p><h2>Browse database</h2></div></div>
+    <div class="form-row"><label>Schema<select id="schema-select"><option value="">Loading schemas…</option></select></label><label>Table<select id="table-select" disabled><option value="">Select a schema first</option></select></label></div>
+    <div id="table-details" class="empty-state"><h3>Select a table</h3><p>Choose a schema and table to inspect its structure and rows.</p></div>
+  </section>
+</main>
+<script src="/assets/js/platform.js" defer></script><script src="/assets/js/database-viewer.js" defer></script>
+{{end}}

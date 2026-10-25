@@ -1,0 +1,29 @@
+{{define "content"}}
+<main class="container" id="migration-workspace" data-database-id="{{.DatabaseID}}" data-version="{{.MigrationVersion}}">
+  <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/">Workspace</a><span aria-hidden="true">/</span><a href="/workspace/databases/{{.DatabaseID}}">Database</a><span aria-hidden="true">/</span><span>Migrations</span></nav>
+  <div class="page-heading"><div><p class="eyebrow">DATABASE WORKSPACE</p><h1 id="migration-database-title">Migrations</h1><p id="migration-permission" class="muted">Loading permissions…</p></div></div>
+  <p id="migration-notice" class="notice" hidden role="status"></p>
+  <section class="panel"><div class="panel-heading"><div><p class="eyebrow">HISTORY</p><h2>Migration runs</h2></div></div><div class="table-wrap"><table><thead><tr><th>Version</th><th>Name</th><th>Status</th><th>Started</th><th>Finished</th></tr></thead><tbody id="migration-list"><tr><td colspan="5" class="empty-cell">Loading migrations…</td></tr></tbody></table></div></section>
+  <section id="migration-detail" class="panel" hidden></section>
+  <section id="migration-editor" class="panel" hidden>
+    <div class="panel-heading"><div><p class="eyebrow">VIEW + EDIT ACCESS</p><h2>Run a migration</h2><p class="muted">SQL runs transactionally. Failed statements are rolled back and retained in history.</p></div></div>
+    <form id="migration-form" class="stack">
+      <label for="migration-name">Name</label><input id="migration-name" maxlength="160" required>
+      <label for="migration-sql">SQL</label><textarea id="migration-sql" rows="12" required maxlength="1048576"></textarea>
+      <p class="muted">Preview one supported SQL statement before running a migration. Ordinary CREATE TABLE and ALTER TABLE statements have no execution plan. A name is only required when running a migration.</p>
+      <p class="notice" id="query-plan-warning" hidden>EXPLAIN ANALYZE executes SQL to measure actual performance. Transactional changes are rolled back, but sequence or auto-increment values, implicit DDL commits, and external effects from functions or triggers may persist.</p>
+      <div class="form-row"><label>Preview mode<select id="query-plan-mode"><option value="explain">EXPLAIN · estimates only</option><option value="explain_analyze">EXPLAIN ANALYZE · execute and roll back</option></select></label><button id="preview-query-plan" class="button" type="button">Preview execution plan</button><button class="button primary" type="submit">Run migration</button></div>
+    </form>
+    <details class="schema-diff-tool">
+      <summary>Compare with desired schema and generate SQL</summary>
+      <p class="muted">Describe the tables and columns you want. The comparison checks schemas you name below. Generated SQL only creates missing tables and adds missing columns; column changes and omitted objects are reported for manual review.</p>
+      <pre class="schema-example">{"tables":[{"schema":"public","name":"products","columns":[{"name":"id","type":"bigint","nullable":false},{"name":"title","type":"varchar(200)","nullable":false}]}]}</pre>
+      <label for="desired-schema">Desired schema JSON</label><textarea id="desired-schema" rows="10" spellcheck="false"></textarea>
+      <button id="compare-schema" class="button" type="button">Compare schemas</button>
+      <div id="schema-diff-results" hidden aria-live="polite"></div>
+    </details>
+  </section>
+  <section id="query-plan" class="panel" hidden aria-live="polite"></section>
+</main>
+<script src="/assets/js/platform.js" defer></script><script src="/assets/js/migrations.js" defer></script>
+{{end}}
