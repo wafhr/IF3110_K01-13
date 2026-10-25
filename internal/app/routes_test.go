@@ -32,3 +32,44 @@ func TestRoutes(t *testing.T) {
 		})
 	}
 }
+
+func TestModuleRouting(t *testing.T) {
+	module := func(name string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(name))
+		})
+	}
+	handler := RoutesWithModules(module("access"), module("database"), module("viewer"), module("migration"))
+	for _, tc := range []struct{ method, path, module string }{
+		{"POST", "/auth/login", "access"},
+		{"GET", "/admin/groups", "access"},
+		{"GET", "/admin/databases", "database"},
+		{"POST", "/admin/databases", "database"},
+		{"PUT", "/admin/databases/id", "database"},
+		{"POST", "/admin/databases/id/test-connection", "database"},
+		{"GET", "/databases", "viewer"},
+		{"GET", "/databases/id/access", "access"},
+		{"GET", "/databases/id/schemas", "viewer"},
+		{"GET", "/databases/id/schemas/migrations/tables", "viewer"},
+		{"GET", "/databases/id/schemas/public/tables/migrations/data", "viewer"},
+		{"GET", "/databases/id/migrations", "migration"},
+		{"POST", "/databases/id/migrations", "migration"},
+		{"GET", "/databases/id/migrations/1", "migration"},
+	} {
+		t.Run(tc.method+tc.path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(tc.method, tc.path, nil))
+			if response.Code != http.StatusOK || response.Body.String() != tc.module {
+				t.Fatalf("status/body = %d/%q, want 200/%q", response.Code, response.Body.String(), tc.module)
+			}
+		})
+	}
+
+	// Existing migration-only callers retain their registration route.
+	legacy := RoutesWithMigration(module("access"), module("migration"))
+	response := httptest.NewRecorder()
+	legacy.ServeHTTP(response, httptest.NewRequest("POST", "/admin/databases", nil))
+	if response.Body.String() != "migration" {
+		t.Fatalf("migration-only registration routed to %q", response.Body.String())
+	}
+}

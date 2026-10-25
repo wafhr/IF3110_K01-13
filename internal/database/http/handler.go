@@ -48,7 +48,7 @@ func NewHandler(registry Registry, connections Connections, auth *access.HTTPHan
 	mux.HandleFunc("PUT /admin/databases/{databaseID}", h.update)
 	mux.HandleFunc("DELETE /admin/databases/{databaseID}", h.delete)
 	mux.HandleFunc("POST /admin/databases/{databaseID}/test-connection", h.checkConnection)
-	h.handler = auth.RequirePlatformAdmin(mux)
+	h.handler = auth.RequirePlatformAdmin(true, mux)
 	return h
 }
 

@@ -58,19 +58,23 @@ func (h *HTTPHandler) routes() {
 // The handler route must include a {databaseID} path value.
 func (h *HTTPHandler) RequireDatabaseAccess(minimum Permission, next http.Handler) http.Handler {
 	return h.protected(false, true, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if minimum != ViewOnly && minimum != ViewEdit {
+			writeServiceError(w, ErrInvalidInput)
+			return
+		}
 		user := currentUser(r.Context())
-		if err := h.service.AuthorizeDatabase(r.Context(), user.ID, r.PathValue("databaseID"), minimum); err != nil {
+		permission, err := h.service.EffectivePermission(r.Context(), user.ID, r.PathValue("databaseID"))
+		if err != nil {
 			writeServiceError(w, err)
 			return
 		}
-		next.ServeHTTP(w, r)
+		if permission == "" || (minimum == ViewEdit && permission != ViewEdit) {
+			writeServiceError(w, ErrForbidden)
+			return
+		}
+		ctx := context.WithValue(r.Context(), databasePermissionKey{}, permission)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	}))
-}
-
-// RequirePlatformAdmin protects management handlers with the same session,
-// admin, origin, and state-changing request CSRF checks as the access API.
-func (h *HTTPHandler) RequirePlatformAdmin(next http.Handler) http.Handler {
-	return h.protected(true, true, next)
 }
 
 // RequireAuthenticated makes the session principal available to user-facing APIs.
@@ -82,6 +86,19 @@ func (h *HTTPHandler) RequireAuthenticated(next http.Handler) http.Handler {
 func UserFromContext(ctx context.Context) (User, bool) {
 	user, ok := ctx.Value(principalKey{}).(User)
 	return user, ok
+}
+
+type databasePermissionKey struct{}
+
+// DatabasePermissionFromContext reports the permission verified for the current database request.
+func DatabasePermissionFromContext(ctx context.Context) Permission {
+	permission, _ := ctx.Value(databasePermissionKey{}).(Permission)
+	return permission
+}
+
+// RequirePlatformAdmin protects platform configuration endpoints.
+func (h *HTTPHandler) RequirePlatformAdmin(csrfRequired bool, next http.Handler) http.Handler {
+	return h.protected(true, csrfRequired, next)
 }
 
 func (h *HTTPHandler) protected(admin, csrfRequired bool, next http.Handler) http.Handler {
@@ -406,6 +423,15 @@ func validRequestOrigin(r *http.Request) bool {
 func currentUser(ctx context.Context) User {
 	user, _ := UserFromContext(ctx)
 	return user
+}
+
+// CurrentUser returns the authenticated principal attached by the access middleware.
+func CurrentUser(ctx context.Context) User { return currentUser(ctx) }
+
+// CSRFToken returns the session-bound token attached by the access middleware.
+func CSRFToken(ctx context.Context) string {
+	token, _ := ctx.Value(csrfContextKey{}).(string)
+	return token
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {

@@ -12,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/wafhr/IF3110_K01-13/internal/access"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
+	"github.com/wafhr/IF3110_K01-13/internal/migration"
 )
 
 func TestDatabaseManagementIntegration(t *testing.T) {
@@ -256,6 +258,48 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 			t.Fatalf("query cancellation = %v", err)
 		}
 		readPage(t, path+"/data")
+	})
+
+	t.Run("migration uses registered encrypted credentials alongside viewer", func(t *testing.T) {
+		// The migration runner needs DDL rights in addition to the viewer's SELECT.
+		execFixture(t, f.target, `GRANT CREATE ON SCHEMA public TO `+pgx.Identifier{f.createdRole}.Sanitize())
+		migrationPath := "/databases/" + id + "/migrations"
+		admin.do(t, "GET", migrationPath, nil, 403)
+		outsider.do(t, "GET", migrationPath, nil, 403)
+		f.anonymous().do(t, "GET", migrationPath, nil, 401)
+		viewer.do(t, "GET", migrationPath, nil, 200)
+		input := map[string]string{"name": "create integration table", "sql": "CREATE TABLE public.integration_created (id INTEGER PRIMARY KEY)"}
+		viewer.do(t, "POST", migrationPath, input, 403)
+		member.do(t, "POST", migrationPath, input, 403, func(r *http.Request) { r.Header.Del("X-CSRF-Token") })
+		var created struct {
+			Migration migration.Record `json:"migration"`
+		}
+		decode(t, member.do(t, "POST", migrationPath, input, 201), &created)
+		if created.Migration.Status != migration.Success || created.Migration.Version != 1 || created.Migration.ExecutedBy != user.User.ID {
+			t.Fatalf("unexpected migration result: %+v", created.Migration)
+		}
+		var detail struct {
+			Migration migration.Record `json:"migration"`
+		}
+		decode(t, viewer.do(t, "GET", migrationPath+"/1", nil, 200), &detail)
+		if detail.Migration.SQL != input["sql"] {
+			t.Fatal("migration detail lost SQL text")
+		}
+		input = map[string]string{"name": "rollback integration insert", "sql": "INSERT INTO public.integration_created VALUES (1); SELECT * FROM public.integration_missing;"}
+		decode(t, member.do(t, "POST", migrationPath, input, 422), &created)
+		if created.Migration.Status != migration.Failed || created.Migration.Version != 2 {
+			t.Fatalf("unexpected failed migration: %+v", created.Migration)
+		}
+		assertCount(t, f.target, `SELECT count(*) FROM public.integration_created`, 0)
+		var history struct {
+			Migrations []migration.Record `json:"migrations"`
+		}
+		decode(t, viewer.do(t, "GET", migrationPath, nil, 200), &history)
+		if len(history.Migrations) != 2 || history.Migrations[0].Status != migration.Failed || history.Migrations[1].Status != migration.Success {
+			t.Fatalf("unexpected migration history: %+v", history.Migrations)
+		}
+		readPage(t, tableURL(id, "public", "integration_created")+"/data")
+		readPage(t, path+"/data") // Migration pool cleanup must not close the viewer pool.
 	})
 
 	t.Run("delete rolls back then revokes grants and sessions", func(t *testing.T) {

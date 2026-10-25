@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/config"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
 	databasehttp "github.com/wafhr/IF3110_K01-13/internal/database/http"
+	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/platformdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb/postgres"
@@ -60,14 +62,25 @@ func run() error {
 	if err := accessService.Initialize(startupCtx, cfg.BootstrapAdminUsername, cfg.BootstrapAdminPassword); err != nil {
 		return err
 	}
+	migrationService := migration.NewServiceWithTargetOpener(db, func(ctx context.Context, id string) (*sql.DB, error) {
+		connection, err := databaseRegistry.GetConnectionConfig(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return targetConnector.Open(ctx, connection)
+	})
+	if err := migrationService.Initialize(startupCtx); err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	accessHandler := access.NewHTTPHandler(accessService, cfg.SecureCookie)
 	databaseHandler := databasehttp.NewHandler(databaseRegistry, targetConnections, accessHandler)
 	viewerHandler := databasehttp.NewViewerHandler(databaseRegistry, postgres.NewInspector(targetConnections), accessHandler)
+	migrationHandler := migration.NewHTTPHandler(migrationService, accessHandler)
 	server := &http.Server{
 		Addr:              cfg.Address(),
-		Handler:           app.RoutesWithDatabaseViewer(accessHandler, databaseHandler, viewerHandler),
+		Handler:           app.RoutesWithModules(accessHandler, databaseHandler, viewerHandler, migrationHandler),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

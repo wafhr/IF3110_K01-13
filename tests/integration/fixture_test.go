@@ -27,6 +27,7 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/app"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
 	databasehttp "github.com/wafhr/IF3110_K01-13/internal/database/http"
+	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb/postgres"
 )
@@ -109,10 +110,21 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	f.inspector = postgres.NewInspector(f.pools)
+	migrations := migration.NewServiceWithTargetOpener(f.platform, func(ctx context.Context, id string) (*sql.DB, error) {
+		connection, err := f.registry.GetConnectionConfig(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return connector.Open(ctx, connection)
+	})
+	if err := migrations.Initialize(ctx); err != nil {
+		t.Fatalf("initialize migrations: %v", err)
+	}
 	auth := access.NewHTTPHandler(authService, false)
-	f.server = httptest.NewServer(app.RoutesWithDatabaseViewer(auth,
+	f.server = httptest.NewServer(app.RoutesWithModules(auth,
 		databasehttp.NewHandler(f.registry, f.pools, auth),
-		databasehttp.NewViewerHandler(f.registry, f.inspector, auth)))
+		databasehttp.NewViewerHandler(f.registry, f.inspector, auth),
+		migration.NewHTTPHandler(migrations, auth)))
 	f.settings = database.ConnectionConfig{Host: config.Host, Port: int(config.Port), DatabaseName: targetConfig.Database,
 		Username: role, Password: targetPassword, SSLMode: "disable"}
 	return f
