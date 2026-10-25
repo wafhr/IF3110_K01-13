@@ -11,6 +11,8 @@ tercatat.
 - Koneksi PostgreSQL terenkripsi di platform registry.
 - Viewer untuk schema, table, column, constraint, index, dan data.
 - Editor SQL dan riwayat migration per database target.
+- Bonus preview execution plan PostgreSQL melalui `EXPLAIN` dan
+  `EXPLAIN ANALYZE` di editor migration.
 
 Platform Admin mengelola platform; peran ini tidak memberi akses otomatis ke
 database target. Hak `view_only` dan `view_edit` diberikan kepada group.
@@ -108,5 +110,8 @@ paket tersebut. Kedua `schema.sql` memiliki tabel dan siklus inisialisasi
 berbeda, jadi bukan salinan satu sama lain. Tabel `platform_migrations` berada
 di setiap database target dan dibuat oleh modul migration saat diperlukan.
 
-Milestone ini mendukung PostgreSQL. Bonus DBMS lain, schema diff/generation,
-dan analisis execution plan belum termasuk implementasi.
+Milestone ini mendukung PostgreSQL. Bonus execution plan tersedia melalui
+`EXPLAIN` dan `EXPLAIN ANALYZE`; bonus DBMS lain dan schema diff/generation belum
+termasuk implementasi. Mode ANALYZE benar-benar menjalankan SQL dan melakukan
+rollback perubahan transaksional; sequence dan efek eksternal dapat tetap berubah.
+Lihat [panduan preview plan](docs/migrations.md#query-plan-preview-explain).
