@@ -6,30 +6,6 @@ func Routes() http.Handler {
 	return routes(nil, nil, nil, nil, nil)
 }
 
-func RoutesWithAccess(accessHandler http.Handler) http.Handler {
-	return routes(accessHandler, nil, nil, nil, nil)
-}
-
-func RoutesWithFrontend(accessHandler, frontendHandler http.Handler) http.Handler {
-	return routes(accessHandler, nil, nil, nil, frontendHandler)
-}
-
-func RoutesWithDatabaseManagement(accessHandler, databaseHandler http.Handler) http.Handler {
-	return routes(accessHandler, databaseHandler, nil, nil, nil)
-}
-
-func RoutesWithDatabaseViewer(accessHandler, databaseHandler, viewerHandler http.Handler) http.Handler {
-	return routes(accessHandler, databaseHandler, viewerHandler, nil, nil)
-}
-
-func RoutesWithMigration(accessHandler, migrationHandler http.Handler) http.Handler {
-	return routes(accessHandler, nil, nil, migrationHandler, nil)
-}
-
-func RoutesWithModules(accessHandler, databaseHandler, viewerHandler, migrationHandler http.Handler) http.Handler {
-	return routes(accessHandler, databaseHandler, viewerHandler, migrationHandler, nil)
-}
-
 // RoutesWithModulesAndFrontend wires every API module and the browser UI.
 // The frontend is mounted last; Go's ServeMux selects more-specific API routes.
 func RoutesWithModulesAndFrontend(accessHandler, databaseHandler, viewerHandler, migrationHandler, frontendHandler http.Handler) http.Handler {
@@ -64,10 +40,6 @@ func routes(accessHandler, databaseHandler, viewerHandler, migrationHandler, fro
 	if migrationHandler != nil {
 		mux.Handle("/databases/{databaseID}/migrations", migrationHandler)
 		mux.Handle("/databases/{databaseID}/migrations/{version}", migrationHandler)
-		// Preserve migration-only wiring; combined wiring uses the registry API.
-		if databaseHandler == nil {
-			mux.Handle("POST /admin/databases", migrationHandler)
-		}
 	}
 	if frontendHandler != nil {
 		mux.Handle("/", frontendHandler)

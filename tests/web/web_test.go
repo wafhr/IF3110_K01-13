@@ -68,7 +68,7 @@ func TestApplicationRoutesSeparateFrontendFromAccessAPI(t *testing.T) {
 		w.Header().Set("X-Route", "frontend")
 		w.WriteHeader(http.StatusNoContent)
 	})
-	handler := app.RoutesWithFrontend(accessHandler, frontendHandler)
+	handler := app.RoutesWithModulesAndFrontend(accessHandler, nil, nil, nil, frontendHandler)
 	for _, tc := range []struct{ path, route string }{
 		{"/auth/me", "access"}, {"/", "frontend"}, {"/login", "frontend"}, {"/assets/css/app.css", "frontend"},
 	} {

@@ -3,19 +3,12 @@ package migration
 import (
 	"context"
 	"database/sql"
-	"embed"
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"net/url"
 	"strings"
 	"time"
-
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
-
-//go:embed schema.sql
-var schema embed.FS
 
 type Status string
 
@@ -40,68 +33,14 @@ type Record struct {
 type TargetOpener func(context.Context, string) (*sql.DB, error)
 
 type Service struct {
-	platform   *sql.DB
 	openTarget TargetOpener
 }
 
-func NewService(platform *sql.DB) *Service { return &Service{platform: platform} }
-
-// NewServiceWithTargetOpener uses the database-management registry while
-// preserving the runner's existing per-operation connection lifecycle.
-func NewServiceWithTargetOpener(platform *sql.DB, openTarget TargetOpener) *Service {
-	return &Service{platform: platform, openTarget: openTarget}
-}
-
-func (s *Service) Initialize(ctx context.Context) error {
-	ddl, err := schema.ReadFile("schema.sql")
-	if err != nil {
-		return err
-	}
-	if _, err := s.platform.ExecContext(ctx, string(ddl)); err != nil {
-		return fmt.Errorf("initialize migration catalog: %w", err)
-	}
-	return nil
-}
-
-func (s *Service) RegisterDatabase(ctx context.Context, name, connectionURL string) (string, error) {
-	name = strings.TrimSpace(name)
-	parsed, parseErr := url.Parse(connectionURL)
-	if name == "" || len(name) > 120 || parseErr != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") || parsed.Host == "" {
-		return "", errors.New("name and PostgreSQL connection URL are required")
-	}
-	target, err := sql.Open("pgx", connectionURL)
-	if err != nil {
-		return "", errors.New("invalid PostgreSQL connection URL")
-	}
-	defer target.Close()
-	pingCtx, cancelPing := context.WithTimeout(ctx, 5*time.Second)
-	defer cancelPing()
-	if err := target.PingContext(pingCtx); err != nil {
-		return "", errors.New("could not connect to the PostgreSQL database")
-	}
-	var id string
-	err = s.platform.QueryRowContext(ctx, `INSERT INTO managed_databases(name, connection_url) VALUES ($1,$2) RETURNING id::text`, name, connectionURL).Scan(&id)
-	return id, err
-}
+// NewService uses the database registry to open each target connection.
+func NewService(openTarget TargetOpener) *Service { return &Service{openTarget: openTarget} }
 
 func (s *Service) target(ctx context.Context, id string) (*sql.DB, error) {
-	if s.openTarget != nil {
-		return s.openTarget(ctx, id)
-	}
-	var url string
-	if err := s.platform.QueryRowContext(ctx, `SELECT connection_url FROM managed_databases WHERE id=$1`, id).Scan(&url); err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("pgx", url)
-	if err != nil {
-		return nil, errors.New("configure target database connection")
-	}
-	db.SetMaxOpenConns(4)
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		return nil, errors.New("connect to target database")
-	}
-	return db, nil
+	return s.openTarget(ctx, id)
 }
 
 func (s *Service) List(ctx context.Context, databaseID string) ([]Record, error) {

@@ -63,16 +63,13 @@ func run() error {
 	if err := accessService.Initialize(startupCtx, cfg.BootstrapAdminUsername, cfg.BootstrapAdminPassword); err != nil {
 		return err
 	}
-	migrationService := migration.NewServiceWithTargetOpener(db, func(ctx context.Context, id string) (*sql.DB, error) {
+	migrationService := migration.NewService(func(ctx context.Context, id string) (*sql.DB, error) {
 		connection, err := databaseRegistry.GetConnectionConfig(ctx, id)
 		if err != nil {
 			return nil, err
 		}
 		return targetConnector.Open(ctx, connection)
 	})
-	if err := migrationService.Initialize(startupCtx); err != nil {
-		return err
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	accessHandler := access.NewHTTPHandler(accessService, cfg.SecureCookie)
