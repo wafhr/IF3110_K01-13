@@ -5,10 +5,25 @@
   const cell=(row,value)=>{const td=document.createElement('td');td.textContent=value==null?'—':String(value);row.append(td);return td};
   const showError=message=>Atlas.setNotice(notice,message,true);
   const form=$key('migration-form'),sqlInput=$key('migration-sql'),planPanel=$key('query-plan'),modeInput=$key('query-plan-mode');
+  const diffButton=$key('compare-schema'),diffPanel=$key('schema-diff-results');
   let busy=false;
   const setBusy=value=>{busy=value;form.querySelectorAll('button').forEach(button=>{button.disabled=value})};
   const clearPlan=()=>{planPanel.hidden=true;planPanel.replaceChildren()};
   sqlInput.addEventListener('input',clearPlan);
+  diffButton.addEventListener('click',async()=>{
+    let desired;try{desired=JSON.parse($key('desired-schema').value)}catch(_){showError('Desired schema must be valid JSON.');return}
+    diffButton.disabled=true;diffPanel.hidden=true;clearPlan();Atlas.setNotice(notice,'Comparing database schemas…');
+    try{
+      const result=await Atlas.request(`${endpoint}/schema-diff`,'POST',{desired_schema:desired}),diff=result.schema_diff;
+      diffPanel.replaceChildren();diffPanel.hidden=false;
+      const title=document.createElement('h3');title.textContent='Schema differences';diffPanel.append(title);
+      (diff.changes||[]).forEach(change=>{const item=document.createElement('p');item.textContent=`${change.kind} · ${change.object}: ${change.detail}${change.destructive?' (review carefully)':''}`;diffPanel.append(item)});
+      if(!diff.changes?.length){const item=document.createElement('p');item.textContent='Schemas match.';diffPanel.append(item)}
+      (diff.notes||[]).forEach(note=>{const item=document.createElement('p');item.className='muted';item.textContent=note;diffPanel.append(item)});
+      sqlInput.value=diff.sql||'';if(!$key('migration-name').value)$key('migration-name').value='Schema update';
+      Atlas.setNotice(notice,'Comparison complete. Review and edit the generated SQL before running it.');
+    }catch(e){showError(e.message)}finally{diffButton.disabled=false}
+  });
   modeInput.addEventListener('change',()=>{clearPlan();$key('query-plan-warning').hidden=modeInput.value!=='explain_analyze'});
   function showPlan(result){
     planPanel.replaceChildren();planPanel.hidden=false;
