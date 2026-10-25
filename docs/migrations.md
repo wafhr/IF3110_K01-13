@@ -56,11 +56,15 @@ The target database account needs permission to create and update the
 ## Query plan preview (EXPLAIN)
 
 Users with `view_edit` can click **Preview execution plan** below the SQL editor
-before running a migration. Only SQL is required for preview; the migration name
+before running a migration and choose either EXPLAIN or EXPLAIN ANALYZE. The
+default is EXPLAIN. Only SQL is required for preview; the migration name
 is required when executing a migration. The result shows the plan tree, scan and
 join types, relation/index names, estimated rows, and startup/total cost. Costs
 are PostgreSQL planner units, not milliseconds. Full JSON is also available.
-Editing SQL hides the previous preview so it is not mistaken for the new query.
+Editing SQL or changing preview mode hides the previous preview so it is not
+mistaken for the new query. ANALYZE additionally shows actual rows per loop,
+loop counts, node execution times per loop, and total planning/execution times
+in milliseconds. Full JSON includes buffer statistics.
 
 ```http
 POST /databases/{databaseID}/migrations/explain
@@ -70,14 +74,18 @@ X-CSRF-Token: <session token>
 {"sql":"SELECT * FROM public.accounts WHERE id = 1"}
 ```
 
-The response is `{"query_plan":{"mode":"explain","plan":[...]}}`, retaining
+The response is `{"query_plan":{"mode":"explain","plan":[...],"rolled_back":true}}`, retaining
 PostgreSQL's JSON plan tree. The endpoint requires a valid session, group-derived
 `view_edit` permission, CSRF, and the target PostgreSQL privileges needed to plan
 the supplied statement. Platform-admin status alone does not grant preview access.
 
-Preview uses `EXPLAIN (FORMAT JSON, ANALYZE FALSE)` in a read-only transaction
-that is rolled back. It does not execute the migration or create history/version
-records. A prepared statement enforces exactly one SQL statement; trailing
+Without `analyze`, or with `"analyze": false`, preview uses
+`EXPLAIN (FORMAT JSON, ANALYZE FALSE)` in a read-only transaction.
+To request execution statistics, send `"analyze": true` in the same JSON body;
+the response mode is `explain_analyze`. The server then uses
+`EXPLAIN (FORMAT JSON, ANALYZE TRUE, BUFFERS TRUE)` in a read-write transaction
+and explicitly rolls it back before reporting success. Neither mode creates
+history/version records. A prepared statement enforces exactly one SQL statement; trailing
 semicolons and semicolons inside SQL literals are handled by PostgreSQL. The
 operation has a five-second deadline and statement timeout, plus a one-second
 lock timeout while planning.
@@ -87,5 +95,19 @@ MERGE, or their WITH forms. Ordinary CREATE TABLE and ALTER TABLE statements are
 not supported; enter the SQL itself without an EXPLAIN prefix. Empty, invalid,
 unsupported, or multiple statements return `400`; target privilege denial returns
 `403`, target connection failures `502`, and planning timeouts `504`. Responses
-do not expose raw SQL/driver errors. `EXPLAIN ANALYZE` is not enabled yet, so
-actual execution time and actual row counts are not included.
+do not expose raw SQL/driver errors.
+
+**ANALYZE executes the supplied SQL**, including functions and triggers. The UI
+shows a warning and asks for confirmation before sending an ANALYZE request.
+Rollback undoes transactional table changes; it does not undo PostgreSQL sequence
+increments (`nextval`/`setval`) or effects outside the database caused by a
+function/trigger. Use a disposable target for queries with those effects. This is
+an execution preview with rollback, not an isolated sandbox. PostgreSQL documents
+[EXPLAIN ANALYZE execution](https://www.postgresql.org/docs/18/sql-explain.html)
+and [sequence rollback behavior](https://www.postgresql.org/docs/18/functions-sequence.html).
+
+One integration test, `TestQueryPlanPreviewIntegration`, covers both preview
+modes against real PostgreSQL: an UPDATE returns estimates for EXPLAIN, actual
+statistics for ANALYZE, preserves the original table data after each request,
+and creates no migration history table. It reuses the disposable fixture described
+in [integration setup](database-management.md#integration-test).

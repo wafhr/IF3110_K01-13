@@ -15,11 +15,12 @@ var errInvalidPlanQuery = errors.New("invalid or unsupported SQL for query plan 
 
 // QueryPlan retains PostgreSQL's native plan tree and identifies the preview mode.
 type QueryPlan struct {
-	Mode string          `json:"mode"`
-	Plan json.RawMessage `json:"plan"`
+	Mode       string          `json:"mode"`
+	Plan       json.RawMessage `json:"plan"`
+	RolledBack bool            `json:"rolled_back"`
 }
 
-func (s *Service) Explain(ctx context.Context, databaseID, statement string) (QueryPlan, error) {
+func (s *Service) Explain(ctx context.Context, databaseID, statement string, analyze bool) (QueryPlan, error) {
 	statement = strings.TrimSpace(statement)
 	if statement == "" || len(statement) > 1<<20 || strings.ContainsRune(statement, '\x00') {
 		return QueryPlan{}, errInvalidPlanQuery
@@ -31,7 +32,7 @@ func (s *Service) Explain(ctx context.Context, databaseID, statement string) (Qu
 		return QueryPlan{}, planError(ctx, err)
 	}
 	defer db.Close()
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: !analyze})
 	if err != nil {
 		return QueryPlan{}, planError(ctx, err)
 	}
@@ -42,7 +43,11 @@ func (s *Service) Explain(ctx context.Context, databaseID, statement string) (Qu
 	// Preparing requires exactly one statement, including when SQL contains
 	// comments, quoted semicolons, or dollar-quoted strings. Do not split SQL by
 	// semicolons or send user SQL through the simple-query protocol.
-	prepared, err := tx.PrepareContext(ctx, "EXPLAIN (FORMAT JSON, ANALYZE FALSE) "+statement)
+	mode, prefix := "explain", "EXPLAIN (FORMAT JSON, ANALYZE FALSE) "
+	if analyze {
+		mode, prefix = "explain_analyze", "EXPLAIN (FORMAT JSON, ANALYZE TRUE, BUFFERS TRUE) "
+	}
+	prepared, err := tx.PrepareContext(ctx, prefix+statement)
 	if err != nil {
 		return QueryPlan{}, planError(ctx, err)
 	}
@@ -54,7 +59,12 @@ func (s *Service) Explain(ctx context.Context, databaseID, statement string) (Qu
 	if !json.Valid(plan) {
 		return QueryPlan{}, errors.New("invalid query plan response")
 	}
-	return QueryPlan{Mode: "explain", Plan: plan}, nil
+	// Never commit a preview. Confirm rollback before reporting success; sequence
+	// increments and external function/trigger effects are not transactional.
+	if err := tx.Rollback(); err != nil {
+		return QueryPlan{}, planError(ctx, err)
+	}
+	return QueryPlan{Mode: mode, Plan: plan, RolledBack: true}, nil
 }
 
 // PostgreSQL errors can include user SQL and server details. Return only safe

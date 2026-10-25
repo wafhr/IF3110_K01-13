@@ -75,13 +75,14 @@ func (h *HTTPHandler) execute(w http.ResponseWriter, r *http.Request) {
 
 func (h *HTTPHandler) explain(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		SQL string `json:"sql"`
+		SQL     string `json:"sql"`
+		Analyze bool   `json:"analyze"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if !decodeRequestJSON(w, r, &input) {
 		return
 	}
-	plan, err := h.service.Explain(r.Context(), r.PathValue("databaseID"), input.SQL)
+	plan, err := h.service.Explain(r.Context(), r.PathValue("databaseID"), input.SQL, input.Analyze)
 	if err != nil {
 		status, message := http.StatusInternalServerError, "query plan preview failed"
 		switch {
