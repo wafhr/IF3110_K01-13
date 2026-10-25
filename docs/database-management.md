@@ -48,9 +48,15 @@ Admin dari `BOOTSTRAP_ADMIN_USERNAME` dan `BOOTSTRAP_ADMIN_PASSWORD`. Password
 bootstrap harus memiliki minimal 12 karakter. Nilai bootstrap tidak mengubah
 akun setelah pembuatan pertama.
 
-File `.env.example` berisi daftar variabel, tetapi aplikasi tidak memuat file
-`.env` otomatis. Set variabel di shell, environment deployment, atau secret
-manager. `APP_ENV=production` mengaktifkan atribut Secure pada cookie; untuk
+Salin `.env.example` menjadi `.env` pada root repository, lalu isi konfigurasi
+lokal di `.env`. Server memuat `.env` otomatis sebelum membaca konfigurasi;
+`.env.example` hanya menjadi template dan tidak dimuat oleh server. Environment
+yang sudah diatur di shell atau deployment tetap diprioritaskan. Jika `.env`
+tidak ada, konfigurasi dapat sepenuhnya diberikan dari environment.
+File yang tidak valid atau tidak dapat
+dibaca menghasilkan error tanpa mencetak isinya. `.env` diabaikan oleh Git;
+password dan encryption key pribadi tidak boleh dimasukkan ke `.env.example`.
+`APP_ENV=production` mengaktifkan atribut Secure pada cookie; untuk
 TLS yang berakhir di reverse proxy, set juga `COOKIE_SECURE=true`.
 
 ## Registry target

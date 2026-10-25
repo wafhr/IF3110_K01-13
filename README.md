@@ -24,10 +24,19 @@ database target. Hak `view_only` dan `view_edit` diberikan kepada group.
 ## Menjalankan aplikasi
 
 1. Buat database kosong untuk menyimpan data platform.
-2. Atur environment variables dari `.env.example` di shell atau secret manager.
-   Aplikasi tidak memuat file `.env` secara otomatis.
+2. Salin `.env.example` menjadi `.env` pada root repository jika belum ada:
+
+   ```powershell
+   if (-not (Test-Path .env)) {
+       Copy-Item .env.example .env
+   }
+   ```
+
+   Aplikasi memuat `.env` otomatis saat startup. Environment yang sudah diatur
+   dari luar aplikasi tetap diprioritaskan. `.env` diabaikan oleh Git;
+   `.env.example` tetap menjadi template tanpa kredensial pribadi.
 3. Isi `PLATFORM_DATABASE_URL`, `DATABASE_ENCRYPTION_KEY`,
-   `BOOTSTRAP_ADMIN_USERNAME`, dan `BOOTSTRAP_ADMIN_PASSWORD`.
+   `BOOTSTRAP_ADMIN_USERNAME`, dan `BOOTSTRAP_ADMIN_PASSWORD` di `.env`.
    Password bootstrap minimum 12 karakter. Buat key dengan:
 
    ```powershell
@@ -36,7 +45,7 @@ database target. Hak `view_only` dan `view_edit` diberikan kepada group.
 
    Simpan key yang sama setelah deployment pertama; menggantinya membuat
    password koneksi target yang sudah tersimpan tidak dapat didekripsi.
-4. Jalankan server:
+4. Jalankan server dari root repository:
 
    ```sh
    go run ./cmd/server
