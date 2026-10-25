@@ -14,7 +14,8 @@
     planPanel.replaceChildren();planPanel.hidden=false;
     const analyzed=result.mode==='explain_analyze';
     const title=document.createElement('h2');title.textContent=`Execution plan · ${analyzed?'EXPLAIN ANALYZE':'EXPLAIN'}`;planPanel.append(title);
-    const explanation=document.createElement('p');explanation.className='muted';explanation.textContent=analyzed?'SQL was executed and the transaction was rolled back. Actual times are milliseconds; row counts and node times are averages per loop. Sequence and external effects may persist.':'Estimated rows and planner cost units, not actual execution time. Preview does not execute the migration.';planPanel.append(explanation);
+    const explanation=document.createElement('p');explanation.className='muted';explanation.textContent=analyzed?'SQL was executed and the transaction was rolled back. Actual times are milliseconds; row counts and node times are averages per loop. Sequence/auto-increment values and external effects may persist.':'Estimated rows and planner cost units, not actual execution time. Preview does not execute the migration.';planPanel.append(explanation);
+    if(!Array.isArray(result.plan)){const native=document.createElement('pre');native.textContent=typeof result.plan==='string'?result.plan:JSON.stringify(result.plan,null,2);planPanel.append(native);return}
     (result.plan||[]).forEach(entry=>{
       if(entry['Execution Time']!=null){const timing=document.createElement('p');timing.textContent=`Planning: ${entry['Planning Time']??'—'} ms · Execution: ${entry['Execution Time']} ms`;planPanel.append(timing)}
     });
@@ -54,6 +55,7 @@
       if(!db)throw new Error('Database access is unavailable for this account.');
       $key('migration-database-title').textContent=`Migrations · ${db.name}`;
       $key('migration-permission').textContent=db.permission==='view_edit'?'View and edit access':'View only access';
+      $key('migration-editor').querySelector('.muted').textContent=db.dbms==='mysql'?'MySQL may implicitly commit DDL; only transaction-safe statements can be rolled back.':'SQL runs transactionally. Failed statements are rolled back and retained in history.';
       if(db.permission==='view_edit')$key('migration-editor').hidden=false;
       const records=(await Atlas.request(endpoint)).migrations||[];tbody.replaceChildren();
       if(!records.length){const row=document.createElement('tr');cell(row,'No migrations have been run yet.');tbody.append(row)}

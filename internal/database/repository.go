@@ -15,7 +15,7 @@ import (
 //go:embed schema.sql
 var registrySchema string
 
-const metadataColumns = `id::text, name, host, port, database_name, username, ssl_mode, created_at, updated_at`
+const metadataColumns = `id::text, name, dbms, host, port, database_name, username, ssl_mode, created_at, updated_at`
 
 // Repository persists target configurations in the platform database. Callers
 // must apply access control before exposing these operations through HTTP.
@@ -50,6 +50,17 @@ func (r *Repository) Initialize(ctx context.Context) error {
 	if _, err := r.db.ExecContext(ctx, registrySchema); err != nil {
 		return storageError("initialize registry", err)
 	}
+	if _, err := r.db.ExecContext(ctx, `ALTER TABLE managed_databases ADD COLUMN IF NOT EXISTS dbms TEXT NOT NULL DEFAULT 'postgres' CHECK (dbms IN ('postgres', 'mysql'))`); err != nil {
+		return storageError("upgrade database registry", err)
+	}
+	if _, err := r.db.ExecContext(ctx, `DO $$ BEGIN
+		ALTER TABLE managed_databases DROP CONSTRAINT IF EXISTS managed_databases_database_name_check;
+		ALTER TABLE managed_databases ADD CONSTRAINT managed_databases_database_name_check CHECK (
+			(dbms = 'postgres' AND char_length(database_name) BETWEEN 1 AND 63) OR
+			(dbms = 'mysql' AND char_length(database_name) BETWEEN 1 AND 64));
+	END $$`); err != nil {
+		return storageError("upgrade database name constraint", err)
+	}
 	return nil
 }
 
@@ -63,9 +74,9 @@ func (r *Repository) Create(ctx context.Context, name string, config ConnectionC
 		return Database{}, err
 	}
 	database, err := scanDatabase(r.db.QueryRowContext(ctx, `
-		INSERT INTO managed_databases (name, host, port, database_name, username, password_ciphertext, ssl_mode)
-		VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING `+metadataColumns,
-		name, config.Host, config.Port, config.DatabaseName, config.Username, password, config.SSLMode))
+		INSERT INTO managed_databases (name, dbms, host, port, database_name, username, password_ciphertext, ssl_mode)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING `+metadataColumns,
+		name, config.DBMS, config.Host, config.Port, config.DatabaseName, config.Username, password, config.SSLMode))
 	if err != nil {
 		return Database{}, storageError("create database", err)
 	}
@@ -120,10 +131,10 @@ func (r *Repository) Update(ctx context.Context, id, name string, config Connect
 		return Database{}, err
 	}
 	database, err := scanDatabase(r.db.QueryRowContext(ctx, `
-		UPDATE managed_databases SET name = $1, host = $2, port = $3, database_name = $4,
-		username = $5, password_ciphertext = $6, ssl_mode = $7, updated_at = now()
-		WHERE id = $8 RETURNING `+metadataColumns,
-		name, config.Host, config.Port, config.DatabaseName, config.Username, password, config.SSLMode, id))
+		UPDATE managed_databases SET name = $1, dbms = $2, host = $3, port = $4, database_name = $5,
+		username = $6, password_ciphertext = $7, ssl_mode = $8, updated_at = now()
+		WHERE id = $9 RETURNING `+metadataColumns,
+		name, config.DBMS, config.Host, config.Port, config.DatabaseName, config.Username, password, config.SSLMode, id))
 	if err != nil {
 		return Database{}, storageError("update database", err)
 	}
@@ -158,9 +169,9 @@ func (r *Repository) GetConnectionConfig(ctx context.Context, id string) (Connec
 	var config ConnectionConfig
 	var encrypted []byte
 	err := r.db.QueryRowContext(ctx, `
-		SELECT host, port, database_name, username, password_ciphertext, ssl_mode
+		SELECT dbms, host, port, database_name, username, password_ciphertext, ssl_mode
 		FROM managed_databases WHERE id = $1`, id).
-		Scan(&config.Host, &config.Port, &config.DatabaseName, &config.Username, &encrypted, &config.SSLMode)
+		Scan(&config.DBMS, &config.Host, &config.Port, &config.DatabaseName, &config.Username, &encrypted, &config.SSLMode)
 	if err != nil {
 		return ConnectionConfig{}, storageError("get connection configuration", err)
 	}
@@ -173,7 +184,7 @@ func (r *Repository) GetConnectionConfig(ctx context.Context, id string) (Connec
 
 func scanDatabase(row interface{ Scan(...any) error }) (Database, error) {
 	var database Database
-	err := row.Scan(&database.ID, &database.Name, &database.Host, &database.Port,
+	err := row.Scan(&database.ID, &database.Name, &database.DBMS, &database.Host, &database.Port,
 		&database.DatabaseName, &database.Username, &database.SSLMode, &database.CreatedAt, &database.UpdatedAt)
 	return database, err
 }

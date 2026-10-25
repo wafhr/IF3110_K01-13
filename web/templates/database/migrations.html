@@ -11,7 +11,7 @@
       <label for="migration-name">Name</label><input id="migration-name" maxlength="160" required>
       <label for="migration-sql">SQL</label><textarea id="migration-sql" rows="12" required maxlength="1048576"></textarea>
       <p class="muted">Preview one supported SQL statement before running a migration. Ordinary CREATE TABLE and ALTER TABLE statements have no execution plan. A name is only required when running a migration.</p>
-      <p class="notice" id="query-plan-warning" hidden>EXPLAIN ANALYZE executes SQL to measure actual performance. Transactional table changes are rolled back, but sequence increments and external effects from functions or triggers may persist.</p>
+      <p class="notice" id="query-plan-warning" hidden>EXPLAIN ANALYZE executes SQL to measure actual performance. Transactional changes are rolled back, but sequence or auto-increment values, implicit DDL commits, and external effects from functions or triggers may persist.</p>
       <div class="form-row"><label>Preview mode<select id="query-plan-mode"><option value="explain">EXPLAIN · estimates only</option><option value="explain_analyze">EXPLAIN ANALYZE · execute and roll back</option></select></label><button id="preview-query-plan" class="button" type="button">Preview execution plan</button><button class="button primary" type="submit">Run migration</button></div>
     </form>
   </section>

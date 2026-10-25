@@ -8,6 +8,7 @@ var ErrObjectNotFound = errors.New("schema or table not found")
 type AccessibleDatabase struct {
 	ID           string `json:"id"`
 	Name         string `json:"name"`
+	DBMS         DBMS   `json:"dbms"`
 	DatabaseName string `json:"database_name"`
 	Permission   string `json:"permission"`
 }

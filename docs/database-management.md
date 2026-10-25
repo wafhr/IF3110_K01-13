@@ -1,8 +1,8 @@
 # Database management
 
 Platform menggunakan satu PostgreSQL sebagai database platform untuk user,
-group, session, grant, dan registry koneksi. Database yang didaftarkan admin
-adalah target PostgreSQL yang terpisah.
+group, session, grant, dan registry koneksi. Target yang didaftarkan admin
+dapat berupa PostgreSQL atau MySQL 8.4. DBMS platform tetap PostgreSQL.
 
 ## Kepemilikan schema
 
@@ -73,9 +73,13 @@ Platform Admin mendaftarkan koneksi pada `/manage/databases`. API yang tersedia:
 | `POST` | `/admin/databases/test-connection` | Uji konfigurasi sebelum menyimpan |
 | `POST` | `/admin/databases/{databaseID}/test-connection` | Uji koneksi tersimpan |
 
-Endpoint menerima field `name`, `host`, `port`, `database_name`, `username`,
-`password`, dan `ssl_mode` dalam body JSON. Port default `5432` dan SSL mode
-default `require`. Semua operasi pengelolaan memerlukan Platform Admin dan
+Endpoint menerima field `name`, `dbms`, `host`, `port`, `database_name`,
+`username`, `password`, dan `ssl_mode` dalam body JSON. `dbms` adalah
+`postgres` atau `mysql`; field yang dihilangkan tetap berarti PostgreSQL demi
+kompatibilitas registrasi lama. Port default PostgreSQL `5432`, MySQL `3306`,
+dan SSL mode default `require`. PostgreSQL mendukung `disable`, `allow`,
+`prefer`, `require`, `verify-ca`, dan `verify-full`; MySQL mendukung `disable`,
+`prefer`, dan `require`. Semua operasi pengelolaan memerlukan Platform Admin dan
 token CSRF. Perubahan atau penghapusan registrasi menginvalidasi pool koneksi
 yang tersimpan.
 
@@ -97,8 +101,9 @@ Endpoint viewer memerlukan session valid dan permission `view_only` atau lebih:
 
 Endpoint data menerima `limit` (default 50, maksimum 200) dan `offset`
 (default 0). Nilai dikembalikan sebagai teks atau `null` untuk mempertahankan
-presisi tipe PostgreSQL. Akun target perlu hak `USAGE` pada schema dan `SELECT`
-pada data yang akan dibaca.
+presisi numerik. Untuk MySQL, database terpilih adalah schema yang ditampilkan;
+nilai binary ditampilkan sebagai hex. Akun target perlu hak `USAGE` pada schema
+PostgreSQL atau akses database MySQL, serta `SELECT` pada data yang dibaca.
 
 Kegagalan koneksi, autentikasi target, atau izin target dikembalikan sebagai
 respons aman tanpa mengungkap credential koneksi.
@@ -106,17 +111,21 @@ respons aman tanpa mengungkap credential koneksi.
 ## Integration test
 
 Integration test membutuhkan Docker dan hanya boleh dijalankan terhadap server
-PostgreSQL disposable. Konfigurasi server sudah tersedia di
+PostgreSQL dan MySQL disposable. Konfigurasi server tersedia di
 `compose.test.yaml`:
 
 ```powershell
 docker compose -f compose.test.yaml up -d --wait
 $env:TEST_DATABASE_URL = 'postgres://if3110_test_admin:if3110-integration-password@localhost:55432/postgres?sslmode=disable'
+$env:TEST_MYSQL_DSN = 'if3110_test_admin:if3110-mysql-test-password@tcp(127.0.0.1:53306)/if3110_mysql_test?tls=false'
 go test -tags=integration ./tests/database_management/integration
 docker compose -f compose.test.yaml down -v
 ```
 
 Test membuat database platform dan target sementara serta role target dengan
-prefix `if3110_it_`, lalu menghapusnya saat cleanup. Akun yang dipakai harus
-memiliki izin membuat/menghapus database dan role. Jangan arahkan
+prefix `if3110_it_` pada PostgreSQL. Test MySQL membuat tabel ber-prefix sama di
+database disposable `if3110_mysql_test`, lalu menghapus tabel test dan tabel
+riwayat migration. Akun PostgreSQL perlu izin membuat/menghapus database dan
+role; akun MySQL perlu izin membuat dan menghapus tabel di database test.
+Jangan arahkan
 `TEST_DATABASE_URL` ke server yang menyimpan data penting.

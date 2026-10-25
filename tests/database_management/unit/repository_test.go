@@ -60,7 +60,11 @@ func TestPasswordEncryption(t *testing.T) {
 func TestInitialize(t *testing.T) {
 	r := testRepository(t,
 		databaseStep{statement: "CREATE TABLE IF NOT EXISTS managed_databases", exec: true},
+		databaseStep{statement: "ALTER TABLE managed_databases ADD COLUMN IF NOT EXISTS dbms", exec: true},
+		databaseStep{statement: "DO $$ BEGIN", exec: true},
 		databaseStep{statement: "CREATE TABLE IF NOT EXISTS managed_databases", exec: true},
+		databaseStep{statement: "ALTER TABLE managed_databases ADD COLUMN IF NOT EXISTS dbms", exec: true},
+		databaseStep{statement: "DO $$ BEGIN", exec: true},
 	)
 	for range 2 {
 		if err := r.Initialize(context.Background()); err != nil {
@@ -75,14 +79,14 @@ func TestCreate(t *testing.T) {
 	step := metadataStep("INSERT INTO managed_databases", "Main")
 	var storedPassword []byte
 	step.check = func(t *testing.T, args []driver.NamedValue) {
-		if len(args) != 7 {
-			t.Fatalf("got %d arguments, want 7", len(args))
+		if len(args) != 8 {
+			t.Fatalf("got %d arguments, want 8", len(args))
 		}
-		if args[0].Value != "Main" || args[1].Value != "localhost" || args[2].Value != int64(5432) || args[6].Value != "require" {
+		if args[0].Value != "Main" || args[1].Value != "postgres" || args[2].Value != "localhost" || args[3].Value != int64(5432) || args[7].Value != "require" {
 			t.Error("normalized registration was not persisted")
 		}
 		var ok bool
-		storedPassword, ok = args[5].Value.([]byte)
+		storedPassword, ok = args[6].Value.([]byte)
 		if !ok || bytes.Contains(storedPassword, []byte("secret-password")) {
 			t.Fatal("password must be stored as ciphertext")
 		}
@@ -176,7 +180,7 @@ func TestList(t *testing.T) {
 
 func TestListErrors(t *testing.T) {
 	badRow := metadataStep("SELECT", "Main")
-	badRow.rows[0][3] = "not-an-integer"
+	badRow.rows[0][4] = "not-an-integer"
 	for _, test := range []struct {
 		name string
 		step databaseStep
@@ -200,10 +204,10 @@ func TestUpdate(t *testing.T) {
 	step := metadataStep("UPDATE managed_databases", "Renamed")
 	var encrypted []byte
 	step.check = func(t *testing.T, args []driver.NamedValue) {
-		if len(args) != 8 || args[0].Value != "Renamed" || args[7].Value != testDatabaseID {
+		if len(args) != 9 || args[0].Value != "Renamed" || args[1].Value != "postgres" || args[8].Value != testDatabaseID {
 			t.Fatal("update did not preserve UUID or normalize name")
 		}
-		encrypted, _ = args[5].Value.([]byte)
+		encrypted, _ = args[6].Value.([]byte)
 	}
 	r := testRepository(t, step)
 	config := validConfig()
@@ -262,9 +266,9 @@ func TestDelete(t *testing.T) {
 func TestGetConnectionConfig(t *testing.T) {
 	encrypted := createAndCaptureCiphertext(t, " private-password ")
 	step := databaseStep{
-		statement: "SELECT host, port, database_name, username, password_ciphertext, ssl_mode",
-		columns:   []string{"host", "port", "database_name", "username", "password_ciphertext", "ssl_mode"},
-		rows:      [][]driver.Value{{"localhost", int64(5433), "app", "reader", encrypted, "verify-full"}},
+		statement: "SELECT dbms, host, port, database_name, username, password_ciphertext, ssl_mode",
+		columns:   []string{"dbms", "host", "port", "database_name", "username", "password_ciphertext", "ssl_mode"},
+		rows:      [][]driver.Value{{"postgres", "localhost", int64(5433), "app", "reader", encrypted, "verify-full"}},
 		check:     checkID,
 	}
 	r := testRepository(t, step)
@@ -272,7 +276,7 @@ func TestGetConnectionConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Host != "localhost" || got.Port != 5433 || got.DatabaseName != "app" ||
+	if got.DBMS != database.PostgreSQL || got.Host != "localhost" || got.Port != 5433 || got.DatabaseName != "app" ||
 		got.Username != "reader" || got.Password != " private-password " || got.SSLMode != "verify-full" {
 		t.Fatal("stored connection configuration was not recovered correctly")
 	}
@@ -284,7 +288,7 @@ func TestGetConnectionConfig(t *testing.T) {
 		{"missing", databaseStep{statement: "SELECT", columns: step.columns}, database.ErrNotFound},
 		{"query failure", databaseStep{statement: "SELECT", err: errors.New("private-password")}, database.ErrStorage},
 		{"corrupted credentials", databaseStep{statement: "SELECT", columns: step.columns,
-			rows: [][]driver.Value{{"localhost", int64(5432), "app", "reader", []byte("corrupt"), "require"}}}, database.ErrStorage},
+			rows: [][]driver.Value{{"postgres", "localhost", int64(5432), "app", "reader", []byte("corrupt"), "require"}}}, database.ErrStorage},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			r := testRepository(t, test.step)
@@ -314,11 +318,11 @@ func createAndCaptureCiphertext(t *testing.T, password string) []byte {
 	step := metadataStep("INSERT INTO managed_databases", "Main")
 	var ciphertext []byte
 	step.check = func(t *testing.T, args []driver.NamedValue) {
-		if len(args) != 7 {
-			t.Fatalf("got %d arguments, want 7", len(args))
+		if len(args) != 8 {
+			t.Fatalf("got %d arguments, want 8", len(args))
 		}
 		var ok bool
-		ciphertext, ok = args[5].Value.([]byte)
+		ciphertext, ok = args[6].Value.([]byte)
 		if !ok {
 			t.Fatal("password must be stored as ciphertext")
 		}
@@ -336,9 +340,9 @@ func createAndCaptureCiphertext(t *testing.T, password string) []byte {
 func readConnectionConfig(t *testing.T, ciphertext []byte, key string) (database.ConnectionConfig, error) {
 	t.Helper()
 	step := databaseStep{
-		statement: "SELECT host, port, database_name, username, password_ciphertext, ssl_mode",
-		columns:   []string{"host", "port", "database_name", "username", "password_ciphertext", "ssl_mode"},
-		rows:      [][]driver.Value{{"localhost", int64(5432), "app", "reader", ciphertext, "require"}},
+		statement: "SELECT dbms, host, port, database_name, username, password_ciphertext, ssl_mode",
+		columns:   []string{"dbms", "host", "port", "database_name", "username", "password_ciphertext", "ssl_mode"},
+		rows:      [][]driver.Value{{"postgres", "localhost", int64(5432), "app", "reader", ciphertext, "require"}},
 		check:     checkID,
 	}
 	r := testRepositoryWithKey(t, key, step)

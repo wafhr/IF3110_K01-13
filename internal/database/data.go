@@ -25,7 +25,7 @@ type DataColumn struct {
 	DataType string `json:"data_type"`
 }
 
-// DataPage preserves SQL values as PostgreSQL text or null. In particular,
+// DataPage preserves SQL values as text or null. In particular,
 // bigint/numeric values are not converted to floating-point JSON numbers.
 type DataPage struct {
 	Schema  string       `json:"schema"`

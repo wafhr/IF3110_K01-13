@@ -9,7 +9,7 @@
   async function loadDatabase(){
     const list=(await Atlas.request('/databases')).databases||[], db=list.find(item=>item.id===id);
     if(!db) throw new Error('Database access is unavailable for this account.');
-    $key('database-title').textContent=db.name; $key('database-permission').textContent=`${db.database_name} · ${db.permission==='view_edit'?'View and edit':'View only'}`;
+    $key('database-title').textContent=db.name; $key('database-permission').textContent=`${db.dbms==='mysql'?'MySQL':'PostgreSQL'} · ${db.database_name} · ${db.permission==='view_edit'?'View and edit':'View only'}`;
     const schemas=(await Atlas.request(base)).schemas||[]; schemaSelect.replaceChildren(); option(schemaSelect,'','Choose schema'); schemas.forEach(schema=>option(schemaSelect,schema.name,schema.name));
   }
   async function loadTables(){

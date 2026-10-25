@@ -1,18 +1,18 @@
 # Database Management Platform
 
-Web platform untuk mengelola akses bersama ke database PostgreSQL, menelusuri
-schema dan data, serta menjalankan perubahan database melalui migration yang
-tercatat.
+Web platform untuk mengelola akses bersama ke database PostgreSQL dan MySQL,
+menelusuri schema dan data, serta menjalankan perubahan database melalui
+migration yang tercatat. PostgreSQL tetap menyimpan data platform.
 
 ## Fitur
 
 - Login username/password dengan session server-side, cookie aman, dan CSRF.
 - Pengelolaan user, group, dan grant database oleh Platform Admin.
-- Koneksi PostgreSQL terenkripsi di platform registry.
+- Koneksi target PostgreSQL dan MySQL terenkripsi di platform registry.
 - Viewer untuk schema, table, column, constraint, index, dan data.
 - Editor SQL dan riwayat migration per database target.
-- Bonus preview execution plan PostgreSQL melalui `EXPLAIN` dan
-  `EXPLAIN ANALYZE` di editor migration.
+- Preview execution plan melalui `EXPLAIN` dan `EXPLAIN ANALYZE` di editor
+  migration PostgreSQL dan MySQL 8.4.
 
 Platform Admin mengelola platform; peran ini tidak memberi akses otomatis ke
 database target. Hak `view_only` dan `view_edit` diberikan kepada group.
@@ -21,7 +21,7 @@ database target. Hak `view_only` dan `view_edit` diberikan kepada group.
 
 - Go 1.25 atau lebih baru (lihat versi modul di `go.mod`).
 - PostgreSQL untuk database platform.
-- Database PostgreSQL target yang ingin dikelola.
+- Database PostgreSQL atau MySQL 8.4 target yang ingin dikelola.
 
 ## Menjalankan aplikasi
 
@@ -67,14 +67,15 @@ Jalankan unit dan test tanpa database:
 go test ./...
 ```
 
-Integration test menggunakan PostgreSQL disposable. Jalankan service test dan
-test (perintah environment berikut untuk PowerShell):
+Integration test menggunakan PostgreSQL dan MySQL disposable. Jalankan service
+test dan test (perintah environment berikut untuk PowerShell):
 
 ```powershell
 docker compose -f compose.test.yaml up -d --wait
 $env:TEST_DATABASE_URL = 'postgres://if3110_test_admin:if3110-integration-password@localhost:55432/postgres?sslmode=disable'
+$env:TEST_MYSQL_DSN = 'if3110_test_admin:if3110-mysql-test-password@tcp(127.0.0.1:53306)/if3110_mysql_test?tls=false'
 go test -tags=integration ./tests/database_management/integration
-docker compose -f compose.test.yaml down
+docker compose -f compose.test.yaml down -v
 ```
 
 Integration test membuat dan menghapus database serta role dengan prefix
@@ -95,6 +96,8 @@ internal/database/http/     API registry dan viewer
 internal/migration/         eksekusi migration; history dibuat pada tiap target
 internal/platformdb/        koneksi database platform
 internal/targetdb/          pengelolaan koneksi target
+internal/targetdb/drivers/ komposisi dan pemilihan driver target
+internal/targetdb/mysql/    implementasi MySQL
 internal/targetdb/postgres/ implementasi PostgreSQL
 web/                        halaman, template, dan aset browser
 tests/access/                test access control
@@ -110,8 +113,9 @@ paket tersebut. Kedua `schema.sql` memiliki tabel dan siklus inisialisasi
 berbeda, jadi bukan salinan satu sama lain. Tabel `platform_migrations` berada
 di setiap database target dan dibuat oleh modul migration saat diperlukan.
 
-Milestone ini mendukung PostgreSQL. Bonus execution plan tersedia melalui
-`EXPLAIN` dan `EXPLAIN ANALYZE`; bonus DBMS lain dan schema diff/generation belum
-termasuk implementasi. Mode ANALYZE benar-benar menjalankan SQL dan melakukan
-rollback perubahan transaksional; sequence dan efek eksternal dapat tetap berubah.
-Lihat [panduan preview plan](docs/migrations.md#query-plan-preview-explain).
+Bonus DBMS tambahan yang didukung dan diuji adalah MySQL 8.4. Preview execution
+plan memakai format native tiap DBMS; MySQL ANALYZE hanya berlaku untuk
+statement yang didukung MySQL. Mode ANALYZE menjalankan SQL dan me-rollback
+perubahan transaksional; sequence/auto-increment dan efek eksternal dapat tetap
+berubah. Schema diff/generation belum diimplementasikan. Lihat
+[panduan preview plan](docs/migrations.md#query-plan-preview-explain).

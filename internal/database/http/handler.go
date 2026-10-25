@@ -65,12 +65,13 @@ func serveAPI(w http.ResponseWriter, r *http.Request, next http.Handler) {
 }
 
 type connectionInput struct {
-	Host         string  `json:"host"`
-	Port         *int    `json:"port"`
-	DatabaseName string  `json:"database_name"`
-	Username     string  `json:"username"`
-	Password     *string `json:"password"`
-	SSLMode      string  `json:"ssl_mode"`
+	DBMS         database.DBMS `json:"dbms"`
+	Host         string        `json:"host"`
+	Port         *int          `json:"port"`
+	DatabaseName string        `json:"database_name"`
+	Username     string        `json:"username"`
+	Password     *string       `json:"password"`
+	SSLMode      string        `json:"ssl_mode"`
 }
 
 type databaseInput struct {
@@ -84,7 +85,7 @@ func (input connectionInput) config() (database.ConnectionConfig, error) {
 	if input.Password == nil || (input.Port != nil && (*input.Port < 1 || *input.Port > 65535)) {
 		return database.ConnectionConfig{}, database.ErrInvalidInput
 	}
-	config := database.ConnectionConfig{Host: input.Host, DatabaseName: input.DatabaseName,
+	config := database.ConnectionConfig{DBMS: input.DBMS, Host: input.Host, DatabaseName: input.DatabaseName,
 		Username: input.Username, Password: *input.Password, SSLMode: input.SSLMode}
 	if input.Port != nil {
 		config.Port = *input.Port

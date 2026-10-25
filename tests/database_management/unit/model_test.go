@@ -39,6 +39,29 @@ func TestNormalizeConnectionConfig(t *testing.T) {
 	}
 }
 
+func TestNormalizeMySQLConnectionConfig(t *testing.T) {
+	config := validConfig()
+	config.DBMS, config.Port, config.SSLMode = database.MySQL, 0, ""
+	got, err := database.NormalizeConnectionConfig(config)
+	if err != nil || got.DBMS != database.MySQL || got.Port != 3306 || got.SSLMode != "require" {
+		t.Fatalf("MySQL defaults = %+v, %v", got, err)
+	}
+	config.DatabaseName = strings.Repeat("d", 64)
+	config.Username = strings.Repeat("u", 32)
+	if _, err := database.NormalizeConnectionConfig(config); err != nil {
+		t.Fatalf("valid MySQL identifier limits rejected: %v", err)
+	}
+	config.Username += "u"
+	if _, err := database.NormalizeConnectionConfig(config); !errors.Is(err, database.ErrInvalidInput) {
+		t.Fatalf("oversized MySQL username error = %v", err)
+	}
+	config = validConfig()
+	config.DBMS, config.SSLMode = database.MySQL, "verify-full"
+	if _, err := database.NormalizeConnectionConfig(config); !errors.Is(err, database.ErrInvalidInput) {
+		t.Fatalf("unsupported MySQL TLS mode error = %v", err)
+	}
+}
+
 func TestNormalizeConnectionConfigRejectsInvalidInput(t *testing.T) {
 	for _, test := range []struct {
 		name   string
