@@ -29,7 +29,7 @@ import (
 	databasehttp "github.com/wafhr/IF3110_K01-13/internal/database/http"
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
-	"github.com/wafhr/IF3110_K01-13/internal/targetdb/postgres"
+	"github.com/wafhr/IF3110_K01-13/internal/targetdb/drivers"
 	"github.com/wafhr/IF3110_K01-13/web"
 )
 
@@ -43,7 +43,7 @@ type fixture struct {
 	admin, platform, target *sql.DB
 	registry                *database.Repository
 	pools                   *targetdb.Manager
-	inspector               *postgres.Inspector
+	inspector               *drivers.Inspector
 	server                  *httptest.Server
 	settings                database.ConnectionConfig
 	createdDatabases        []string
@@ -102,7 +102,7 @@ func newFixture(t *testing.T) *fixture {
 	if err := authService.Initialize(ctx, "admin", adminPassword); err != nil {
 		t.Fatalf("initialize access control: %v", err)
 	}
-	connector, err := postgres.NewConnector(postgres.Options{})
+	connector, err := drivers.NewConnector()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,13 +110,14 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.inspector = postgres.NewInspector(f.pools)
-	migrations := migration.NewService(func(ctx context.Context, id string) (*sql.DB, error) {
+	f.inspector = drivers.NewInspector(f.registry, f.pools)
+	migrations := migration.NewService(func(ctx context.Context, id string) (*sql.DB, database.DBMS, error) {
 		connection, err := f.registry.GetConnectionConfig(ctx, id)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		return connector.Open(ctx, connection)
+		db, err := connector.Open(ctx, connection)
+		return db, connection.DBMS, err
 	})
 	auth := access.NewHTTPHandler(authService, false)
 	f.server = httptest.NewServer(app.RoutesWithModulesAndFrontend(auth,
@@ -124,7 +125,7 @@ func newFixture(t *testing.T) *fixture {
 		databasehttp.NewViewerHandler(f.registry, f.inspector, auth),
 		migration.NewHTTPHandler(migrations, auth), web.NewHandler(authService, auth)))
 	f.settings = database.ConnectionConfig{Host: config.Host, Port: int(config.Port), DatabaseName: targetConfig.Database,
-		Username: role, Password: targetPassword, SSLMode: "disable"}
+		DBMS: database.PostgreSQL, Username: role, Password: targetPassword, SSLMode: "disable"}
 	return f
 }
 
@@ -330,7 +331,7 @@ func decode(t *testing.T, body []byte, output any) {
 }
 
 func registration(name string, settings database.ConnectionConfig) map[string]any {
-	return map[string]any{"name": name, "host": settings.Host, "port": settings.Port,
+	return map[string]any{"name": name, "dbms": settings.DBMS, "host": settings.Host, "port": settings.Port,
 		"database_name": settings.DatabaseName, "username": settings.Username, "password": settings.Password, "ssl_mode": settings.SSLMode}
 }
 
