@@ -138,8 +138,8 @@ func testDatabase(t *testing.T, steps ...databaseStep) *sql.DB {
 func metadataStep(statement, name string) databaseStep {
 	return databaseStep{
 		statement: statement,
-		columns:   []string{"id", "name", "host", "port", "database_name", "username", "ssl_mode", "created_at", "updated_at"},
-		rows:      [][]driver.Value{{testDatabaseID, name, "localhost", int64(5432), "app", "reader", "require", testCreatedAt, testCreatedAt}},
+		columns:   []string{"id", "name", "dbms", "host", "port", "database_name", "username", "ssl_mode", "created_at", "updated_at"},
+		rows:      [][]driver.Value{{testDatabaseID, name, "postgres", "localhost", int64(5432), "app", "reader", "require", testCreatedAt, testCreatedAt}},
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -17,10 +18,18 @@ var (
 	ErrStorage      = errors.New("database registry storage failure")
 )
 
+type DBMS string
+
+const (
+	PostgreSQL DBMS = "postgres"
+	MySQL      DBMS = "mysql"
+)
+
 // Database is public registry metadata. It never contains a password.
 type Database struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
+	DBMS         DBMS      `json:"dbms"`
 	Host         string    `json:"host"`
 	Port         int       `json:"port"`
 	DatabaseName string    `json:"database_name"`
@@ -32,6 +41,7 @@ type Database struct {
 
 // ConnectionConfig is for backend use. Password is excluded from JSON responses.
 type ConnectionConfig struct {
+	DBMS         DBMS   `json:"dbms"`
 	Host         string `json:"host"`
 	Port         int    `json:"port"`
 	DatabaseName string `json:"database_name"`
@@ -52,12 +62,29 @@ func normalizeRegistration(name string, config ConnectionConfig) (string, Connec
 // NormalizeConnectionConfig validates settings for both saved registrations and
 // connection checks performed before registration. It never modifies passwords.
 func NormalizeConnectionConfig(config ConnectionConfig) (ConnectionConfig, error) {
+	if config.DBMS == "" {
+		config.DBMS = PostgreSQL
+	}
+	config.DBMS = DBMS(strings.ToLower(strings.TrimSpace(string(config.DBMS))))
 	config.Host = strings.TrimSpace(config.Host)
 	config.DatabaseName = strings.TrimSpace(config.DatabaseName)
 	config.Username = strings.TrimSpace(config.Username)
 	config.SSLMode = strings.ToLower(strings.TrimSpace(config.SSLMode))
-	if config.Port == 0 {
-		config.Port = 5432
+	databaseNameLimit, usernameLimit := 63, 63
+	allowedSSLModes := []string{"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
+	switch config.DBMS {
+	case PostgreSQL:
+		if config.Port == 0 {
+			config.Port = 5432
+		}
+	case MySQL:
+		databaseNameLimit, usernameLimit = 64, 32
+		allowedSSLModes = []string{"disable", "prefer", "require"}
+		if config.Port == 0 {
+			config.Port = 3306
+		}
+	default:
+		return ConnectionConfig{}, fmt.Errorf("%w: unsupported dbms", ErrInvalidInput)
 	}
 	if config.SSLMode == "" {
 		config.SSLMode = "require"
@@ -67,8 +94,8 @@ func NormalizeConnectionConfig(config ConnectionConfig) (ConnectionConfig, error
 		max         int
 	}{
 		{"host", config.Host, 253},
-		{"database_name", config.DatabaseName, 63},
-		{"username", config.Username, 63},
+		{"database_name", config.DatabaseName, databaseNameLimit},
+		{"username", config.Username, usernameLimit},
 	} {
 		if err := validateText(field.name, field.value, field.max); err != nil {
 			return ConnectionConfig{}, err
@@ -80,9 +107,7 @@ func NormalizeConnectionConfig(config ConnectionConfig) (ConnectionConfig, error
 	if !utf8.ValidString(config.Password) || strings.ContainsRune(config.Password, '\x00') {
 		return ConnectionConfig{}, fmt.Errorf("%w: password must be valid UTF-8 without NUL", ErrInvalidInput)
 	}
-	switch config.SSLMode {
-	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
-	default:
+	if !slices.Contains(allowedSSLModes, config.SSLMode) {
 		return ConnectionConfig{}, fmt.Errorf("%w: unsupported ssl_mode", ErrInvalidInput)
 	}
 	return config, nil
