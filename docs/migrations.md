@@ -4,7 +4,7 @@ The migration module obtains target connection settings from the database
 management registry. Migration history is stored in each target database, so
 versions are independent and linear per database.
 
-## Register a PostgreSQL database
+## Register a target database
 
 Only a Platform Admin can register a target connection, using the browser page
 at `/manage/databases` or the database management API. The API accepts
@@ -16,7 +16,7 @@ POST /admin/databases
 Content-Type: application/json
 X-CSRF-Token: <session token>
 
-{"name":"development","host":"localhost","port":5432,"database_name":"appdb","username":"user","password":"replace-with-target-password","ssl_mode":"disable"}
+{"name":"development","dbms":"mysql","host":"localhost","port":3306,"database_name":"appdb","username":"user","password":"replace-with-target-password","ssl_mode":"disable"}
 ```
 
 The response contains the registration UUID at `database.id`. Grant that UUID to
@@ -40,11 +40,16 @@ the viewer uses its own managed pool.
 ```
 
 The POST requires `X-CSRF-Token`. The server serializes executions per target
-database with a PostgreSQL advisory lock. It records a `running` row, executes
-the SQL and success update in one transaction, commits on success, and rolls
-back SQL changes on error before marking the history row `failed`. Failed
-migrations keep their version in the linear history; the next execution gets a
-new version. A process interruption can leave a visible `running` record.
+database with a PostgreSQL advisory lock or a MySQL named lock. It records a
+`running` row, executes the SQL, then records success. PostgreSQL runs the SQL
+and success update in one transaction, so failures roll back SQL changes. MySQL
+rolls back transactional DML on error, but implicitly commits many DDL
+statements (`CREATE`, `ALTER`, and `DROP`); those effects cannot be rolled back
+by this application. Statements that take control of the runner's transaction
+(including explicit transaction commands and MySQL `autocommit` changes) are
+rejected. Failed migrations keep their version in the linear history; the next
+execution gets a new version. A process interruption can leave a visible
+`running` record.
 
 The browser history and SQL editor are at
 `/workspace/databases/{databaseID}/migrations`. The editor is available only
@@ -52,3 +57,5 @@ with `view_edit`; API list and detail responses remain JSON.
 
 The target database account needs permission to create and update the
 `platform_migrations` history table and to perform the requested migration.
+MySQL targets should use a transactional table engine such as InnoDB when
+rollback of DML is required.

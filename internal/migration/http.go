@@ -83,6 +83,10 @@ func decodeRequestJSON(w http.ResponseWriter, r *http.Request, target any) bool 
 }
 
 func migrationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrInvalidMigration) {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid migration request"})
+		return
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		jsonResponse(w, http.StatusNotFound, map[string]string{"error": "database or migration not found"})
 		return
