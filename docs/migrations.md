@@ -59,3 +59,71 @@ The target database account needs permission to create and update the
 `platform_migrations` history table and to perform the requested migration.
 MySQL targets should use a transactional table engine such as InnoDB when
 rollback of DML is required.
+
+## Query plan preview (EXPLAIN)
+
+Users with `view_edit` can click **Preview execution plan** below the SQL editor
+before running a migration and choose either EXPLAIN or EXPLAIN ANALYZE. The
+default is EXPLAIN. Only SQL is required for preview; the migration name
+is required when executing a migration. PostgreSQL returns its JSON plan tree;
+MySQL returns native JSON for EXPLAIN and a TREE string for EXPLAIN ANALYZE.
+These include the database's scan/join choices, estimates, and execution
+statistics when supported. Planner costs are database-specific units, not
+milliseconds. Full native output is also available.
+Editing SQL or changing preview mode hides the previous preview so it is not
+mistaken for the new query. ANALYZE additionally shows actual rows per loop,
+loop counts, node execution times per loop, and total planning/execution times
+in milliseconds. Full JSON includes buffer statistics.
+
+```http
+POST /databases/{databaseID}/migrations/explain
+Content-Type: application/json
+X-CSRF-Token: <session token>
+
+{"sql":"SELECT * FROM public.accounts WHERE id = 1"}
+```
+
+The response is `{"query_plan":{"mode":"explain","plan":[...],"rolled_back":true}}` for
+PostgreSQL. MySQL's native EXPLAIN JSON is returned as an object; its ANALYZE
+TREE output is returned as a string. The endpoint requires a valid session,
+group-derived `view_edit` permission, CSRF, and the target database privileges
+needed to plan the supplied statement. Platform-admin status alone does not
+grant preview access.
+
+Without `analyze`, or with `"analyze": false`, preview uses
+`EXPLAIN (FORMAT JSON, ANALYZE FALSE)` on PostgreSQL or `EXPLAIN FORMAT=JSON` on
+MySQL in a read-only transaction. To request execution statistics, send
+`"analyze": true`; the response mode is `explain_analyze`. PostgreSQL uses
+`EXPLAIN (FORMAT JSON, ANALYZE TRUE, BUFFERS TRUE)`. MySQL uses
+`EXPLAIN ANALYZE FORMAT=TREE`, which supports SELECT, multi-table UPDATE/DELETE,
+and TABLE statements. The server runs ANALYZE in a read-write transaction and
+explicitly rolls it back before reporting success. Neither mode creates
+history/version records. A prepared statement enforces exactly one SQL
+statement. The operation has a five-second deadline; PostgreSQL also applies a
+statement timeout and one-second lock timeout while planning.
+
+Use SQL supported by the selected database's EXPLAIN. PostgreSQL supports
+SELECT, INSERT, UPDATE, DELETE, MERGE, and their WITH forms; MySQL support varies
+by preview mode as described above. Ordinary CREATE TABLE and ALTER TABLE
+statements are not supported; enter the SQL itself without an EXPLAIN prefix.
+Empty, invalid, unsupported, or multiple statements return `400`; target
+privilege denial returns `403`, target connection failures `502`, and planning
+timeouts `504`. Responses do not expose raw SQL/driver errors.
+
+**ANALYZE executes the supplied SQL**, including functions and triggers. The UI
+shows a warning and asks for confirmation before sending an ANALYZE request.
+Rollback undoes transactional table changes; it does not undo PostgreSQL sequence
+increments (`nextval`/`setval`), MySQL auto-increment values, or effects outside
+the database caused by a function/trigger. MySQL DDL and non-transactional table
+engines can also implicitly commit effects. Use a disposable target for queries
+with those effects. This is an execution preview with rollback, not an isolated
+sandbox. PostgreSQL documents
+[EXPLAIN ANALYZE execution](https://www.postgresql.org/docs/18/sql-explain.html)
+and [sequence rollback behavior](https://www.postgresql.org/docs/18/functions-sequence.html).
+
+The integration suite covers both preview modes against PostgreSQL and MySQL.
+The PostgreSQL test verifies estimates and actual statistics for UPDATE, rollback,
+and no migration-history side effect. The MySQL test verifies native JSON/TREE
+output, rollback of a supported multi-table UPDATE, permission checks, and that
+preview does not create migration history. Both use the disposable fixture
+described in [integration setup](database-management.md#integration-test).

@@ -11,6 +11,8 @@ migration yang tercatat. PostgreSQL tetap menyimpan data platform.
 - Koneksi target PostgreSQL dan MySQL terenkripsi di platform registry.
 - Viewer untuk schema, table, column, constraint, index, dan data.
 - Editor SQL dan riwayat migration per database target.
+- Preview execution plan melalui `EXPLAIN` dan `EXPLAIN ANALYZE` di editor
+  migration PostgreSQL dan MySQL 8.4.
 
 Platform Admin mengelola platform; peran ini tidak memberi akses otomatis ke
 database target. Hak `view_only` dan `view_edit` diberikan kepada group.
@@ -111,5 +113,9 @@ paket tersebut. Kedua `schema.sql` memiliki tabel dan siklus inisialisasi
 berbeda, jadi bukan salinan satu sama lain. Tabel `platform_migrations` berada
 di setiap database target dan dibuat oleh modul migration saat diperlukan.
 
-Bonus DBMS tambahan yang saat ini didukung dan diuji adalah MySQL 8.4. Schema diff/generation
-dan analisis execution plan belum termasuk implementasi.
+Bonus DBMS tambahan yang didukung dan diuji adalah MySQL 8.4. Preview execution
+plan memakai format native tiap DBMS; MySQL ANALYZE hanya berlaku untuk
+statement yang didukung MySQL. Mode ANALYZE menjalankan SQL dan me-rollback
+perubahan transaksional; sequence/auto-increment dan efek eksternal dapat tetap
+berubah. Schema diff/generation belum diimplementasikan. Lihat
+[panduan preview plan](docs/migrations.md#query-plan-preview-explain).

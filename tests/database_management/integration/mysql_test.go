@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"net"
 	"os"
 	"strconv"
@@ -124,6 +125,44 @@ func TestMySQLTargetIntegration(t *testing.T) {
 	}
 
 	migrationPath := "/databases/" + databaseID + "/migrations"
+	planEndpoint := migrationPath + "/explain"
+	assertCount(t, db, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='platform_migrations'", 0)
+	for _, analyze := range []bool{false, true} {
+		var response struct {
+			QueryPlan struct {
+				Mode       string          `json:"mode"`
+				Plan       json.RawMessage `json:"plan"`
+				RolledBack bool            `json:"rolled_back"`
+			} `json:"query_plan"`
+		}
+		mode := "explain"
+		if analyze {
+			mode = "explain_analyze"
+		}
+		planSQL := "SELECT amount FROM `" + table + "` WHERE id = 1"
+		if analyze {
+			planSQL = "UPDATE `" + table + "` AS target JOIN `" + table + "` AS source ON source.id = target.id SET target.note = 'preview-only' WHERE target.id = 1"
+		}
+		body := admin.do(t, "POST", planEndpoint, map[string]any{
+			"sql": planSQL, "analyze": analyze,
+		}, 200)
+		decode(t, body, &response)
+		plan := response.QueryPlan
+		if plan.Mode != mode || !plan.RolledBack || !json.Valid(plan.Plan) {
+			t.Fatalf("unexpected MySQL %s response: %+v", mode, plan)
+		}
+		if analyze && (len(plan.Plan) == 0 || plan.Plan[0] != '"') {
+			t.Fatalf("MySQL EXPLAIN ANALYZE should return its native tree text: %s", plan.Plan)
+		}
+		if !analyze && (len(plan.Plan) == 0 || plan.Plan[0] != '{') {
+			t.Fatalf("MySQL EXPLAIN should return its native JSON tree: %s", plan.Plan)
+		}
+		if analyze {
+			assertCount(t, db, "SELECT COUNT(*) FROM `"+table+"` WHERE id = 1 AND note IS NULL", 1)
+		}
+	}
+	admin.do(t, "POST", planEndpoint, map[string]any{"sql": "SELECT 1; SELECT 2"}, 400)
+	assertCount(t, db, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='platform_migrations'", 0)
 	rejectedSQL := "INSERT INTO `" + table + "` (amount,note) VALUES (3,'marker; COMMIT'); /* runner owns the transaction */ COMMIT; SELECT * FROM `missing_integration_table`"
 	admin.do(t, "POST", migrationPath, map[string]string{"name": "reject transaction control", "sql": rejectedSQL}, 400)
 	assertCount(t, db, "SELECT COUNT(*) FROM `"+table+"`", 2)
@@ -153,6 +192,7 @@ func TestMySQLTargetIntegration(t *testing.T) {
 	viewer := f.login(t, "mysql_viewer", memberPassword)
 	viewer.do(t, "GET", "/databases/"+databaseID+"/schemas", nil, 200)
 	viewer.do(t, "POST", migrationPath, map[string]string{"name": "must be denied", "sql": "COMMIT"}, 403)
+	viewer.do(t, "POST", planEndpoint, map[string]any{"sql": "SELECT 1"}, 403)
 
 	failedSQL := "INSERT INTO `" + table + "` (amount) VALUES (3); SELECT * FROM `missing_integration_table`"
 	decode(t, admin.do(t, "POST", migrationPath, map[string]string{"name": "rollback mysql insert", "sql": failedSQL}, 422), &result)
