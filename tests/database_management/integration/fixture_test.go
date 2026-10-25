@@ -54,7 +54,7 @@ func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	connectionURL := os.Getenv("TEST_DATABASE_URL")
 	if connectionURL == "" {
-		t.Fatal("TEST_DATABASE_URL is required; see docs/database-management.md#integration-tests")
+		t.Fatal("TEST_DATABASE_URL is required; see docs/database-management.md#integration-test")
 	}
 	config, err := pgx.ParseConfig(connectionURL)
 	if err != nil {
@@ -111,16 +111,13 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	f.inspector = postgres.NewInspector(f.pools)
-	migrations := migration.NewServiceWithTargetOpener(f.platform, func(ctx context.Context, id string) (*sql.DB, error) {
+	migrations := migration.NewService(func(ctx context.Context, id string) (*sql.DB, error) {
 		connection, err := f.registry.GetConnectionConfig(ctx, id)
 		if err != nil {
 			return nil, err
 		}
 		return connector.Open(ctx, connection)
 	})
-	if err := migrations.Initialize(ctx); err != nil {
-		t.Fatalf("initialize migrations: %v", err)
-	}
 	auth := access.NewHTTPHandler(authService, false)
 	f.server = httptest.NewServer(app.RoutesWithModulesAndFrontend(auth,
 		databasehttp.NewHandler(f.registry, f.pools, auth),

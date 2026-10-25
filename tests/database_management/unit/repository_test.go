@@ -1,4 +1,4 @@
-package database
+package database_test
 
 import (
 	"bytes"
@@ -10,59 +10,50 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/wafhr/IF3110_K01-13/internal/database"
 )
 
 func TestNewRepositoryRejectsInvalidKey(t *testing.T) {
-	r := testRepository(t)
+	db := testDatabase(t)
 	for _, key := range []string{"", "not-base64!", base64.StdEncoding.EncodeToString(make([]byte, 16))} {
-		if _, err := NewRepository(r.db, key); err == nil {
+		if _, err := database.NewRepository(db, key); err == nil {
 			t.Error("expected invalid encryption key error")
 		}
 	}
-	if _, err := NewRepository(nil, ""); err == nil {
+	if _, err := database.NewRepository(nil, ""); err == nil {
 		t.Fatal("expected nil database error")
 	}
 }
 
 func TestPasswordEncryption(t *testing.T) {
-	r := testRepository(t)
 	for _, password := range []string{"", " private-password with spaces "} {
-		first, err := r.encryptPassword(password)
-		if err != nil {
-			t.Fatal(err)
-		}
-		second, err := r.encryptPassword(password)
-		if err != nil {
-			t.Fatal(err)
-		}
+		first := createAndCaptureCiphertext(t, password)
+		second := createAndCaptureCiphertext(t, password)
 		if bytes.Equal(first, second) {
 			t.Fatal("password encryption reused a nonce")
-		}
-		got, err := r.decryptPassword(first)
-		if err != nil || got != password {
-			t.Fatal("password did not round trip")
 		}
 		if password != "" && bytes.Contains(first, []byte(password)) {
 			t.Fatal("ciphertext contains plaintext password")
 		}
-		first[len(first)-1] ^= 1
-		if _, err := r.decryptPassword(first); !errors.Is(err, ErrStorage) {
+		config, err := readConnectionConfig(t, first, base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32))))
+		if err != nil {
+			t.Fatal("password did not round trip:", err)
+		}
+		if config.Password != password {
+			t.Fatal("password did not round trip")
+		}
+		tampered := append([]byte(nil), first...)
+		tampered[len(tampered)-1] ^= 1
+		if _, err := readConnectionConfig(t, tampered, base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32)))); !errors.Is(err, database.ErrStorage) {
 			t.Fatalf("tampered password error = %v", err)
 		}
-	}
-	if _, err := r.decryptPassword([]byte("short")); !errors.Is(err, ErrStorage) {
-		t.Fatal("truncated ciphertext must be rejected")
-	}
-	other, err := NewRepository(r.db, base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 32))))
-	if err != nil {
-		t.Fatal(err)
-	}
-	encrypted, err := r.encryptPassword("private-password")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := other.decryptPassword(encrypted); !errors.Is(err, ErrStorage) {
-		t.Fatal("wrong key must not decrypt credentials")
+		if _, err := readConnectionConfig(t, []byte("short"), base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32)))); !errors.Is(err, database.ErrStorage) {
+			t.Fatal("truncated ciphertext must be rejected")
+		}
+		if _, err := readConnectionConfig(t, first, base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 32)))); !errors.Is(err, database.ErrStorage) {
+			t.Fatal("wrong key must not decrypt credentials")
+		}
 	}
 }
 
@@ -77,7 +68,7 @@ func TestInitialize(t *testing.T) {
 		}
 	}
 	r = testRepository(t, databaseStep{statement: "CREATE TABLE", exec: true, err: errors.New("private-password")})
-	assertStorageError(t, r.Initialize(context.Background()), ErrStorage)
+	assertStorageError(t, r.Initialize(context.Background()), database.ErrStorage)
 }
 
 func TestCreate(t *testing.T) {
@@ -104,8 +95,8 @@ func TestCreate(t *testing.T) {
 	if got.ID != testDatabaseID || got.Name != "Main" || !got.CreatedAt.Equal(testCreatedAt) {
 		t.Fatalf("unexpected public metadata: %+v", got)
 	}
-	password, err := r.decryptPassword(storedPassword)
-	if err != nil || password != validConfig().Password {
+	config, err := readConnectionConfig(t, storedPassword, base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32))))
+	if err != nil || config.Password != validConfig().Password {
 		t.Fatal("stored password cannot be recovered")
 	}
 	encoded, err := json.Marshal(got)
@@ -120,14 +111,19 @@ func TestCreate(t *testing.T) {
 func TestCreateErrors(t *testing.T) {
 	r := testRepository(t)
 	_, err := r.Create(context.Background(), "", validConfig())
-	assertStorageError(t, err, ErrInvalidInput)
+	assertStorageError(t, err, database.ErrInvalidInput)
+	for _, name := range []string{"  ", strings.Repeat("a", 101), "main\x00", string([]byte{255})} {
+		if _, err := r.Create(context.Background(), name, validConfig()); !errors.Is(err, database.ErrInvalidInput) {
+			t.Errorf("Create(%q) error = %v, want invalid input", name, err)
+		}
+	}
 	for _, test := range []struct {
 		name string
 		err  error
 		want error
 	}{
-		{"duplicate", fmt.Errorf("wrapped: %w", stateError("23505")), ErrConflict},
-		{"storage", errors.New("private-password"), ErrStorage},
+		{"duplicate", fmt.Errorf("wrapped: %w", stateError("23505")), database.ErrConflict},
+		{"storage", errors.New("private-password"), database.ErrStorage},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			r := testRepository(t, databaseStep{statement: "INSERT INTO managed_databases", err: test.err})
@@ -150,8 +146,8 @@ func TestGet(t *testing.T) {
 		step databaseStep
 		want error
 	}{
-		{"missing", databaseStep{statement: "SELECT", columns: step.columns}, ErrNotFound},
-		{"query failure", databaseStep{statement: "SELECT", err: errors.New("private-password")}, ErrStorage},
+		{"missing", databaseStep{statement: "SELECT", columns: step.columns}, database.ErrNotFound},
+		{"query failure", databaseStep{statement: "SELECT", err: errors.New("private-password")}, database.ErrStorage},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			r := testRepository(t, test.step)
@@ -192,7 +188,7 @@ func TestListErrors(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			r := testRepository(t, test.step)
 			got, err := r.List(context.Background())
-			assertStorageError(t, err, ErrStorage)
+			assertStorageError(t, err, database.ErrStorage)
 			if got != nil {
 				t.Fatal("failed listing must not return partial results")
 			}
@@ -216,8 +212,8 @@ func TestUpdate(t *testing.T) {
 	if err != nil || got.ID != testDatabaseID || got.Name != "Renamed" || !got.CreatedAt.Equal(testCreatedAt) {
 		t.Fatalf("unexpected Update result: %+v, %v", got, err)
 	}
-	password, err := r.decryptPassword(encrypted)
-	if err != nil || password != "" {
+	storedConfig, err := readConnectionConfig(t, encrypted, base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32))))
+	if err != nil || storedConfig.Password != "" {
 		t.Fatal("empty password must be persisted as an explicit replacement")
 	}
 }
@@ -225,15 +221,15 @@ func TestUpdate(t *testing.T) {
 func TestUpdateErrors(t *testing.T) {
 	r := testRepository(t)
 	_, err := r.Update(context.Background(), testDatabaseID, "", validConfig())
-	assertStorageError(t, err, ErrInvalidInput)
+	assertStorageError(t, err, database.ErrInvalidInput)
 	for _, test := range []struct {
 		name string
 		step databaseStep
 		want error
 	}{
-		{"missing", databaseStep{statement: "UPDATE", columns: metadataStep("", "").columns}, ErrNotFound},
-		{"duplicate", databaseStep{statement: "UPDATE", err: stateError("23505")}, ErrConflict},
-		{"query failure", databaseStep{statement: "UPDATE", err: errors.New("private-password")}, ErrStorage},
+		{"missing", databaseStep{statement: "UPDATE", columns: metadataStep("", "").columns}, database.ErrNotFound},
+		{"duplicate", databaseStep{statement: "UPDATE", err: stateError("23505")}, database.ErrConflict},
+		{"query failure", databaseStep{statement: "UPDATE", err: errors.New("private-password")}, database.ErrStorage},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			r := testRepository(t, test.step)
@@ -251,9 +247,9 @@ func TestDelete(t *testing.T) {
 		want   error
 	}{
 		{"deleted", driver.RowsAffected(1), nil, nil},
-		{"missing", driver.RowsAffected(0), nil, ErrNotFound},
-		{"storage failure", nil, errors.New("private-password"), ErrStorage},
-		{"rows affected failure", badResult{}, nil, ErrStorage},
+		{"missing", driver.RowsAffected(0), nil, database.ErrNotFound},
+		{"storage failure", nil, errors.New("private-password"), database.ErrStorage},
+		{"rows affected failure", badResult{}, nil, database.ErrStorage},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			r := testRepository(t, databaseStep{statement: "DELETE FROM managed_databases", exec: true,
@@ -264,18 +260,14 @@ func TestDelete(t *testing.T) {
 }
 
 func TestGetConnectionConfig(t *testing.T) {
-	r := testRepository(t)
-	encrypted, err := r.encryptPassword(" private-password ")
-	if err != nil {
-		t.Fatal(err)
-	}
+	encrypted := createAndCaptureCiphertext(t, " private-password ")
 	step := databaseStep{
 		statement: "SELECT host, port, database_name, username, password_ciphertext, ssl_mode",
 		columns:   []string{"host", "port", "database_name", "username", "password_ciphertext", "ssl_mode"},
 		rows:      [][]driver.Value{{"localhost", int64(5433), "app", "reader", encrypted, "verify-full"}},
 		check:     checkID,
 	}
-	r = testRepository(t, step)
+	r := testRepository(t, step)
 	got, err := r.GetConnectionConfig(context.Background(), testDatabaseID)
 	if err != nil {
 		t.Fatal(err)
@@ -289,16 +281,16 @@ func TestGetConnectionConfig(t *testing.T) {
 		step databaseStep
 		want error
 	}{
-		{"missing", databaseStep{statement: "SELECT", columns: step.columns}, ErrNotFound},
-		{"query failure", databaseStep{statement: "SELECT", err: errors.New("private-password")}, ErrStorage},
+		{"missing", databaseStep{statement: "SELECT", columns: step.columns}, database.ErrNotFound},
+		{"query failure", databaseStep{statement: "SELECT", err: errors.New("private-password")}, database.ErrStorage},
 		{"corrupted credentials", databaseStep{statement: "SELECT", columns: step.columns,
-			rows: [][]driver.Value{{"localhost", int64(5432), "app", "reader", []byte("corrupt"), "require"}}}, ErrStorage},
+			rows: [][]driver.Value{{"localhost", int64(5432), "app", "reader", []byte("corrupt"), "require"}}}, database.ErrStorage},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			r := testRepository(t, test.step)
 			got, err := r.GetConnectionConfig(context.Background(), testDatabaseID)
 			assertStorageError(t, err, test.want)
-			if got != (ConnectionConfig{}) {
+			if got != (database.ConnectionConfig{}) {
 				t.Fatal("failed credential lookup must not return partial configuration")
 			}
 		})
@@ -309,12 +301,48 @@ func TestMalformedIDsDoNotQueryDatabase(t *testing.T) {
 	r := testRepository(t)
 	ctx := context.Background()
 	_, err := r.Get(ctx, "bad-id")
-	assertStorageError(t, err, ErrNotFound)
+	assertStorageError(t, err, database.ErrNotFound)
 	_, err = r.Update(ctx, "bad-id", "Main", validConfig())
-	assertStorageError(t, err, ErrNotFound)
-	assertStorageError(t, r.Delete(ctx, "bad-id"), ErrNotFound)
+	assertStorageError(t, err, database.ErrNotFound)
+	assertStorageError(t, r.Delete(ctx, "bad-id"), database.ErrNotFound)
 	_, err = r.GetConnectionConfig(ctx, "bad-id")
-	assertStorageError(t, err, ErrNotFound)
+	assertStorageError(t, err, database.ErrNotFound)
+}
+
+func createAndCaptureCiphertext(t *testing.T, password string) []byte {
+	t.Helper()
+	step := metadataStep("INSERT INTO managed_databases", "Main")
+	var ciphertext []byte
+	step.check = func(t *testing.T, args []driver.NamedValue) {
+		if len(args) != 7 {
+			t.Fatalf("got %d arguments, want 7", len(args))
+		}
+		var ok bool
+		ciphertext, ok = args[5].Value.([]byte)
+		if !ok {
+			t.Fatal("password must be stored as ciphertext")
+		}
+		ciphertext = append([]byte(nil), ciphertext...)
+	}
+	r := testRepository(t, step)
+	config := validConfig()
+	config.Password = password
+	if _, err := r.Create(context.Background(), "Main", config); err != nil {
+		t.Fatal(err)
+	}
+	return ciphertext
+}
+
+func readConnectionConfig(t *testing.T, ciphertext []byte, key string) (database.ConnectionConfig, error) {
+	t.Helper()
+	step := databaseStep{
+		statement: "SELECT host, port, database_name, username, password_ciphertext, ssl_mode",
+		columns:   []string{"host", "port", "database_name", "username", "password_ciphertext", "ssl_mode"},
+		rows:      [][]driver.Value{{"localhost", int64(5432), "app", "reader", ciphertext, "require"}},
+		check:     checkID,
+	}
+	r := testRepositoryWithKey(t, key, step)
+	return r.GetConnectionConfig(context.Background(), testDatabaseID)
 }
 
 func checkID(t *testing.T, args []driver.NamedValue) {

@@ -1,4 +1,4 @@
-package database
+package database_test
 
 import (
 	"context"
@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wafhr/IF3110_K01-13/internal/database"
 )
 
 const testDatabaseID = "00000000-0000-4000-8000-000000000001"
@@ -104,7 +106,21 @@ func (r *scriptRows) Next(values []driver.Value) error {
 	return nil
 }
 
-func testRepository(t *testing.T, steps ...databaseStep) *Repository {
+func testRepository(t *testing.T, steps ...databaseStep) *database.Repository {
+	return testRepositoryWithKey(t, base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32))), steps...)
+}
+
+func testRepositoryWithKey(t *testing.T, key string, steps ...databaseStep) *database.Repository {
+	t.Helper()
+	db := testDatabase(t, steps...)
+	repository, err := database.NewRepository(db, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+func testDatabase(t *testing.T, steps ...databaseStep) *sql.DB {
 	t.Helper()
 	script := &databaseScript{t: t, steps: steps}
 	db := sql.OpenDB(script)
@@ -116,11 +132,7 @@ func testRepository(t *testing.T, steps ...databaseStep) *Repository {
 			t.Errorf("consumed %d of %d database operations", script.next, len(script.steps))
 		}
 	})
-	repository, err := NewRepository(db, base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32))))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return repository
+	return db
 }
 
 func metadataStep(statement, name string) databaseStep {
