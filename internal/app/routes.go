@@ -39,6 +39,7 @@ func routes(accessHandler, databaseHandler, viewerHandler, migrationHandler, fro
 	}
 	if migrationHandler != nil {
 		mux.Handle("/databases/{databaseID}/migrations", migrationHandler)
+		mux.Handle("/databases/{databaseID}/migrations/explain", migrationHandler)
 		mux.Handle("/databases/{databaseID}/migrations/{version}", migrationHandler)
 	}
 	if frontendHandler != nil {

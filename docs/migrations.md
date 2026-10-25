@@ -52,3 +52,40 @@ with `view_edit`; API list and detail responses remain JSON.
 
 The target database account needs permission to create and update the
 `platform_migrations` history table and to perform the requested migration.
+
+## Query plan preview (EXPLAIN)
+
+Users with `view_edit` can click **Preview execution plan** below the SQL editor
+before running a migration. Only SQL is required for preview; the migration name
+is required when executing a migration. The result shows the plan tree, scan and
+join types, relation/index names, estimated rows, and startup/total cost. Costs
+are PostgreSQL planner units, not milliseconds. Full JSON is also available.
+Editing SQL hides the previous preview so it is not mistaken for the new query.
+
+```http
+POST /databases/{databaseID}/migrations/explain
+Content-Type: application/json
+X-CSRF-Token: <session token>
+
+{"sql":"SELECT * FROM public.accounts WHERE id = 1"}
+```
+
+The response is `{"query_plan":{"mode":"explain","plan":[...]}}`, retaining
+PostgreSQL's JSON plan tree. The endpoint requires a valid session, group-derived
+`view_edit` permission, CSRF, and the target PostgreSQL privileges needed to plan
+the supplied statement. Platform-admin status alone does not grant preview access.
+
+Preview uses `EXPLAIN (FORMAT JSON, ANALYZE FALSE)` in a read-only transaction
+that is rolled back. It does not execute the migration or create history/version
+records. A prepared statement enforces exactly one SQL statement; trailing
+semicolons and semicolons inside SQL literals are handled by PostgreSQL. The
+operation has a five-second deadline and statement timeout, plus a one-second
+lock timeout while planning.
+
+Use SQL supported by PostgreSQL EXPLAIN, such as SELECT, INSERT, UPDATE, DELETE,
+MERGE, or their WITH forms. Ordinary CREATE TABLE and ALTER TABLE statements are
+not supported; enter the SQL itself without an EXPLAIN prefix. Empty, invalid,
+unsupported, or multiple statements return `400`; target privilege denial returns
+`403`, target connection failures `502`, and planning timeouts `504`. Responses
+do not expose raw SQL/driver errors. `EXPLAIN ANALYZE` is not enabled yet, so
+actual execution time and actual row counts are not included.

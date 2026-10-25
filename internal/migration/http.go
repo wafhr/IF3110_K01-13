@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,8 @@ import (
 	"strconv"
 
 	"github.com/wafhr/IF3110_K01-13/internal/access"
+	"github.com/wafhr/IF3110_K01-13/internal/database"
+	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 )
 
 type HTTPHandler struct {
@@ -21,6 +24,7 @@ func NewHTTPHandler(service *Service, auth *access.HTTPHandler) *HTTPHandler {
 	h := &HTTPHandler{service: service, routes: http.NewServeMux()}
 	h.routes.Handle("GET /databases/{databaseID}/migrations", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.list)))
 	h.routes.Handle("POST /databases/{databaseID}/migrations", auth.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(h.execute)))
+	h.routes.Handle("POST /databases/{databaseID}/migrations/explain", auth.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(h.explain)))
 	h.routes.Handle("GET /databases/{databaseID}/migrations/{version}", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.detail)))
 	return h
 }
@@ -68,6 +72,38 @@ func (h *HTTPHandler) execute(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonResponse(w, http.StatusCreated, map[string]any{"migration": row})
 }
+
+func (h *HTTPHandler) explain(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		SQL string `json:"sql"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if !decodeRequestJSON(w, r, &input) {
+		return
+	}
+	plan, err := h.service.Explain(r.Context(), r.PathValue("databaseID"), input.SQL)
+	if err != nil {
+		status, message := http.StatusInternalServerError, "query plan preview failed"
+		switch {
+		case errors.Is(err, errInvalidPlanQuery):
+			status, message = http.StatusBadRequest, "Cannot plan this SQL. Use one supported statement, such as SELECT, INSERT, UPDATE, or DELETE, and check syntax and object names."
+		case errors.Is(err, context.DeadlineExceeded):
+			status, message = http.StatusGatewayTimeout, "query plan preview timed out"
+		case errors.Is(err, context.Canceled):
+			status, message = http.StatusRequestTimeout, "query plan preview canceled"
+		case errors.Is(err, database.ErrNotFound):
+			status, message = http.StatusNotFound, "database not found"
+		case errors.Is(err, targetdb.ErrPermissionDenied):
+			status, message = http.StatusForbidden, "target database permission denied"
+		case errors.Is(err, targetdb.ErrAuthentication), errors.Is(err, targetdb.ErrConnection):
+			status, message = http.StatusBadGateway, "could not connect to the target database"
+		}
+		jsonResponse(w, status, map[string]string{"error": message})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"query_plan": plan})
+}
+
 func decodeRequestJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
