@@ -30,6 +30,7 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb/postgres"
+	"github.com/wafhr/IF3110_K01-13/web"
 )
 
 const adminPassword = "integration-admin-password"
@@ -121,10 +122,10 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatalf("initialize migrations: %v", err)
 	}
 	auth := access.NewHTTPHandler(authService, false)
-	f.server = httptest.NewServer(app.RoutesWithModules(auth,
+	f.server = httptest.NewServer(app.RoutesWithModulesAndFrontend(auth,
 		databasehttp.NewHandler(f.registry, f.pools, auth),
 		databasehttp.NewViewerHandler(f.registry, f.inspector, auth),
-		migration.NewHTTPHandler(migrations, auth)))
+		migration.NewHTTPHandler(migrations, auth), web.NewHandler(authService, auth)))
 	f.settings = database.ConnectionConfig{Host: config.Host, Port: int(config.Port), DatabaseName: targetConfig.Database,
 		Username: role, Password: targetPassword, SSLMode: "disable"}
 	return f
@@ -298,6 +299,28 @@ func (c *apiClient) do(t *testing.T, method, path string, input any, status int,
 		if bytes.Contains(content, []byte(secret)) {
 			t.Fatal("HTTP response exposed credentials")
 		}
+	}
+	return content
+}
+
+func (c *apiClient) page(t *testing.T, path string) []byte {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Accept", "text/html")
+	response, err := c.client.Do(request)
+	if err != nil {
+		t.Fatalf("browser page request failed: %v", err)
+	}
+	defer response.Body.Close()
+	content, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || !strings.Contains(response.Header.Get("Content-Type"), "text/html") {
+		t.Fatalf("GET %s: status/content-type = %d/%q", path, response.StatusCode, response.Header.Get("Content-Type"))
 	}
 	return content
 }

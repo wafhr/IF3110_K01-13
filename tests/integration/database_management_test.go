@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +57,30 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 	outsider := f.login(t, "outsider", memberPassword)
 	viewer := f.login(t, "viewer", memberPassword)
 	path := tableURL(id, quotedSchema, quotedTable)
+
+	t.Run("browser workspace pages respect authorization and render feature flows", func(t *testing.T) {
+		adminPage := string(admin.page(t, "/manage/databases"))
+		if !strings.Contains(adminPage, "Register database") || !strings.Contains(adminPage, "database-admin.js") {
+			t.Fatal("database admin page did not render its form and browser client")
+		}
+		workspace := string(member.page(t, "/"))
+		if !strings.Contains(workspace, "workspace.js") || !strings.Contains(workspace, "Your workspaces") {
+			t.Fatal("home page did not render the accessible workspace client")
+		}
+		viewerPage := string(member.page(t, "/workspace/databases/"+id))
+		if !strings.Contains(viewerPage, "database-viewer.js") || !strings.Contains(viewerPage, "SCHEMA EXPLORER") {
+			t.Fatal("database workspace did not render the schema browser")
+		}
+		migrationPage := string(viewer.page(t, "/workspace/databases/"+id+"/migrations"))
+		if !strings.Contains(migrationPage, "migrations.js") || !strings.Contains(migrationPage, "Run a migration") {
+			t.Fatal("migration page did not render history and editor shell")
+		}
+		viewerAdminPage := string(viewer.page(t, "/manage/databases"))
+		if !strings.Contains(viewerAdminPage, "Good to see you, viewer") || strings.Contains(viewerAdminPage, "Register database") {
+			t.Fatal("non-admin was not redirected away from database administration")
+		}
+	})
+
 	readPage := func(t *testing.T, endpoint string) database.DataPage {
 		t.Helper()
 		var result struct {

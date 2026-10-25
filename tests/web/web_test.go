@@ -33,6 +33,32 @@ func TestLoginPageAndStylesheet(t *testing.T) {
 	}
 }
 
+func TestFrontendAssetsAndProtectedWorkspaceRoutes(t *testing.T) {
+	auth := access.NewHTTPHandler(nil, false)
+	handler := web.NewHandler(nil, auth)
+	for _, path := range []string{
+		"/assets/js/platform.js", "/assets/js/workspace.js", "/assets/js/database-admin.js",
+		"/assets/js/database-viewer.js", "/assets/js/migrations.js",
+	} {
+		t.Run(path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+			if response.Code != http.StatusOK || !strings.Contains(response.Header().Get("Content-Type"), "javascript") {
+				t.Fatalf("response = %d %q", response.Code, response.Header().Get("Content-Type"))
+			}
+		})
+	}
+	for _, path := range []string{"/", "/manage/databases", "/workspace/databases/example", "/workspace/databases/example/migrations"} {
+		t.Run(path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+			if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/login" {
+				t.Fatalf("unauthenticated route = %d %q", response.Code, response.Header().Get("Location"))
+			}
+		})
+	}
+}
+
 func TestApplicationRoutesSeparateFrontendFromAccessAPI(t *testing.T) {
 	accessHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Route", "access")
