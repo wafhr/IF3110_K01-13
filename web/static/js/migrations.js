@@ -11,6 +11,7 @@
       if(!db)throw new Error('Database access is unavailable for this account.');
       $key('migration-database-title').textContent=`Migrations · ${db.name}`;
       $key('migration-permission').textContent=db.permission==='view_edit'?'View and edit access':'View only access';
+      $key('migration-editor').querySelector('.muted').textContent=db.dbms==='mysql'?'MySQL may implicitly commit DDL; only transaction-safe statements can be rolled back.':'SQL runs transactionally. Failed statements are rolled back and retained in history.';
       if(db.permission==='view_edit')$key('migration-editor').hidden=false;
       const records=(await Atlas.request(endpoint)).migrations||[];tbody.replaceChildren();
       if(!records.length){const row=document.createElement('tr');cell(row,'No migrations have been run yet.');tbody.append(row)}

@@ -87,6 +87,9 @@ func (c *Connector) connectionConfig(settings database.ConnectionConfig) (*pgx.C
 	if err != nil {
 		return nil, err
 	}
+	if settings.DBMS != database.PostgreSQL {
+		return nil, database.ErrInvalidInput
+	}
 	// Encode individual values rather than accepting or concatenating raw DSNs.
 	values := url.Values{
 		"host": {settings.Host}, "port": {strconv.Itoa(settings.Port)},

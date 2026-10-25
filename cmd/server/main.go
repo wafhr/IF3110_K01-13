@@ -20,7 +20,7 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/platformdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
-	"github.com/wafhr/IF3110_K01-13/internal/targetdb/postgres"
+	"github.com/wafhr/IF3110_K01-13/internal/targetdb/drivers"
 	"github.com/wafhr/IF3110_K01-13/web"
 )
 
@@ -53,7 +53,7 @@ func run() error {
 	if err := databaseRegistry.Initialize(startupCtx); err != nil {
 		return err
 	}
-	targetConnector, err := postgres.NewConnector(postgres.Options{})
+	targetConnector, err := drivers.NewConnector()
 	if err != nil {
 		return err
 	}
@@ -66,18 +66,19 @@ func run() error {
 	if err := accessService.Initialize(startupCtx, cfg.BootstrapAdminUsername, cfg.BootstrapAdminPassword); err != nil {
 		return err
 	}
-	migrationService := migration.NewService(func(ctx context.Context, id string) (*sql.DB, error) {
+	migrationService := migration.NewService(func(ctx context.Context, id string) (*sql.DB, database.DBMS, error) {
 		connection, err := databaseRegistry.GetConnectionConfig(ctx, id)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		return targetConnector.Open(ctx, connection)
+		db, err := targetConnector.Open(ctx, connection)
+		return db, connection.DBMS, err
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	accessHandler := access.NewHTTPHandler(accessService, cfg.SecureCookie)
 	databaseHandler := databasehttp.NewHandler(databaseRegistry, targetConnections, accessHandler)
-	viewerHandler := databasehttp.NewViewerHandler(databaseRegistry, postgres.NewInspector(targetConnections), accessHandler)
+	viewerHandler := databasehttp.NewViewerHandler(databaseRegistry, drivers.NewInspector(databaseRegistry, targetConnections), accessHandler)
 	migrationHandler := migration.NewHTTPHandler(migrationService, accessHandler)
 	server := &http.Server{
 		Addr:              cfg.Address(),
