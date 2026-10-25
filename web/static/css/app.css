@@ -1,7 +1,7 @@
 ﻿:root {
   color-scheme:light;
   --ink:#17231f;
-  --muted:#687773;
+  --muted:#626f6b;
   --line:#e5ebe7;
   --surface:#fff;
   --canvas:#f5f8f5;
@@ -141,7 +141,7 @@ button {
 }
 .subline {
   display:block;
-  font-size:.75rem;
+  font-size:.8rem;
   margin-top:3px;
   word-break:break-all
 }
@@ -168,8 +168,9 @@ button {
   padding:2px 7px;
   background:var(--mint);
   color:var(--green);
-  font-size:.65rem
+  font-size:.75rem
 }
+
 .card-grid {
   display:grid;
   grid-template-columns:repeat(2,minmax(0,1fr));
@@ -209,6 +210,15 @@ button {
   font-size:.85rem;
   color:var(--green);
   font-weight:700
+}
+.workspace-card-actions {
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:8px
+}
+.workspace-card-actions .card-link {
+  white-space:nowrap
 }
 .panel {
   padding:22px;
@@ -285,13 +295,16 @@ button {
   align-items:flex-end;
   gap:13px
 }
+#database-form {
+  flex-wrap:wrap
+}
 .form-row label {
   display:flex;
   flex:1;
   min-width:150px;
   flex-direction:column;
   gap:6px;
-  font-size:.8rem;
+  font-size:.85rem;
   font-weight:600
 }
 .form-row input,.form-row select,.inline-form select {
@@ -320,6 +333,10 @@ button {
   font-weight:700;
   font-size:.83rem
 }
+a:focus-visible,button:focus-visible,select:focus-visible,textarea:focus-visible {
+  outline:3px solid var(--green);
+  outline-offset:2px
+}
 .button.primary {
   background:var(--green);
   color:#fff
@@ -340,6 +357,10 @@ button {
   border-color:var(--line);
   color:#35443d
 }
+.button:disabled {
+  cursor:not-allowed;
+  opacity:.55
+}
 .button.full {
   width:100%;
   margin-top:8px
@@ -353,14 +374,18 @@ button {
 }
 table {
   width:100%;
+  min-width:560px;
   border-collapse:collapse;
   text-align:left;
-  font-size:.83rem
+  font-size:.875rem
+}
+.table-panel table {
+  min-width:720px
 }
 th {
   padding:10px 12px;
   color:var(--muted);
-  font-size:.7rem;
+  font-size:.8rem;
   text-transform:uppercase;
   letter-spacing:.08em;
   font-weight:700;
@@ -591,16 +616,21 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; background:#f4f7f5; padding:
 
 @media(max-width:560px) {
   .topbar {
+  display:grid;
+  grid-template-columns:1fr;
+  gap:10px;
   height:auto;
   min-height:64px;
   padding:10px 15px
 }
 .top-actions {
+  flex-wrap:wrap;
+  justify-content:flex-start;
   gap:6px
 }
 .top-actions .button {
   padding:7px 8px;
-  font-size:.74rem
+  font-size:.78rem
 }
 .user-chip {
   font-size:.78rem
@@ -644,3 +674,13 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; background:#f4f7f5; padding:
 
 }
 
+
+@media(max-width:560px) {
+  .table-wrap::before {
+    content:"Scroll horizontally to see all columns";
+    display:block;
+    padding-bottom:8px;
+    color:var(--muted);
+    font-size:.75rem
+  }
+}

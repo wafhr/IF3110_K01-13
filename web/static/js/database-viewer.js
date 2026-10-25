@@ -39,7 +39,7 @@
     const rows=(page.rows||[]).map(row=>row.map(cell=>cell===null?'NULL':cell));
     panel.append(table((page.columns||[]).map(c=>`${c.name} (${c.data_type})`),rows));
     panel.append(Atlas.pagination({offset:page.offset,limit:page.limit,hasMore:page.has_more,onChange:next=>loadData(path,panel,next).catch(e=>error(e.message))}));
-    const summary=document.createElement('p');summary.className='muted small-copy';summary.textContent=`Rows ${page.offset+1}–${page.offset+page.rows.length}${page.has_more?' (more available)':''}`;panel.append(summary);
+    const summary=document.createElement('p');summary.className='muted small-copy';summary.textContent=page.rows.length?`Rows ${page.offset+1}–${page.offset+page.rows.length}${page.has_more?' (more available)':''}`:'No rows';panel.append(summary);
   }
   schemaSelect.onchange=()=>loadTables().catch(e=>error(e.message));tableSelect.onchange=()=>loadTable();
   loadDatabase().catch(error);

@@ -8,7 +8,7 @@
     databases.forEach(database => {
       const card=document.createElement('a'); card.className='feature-card'; card.href=`/workspace/databases/${encodeURIComponent(database.id)}`;
       addText(card,'span','DATABASE','eyebrow'); addText(card,'h2',database.name); addText(card,'p',database.database_name,'muted');
-      addText(card,'span',database.permission==='view_edit'?'View and edit':'View only','small-tag'); addText(card,'span','Open workspace →','card-link'); list.append(card);
+      const actions=document.createElement('div'); actions.className='workspace-card-actions'; addText(actions,'span',database.permission==='view_edit'?'View and edit':'View only','small-tag'); addText(actions,'span','Open workspace →','card-link'); card.append(actions); list.append(card);
     });
   }).catch(error => { list.setAttribute('aria-busy','false'); list.replaceChildren(); Atlas.setNotice(notice,error.message,true); });
 })();
