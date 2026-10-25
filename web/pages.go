@@ -21,12 +21,12 @@ type pageData struct {
 }
 
 func loginPage(w http.ResponseWriter, r *http.Request) {
-	render(w, "login", pageData{Title: "Sign in", Notice: noticeText(r.URL.Query().Get("notice"))})
+	render(w, "access/login", pageData{Title: "Sign in", Notice: noticeText(r.URL.Query().Get("notice"))})
 }
 
 func homePage(w http.ResponseWriter, r *http.Request) {
 	user := access.CurrentUser(r.Context())
-	render(w, "home", pageData{Title: "Workspace", User: user, CSRFToken: access.CSRFToken(r.Context()), IsAdmin: user.PlatformAdmin})
+	render(w, "access/home", pageData{Title: "Workspace", User: user, CSRFToken: access.CSRFToken(r.Context()), IsAdmin: user.PlatformAdmin})
 }
 
 func usersPage(service *access.Service) http.HandlerFunc {
@@ -36,7 +36,7 @@ func usersPage(service *access.Service) http.HandlerFunc {
 			renderError(w)
 			return
 		}
-		render(w, "users", pageData{Title: "Users", User: access.CurrentUser(r.Context()), CSRFToken: access.CSRFToken(r.Context()),
+		render(w, "access/users", pageData{Title: "Users", User: access.CurrentUser(r.Context()), CSRFToken: access.CSRFToken(r.Context()),
 			Users: users, Notice: noticeText(r.URL.Query().Get("notice")), IsAdmin: true})
 	}
 }
@@ -72,6 +72,11 @@ func groupsPage(service *access.Service) http.HandlerFunc {
 				page.Notice = noticeText("group-error")
 			}
 		}
-		render(w, "groups", page)
+		render(w, "access/groups", page)
 	}
+}
+
+func databasesPage(w http.ResponseWriter, r *http.Request) {
+	user := access.CurrentUser(r.Context())
+	render(w, "database/manage", pageData{Title: "Databases", User: user, CSRFToken: access.CSRFToken(r.Context()), IsAdmin: user.PlatformAdmin})
 }

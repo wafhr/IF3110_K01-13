@@ -2,7 +2,7 @@
 <header class="topbar">
   <a class="brand" href="/"><span class="brand-mark">A</span><span>Atlas<span class="brand-light">DB</span></span></a>
   <nav class="top-actions" aria-label="Main navigation">
-    {{if .IsAdmin}}<a class="button ghost" href="/manage/users">Users</a><a class="button ghost" href="/manage/groups">Groups</a>{{end}}
+    {{if .IsAdmin}}<a class="button ghost" href="/manage/users">Users</a><a class="button ghost" href="/manage/groups">Groups</a><a class="button ghost" href="/manage/databases">Databases</a>{{end}}
     <span class="user-chip">{{.User.Username}}</span>
     <form action="/auth/logout" method="post"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button class="button ghost" type="submit">Sign out</button></form>
   </nav>

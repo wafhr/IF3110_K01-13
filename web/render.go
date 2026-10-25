@@ -14,7 +14,7 @@ func render(w http.ResponseWriter, name string, page pageData) {
 	t, err := template.ParseFS(assets,
 		"templates/layouts/base.html",
 		"templates/partials/header.html",
-		"templates/access/"+name+".html",
+		"templates/"+name+".html",
 	)
 	if err != nil {
 		renderError(w)

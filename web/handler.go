@@ -22,6 +22,7 @@ func NewHandler(service *access.Service, auth *access.HTTPHandler) http.Handler 
 	mux.Handle("POST /manage/users", auth.RequireBrowserPage(true, true, http.HandlerFunc(createUser(service))))
 	mux.Handle("POST /manage/users/{userID}", auth.RequireBrowserPage(true, true, http.HandlerFunc(updateUser(service))))
 	mux.Handle("GET /manage/groups", auth.RequireBrowserPage(true, false, http.HandlerFunc(groupsPage(service))))
+	mux.Handle("GET /manage/databases", auth.RequireBrowserPage(true, false, http.HandlerFunc(databasesPage)))
 	mux.Handle("POST /manage/groups", auth.RequireBrowserPage(true, true, http.HandlerFunc(createGroup(service))))
 	mux.Handle("POST /manage/groups/{groupID}/delete", auth.RequireBrowserPage(true, true, http.HandlerFunc(deleteGroup(service))))
 	mux.Handle("POST /manage/groups/{groupID}/members", auth.RequireBrowserPage(true, true, http.HandlerFunc(addMember(service))))
