@@ -83,11 +83,12 @@ the authorization check on the backend for each operation.
 
 ## Browser interface
 
-Open `/login` to sign in. Platform Admins can manage users, groups, group
-membership, and database grants from the browser interface. Grants are keyed
-by database UUID. Database registration, schema/data viewing, and migration
-pages are not included in this branch because their backend endpoints have not
-been integrated here yet.
+Open `/login` to sign in. The home page lists databases granted through the
+user's groups. Platform Admins can manage users and groups at `/manage/users`
+and `/manage/groups`, and register target databases at `/manage/databases`.
+Users open a database workspace at `/workspace/databases/{databaseID}` and its
+migration page at `/workspace/databases/{databaseID}/migrations`.
 
-The server-rendered UI lives in `web/`: page handlers, access templates, shared
-layouts, and static assets are kept in their corresponding subdirectories.
+Browser forms send a session-bound CSRF token. The browser interface and JSON
+API use the same backend authorization checks. Page handlers, templates, and
+static assets live in `web/`.
