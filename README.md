@@ -11,6 +11,8 @@ migration yang tercatat. PostgreSQL tetap menyimpan data platform.
 - Koneksi target PostgreSQL dan MySQL terenkripsi di platform registry.
 - Viewer untuk schema, table, column, constraint, index, dan data.
 - Editor SQL dan riwayat migration per database target.
+- Schema diff dari definisi JSON dan kandidat SQL untuk tabel/kolom yang belum
+  ada; hasilnya dapat ditinjau dan diedit di editor sebelum dijalankan.
 - Preview execution plan melalui `EXPLAIN` dan `EXPLAIN ANALYZE` di editor
   migration PostgreSQL dan MySQL 8.4.
 

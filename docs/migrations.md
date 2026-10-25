@@ -60,6 +60,31 @@ The target database account needs permission to create and update the
 MySQL targets should use a transactional table engine such as InnoDB when
 rollback of DML is required.
 
+## Schema diff and SQL generation
+
+Users with `view_edit` can expand **Compare with desired schema and generate
+SQL** on the migration page. The desired definition is JSON with a `tables`
+array; each table names a schema and table and lists its columns with a SQL
+type and `nullable` flag. For example:
+
+```json
+{"tables":[{"schema":"public","name":"products","columns":[{"name":"id","type":"bigint","nullable":false},{"name":"title","type":"varchar(200)","nullable":false}]}]}
+```
+
+The comparison checks tables and columns in the named schemas. It reports
+missing tables and columns, type/nullability differences, and current columns
+or tables omitted from the desired definition. SQL is generated for missing
+tables and columns only. Type/nullability changes and omitted objects are
+reported for manual review; generated SQL never drops objects automatically.
+The supported type names are validated before SQL generation. The resulting
+SQL is copied into the migration editor, where it can be reviewed and changed
+before execution.
+
+The API endpoint is `POST /databases/{databaseID}/migrations/schema-diff`,
+requires `view_edit` and the session CSRF token, and accepts
+`{"desired_schema": {"tables": [...]}}`. The response contains `changes`,
+`sql`, and explanatory `notes` under `schema_diff`.
+
 ## Query plan preview (EXPLAIN)
 
 Users with `view_edit` can click **Preview execution plan** below the SQL editor
