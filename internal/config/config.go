@@ -1,11 +1,14 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
@@ -16,6 +19,17 @@ type Config struct {
 	BootstrapAdminUsername string
 	BootstrapAdminPassword string
 	SecureCookie           bool
+}
+
+// LoadDotEnv loads local settings from .env in the working
+// directory without overriding existing process environment variables. A missing
+// file is allowed so deployments can provide configuration entirely externally.
+func LoadDotEnv() error {
+	if err := godotenv.Load(".env"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Parser errors can include file contents, including credentials.
+		return errors.New("cannot load .env: check file format and read permissions")
+	}
+	return nil
 }
 
 // Load reads configuration from process environment variables.

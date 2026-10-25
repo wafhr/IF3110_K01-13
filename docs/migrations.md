@@ -1,12 +1,14 @@
 # Database migrations
 
-The migration module uses the platform database as a connection catalog and
-stores each database's migration history in that target database.
+The migration module obtains target connection settings from the database
+management registry. Migration history is stored in each target database, so
+versions are independent and linear per database.
 
 ## Register a PostgreSQL database
 
-Only a Platform Admin can register a target connection. Send the connection
-configuration in a JSON body through the database-management API. The password
+Only a Platform Admin can register a target connection, using the browser page
+at `/manage/databases` or the database management API. The API accepts
+connection fields in JSON; it does not accept a connection URL. The password
 is encrypted in the platform registry and is never returned by the API.
 
 ```http
@@ -22,11 +24,9 @@ a group through `/admin/groups/{groupID}/databases/{databaseID}`. A member
 with `view_only` can read history; `view_edit` can execute migrations. The
 effective group permission follows the access module's rule: `view_edit` wins.
 
-The combined server initializes the database-management registry before the
-migration module. Migration connections are opened from that same registry using
-the saved, decrypted credentials; no separate `connection_url` field is needed.
-Each migration operation owns and closes its own pool, leaving the viewer pool
-available. The migration runner's transaction and history behavior is unchanged.
+Migration connections are opened from that registry using saved, decrypted
+credentials. Each migration operation owns and closes its connection pool;
+the viewer uses its own managed pool.
 
 ## Migration API
 
@@ -46,8 +46,9 @@ back SQL changes on error before marking the history row `failed`. Failed
 migrations keep their version in the linear history; the next execution gets a
 new version. A process interruption can leave a visible `running` record.
 
-Append `?format=html` to the list URL to open the migration history and SQL
-editor. The editor is shown only for a request authorized with `view_edit`.
+The browser history and SQL editor are at
+`/workspace/databases/{databaseID}/migrations`. The editor is available only
+with `view_edit`; API list and detail responses remain JSON.
 
 The target database account needs permission to create and update the
 `platform_migrations` history table and to perform the requested migration.

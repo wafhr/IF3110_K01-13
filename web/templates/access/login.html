@@ -1,0 +1,17 @@
+{{define "content"}}
+<main class="login-card">
+  <a class="brand" href="/login"><span class="brand-mark">A</span><span>Atlas<span class="brand-light">DB</span></span></a>
+  <p class="eyebrow">DATABASE MANAGEMENT PLATFORM</p>
+  <h1>Welcome back</h1>
+  <p class="muted">Sign in to manage your database workspace.</p>
+  {{if .Notice}}<p class="notice error" role="alert">{{.Notice}}</p>{{end}}
+  <form action="/auth/login" method="post" class="stack">
+    <label for="username">Username</label>
+    <input id="username" name="username" autocomplete="username" required autofocus>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <button class="button primary full" type="submit">Sign in</button>
+  </form>
+  <p class="footnote">Your session is protected with a secure, HttpOnly cookie.</p>
+</main>
+{{end}}

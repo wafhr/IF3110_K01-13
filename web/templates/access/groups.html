@@ -1,0 +1,29 @@
+{{define "content"}}
+<main class="container">
+  <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/">Workspace</a><span aria-hidden="true">/</span><span>Groups</span></nav>
+  <div class="page-heading"><div><p class="eyebrow">PLATFORM ADMINISTRATION</p><h1>Groups &amp; access</h1><p class="muted">Membership and database permission are granted through groups.</p></div><span class="count-badge">{{len .Groups}} groups</span></div>
+  {{if .Notice}}<p class="notice" role="status">{{.Notice}}</p>{{end}}
+  <section class="panel form-panel"><div class="panel-heading"><div><h2>Create a group</h2><p class="muted">Users can belong to multiple groups.</p></div></div>
+    <form action="/manage/groups" method="post" class="form-row group-create"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><label>Group name<input name="name" maxlength="100" required></label><button class="button primary" type="submit">Create group</button></form>
+  </section>
+  <div class="split-layout">
+    <section class="panel"><div class="panel-heading"><h2>Groups</h2></div><nav class="group-list" aria-label="Groups">
+      {{range .Groups}}<div class="group-row {{if eq .ID $.GroupID}}selected{{end}}"><a href="/manage/groups?group={{.ID}}">{{.Name}}<span class="subline">{{.ID}}</span></a><form action="/manage/groups/{{.ID}}/delete" method="post"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><button class="icon-button danger-text" type="submit" aria-label="Delete {{.Name}}">Delete</button></form></div>{{else}}<p class="muted">No groups yet.</p>{{end}}
+    </nav></section>
+    <section class="panel detail-panel">
+      {{if .GroupID}}
+      <div class="panel-heading"><div><p class="eyebrow">GROUP DETAILS</p><h2>{{.GroupName}}</h2></div></div>
+      <section class="subsection"><h3>Members</h3>
+        <form action="/manage/groups/{{.GroupID}}/members" method="post" class="form-row compact"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><label>Add user<select name="user_id" required>{{range .Users}}<option value="{{.ID}}">{{.Username}}</option>{{end}}</select></label><button class="button small" type="submit">Add member</button></form>
+        <ul class="item-list">{{range .Members}}<li><span>{{.Username}}{{if not .Active}} <span class="status-pill">Inactive</span>{{end}}</span><form action="/manage/groups/{{$.GroupID}}/members/{{.ID}}/delete" method="post"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><button class="icon-button danger-text" type="submit">Remove</button></form></li>{{else}}<li class="muted">No members in this group.</li>{{end}}</ul>
+      </section>
+      <section class="subsection"><h3>Database grants</h3><p class="muted small-copy">Use the database UUID from database management.</p>
+        <form action="/manage/groups/{{.GroupID}}/databases" method="post" class="form-row compact grant-form"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><label>Database UUID<input name="database_id" required></label><label>Permission<select name="permission"><option value="view_only">View only</option><option value="view_edit">View and edit</option></select></label><button class="button small" type="submit">Save grant</button></form>
+        <ul class="item-list">{{range .Grants}}<li><span class="grant-id">{{.DatabaseID}} <span class="small-tag">{{.Permission}}</span></span><form action="/manage/groups/{{$.GroupID}}/databases/{{.DatabaseID}}/delete" method="post"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><button class="icon-button danger-text" type="submit">Remove</button></form></li>{{else}}<li class="muted">No database grants.</li>{{end}}</ul>
+      </section>
+      {{else}}<div class="empty-state"><h3>Select a group</h3><p>Choose a group to manage members and database grants.</p></div>{{end}}
+    </section>
+  </div>
+  <footer class="page-footer"><a href="/">← Back to workspace</a></footer>
+</main>
+{{end}}

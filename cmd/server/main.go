@@ -21,6 +21,7 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/platformdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb/postgres"
+	"github.com/wafhr/IF3110_K01-13/web"
 )
 
 func main() {
@@ -31,6 +32,9 @@ func main() {
 }
 
 func run() error {
+	if err := config.LoadDotEnv(); err != nil {
+		return err
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -62,16 +66,13 @@ func run() error {
 	if err := accessService.Initialize(startupCtx, cfg.BootstrapAdminUsername, cfg.BootstrapAdminPassword); err != nil {
 		return err
 	}
-	migrationService := migration.NewServiceWithTargetOpener(db, func(ctx context.Context, id string) (*sql.DB, error) {
+	migrationService := migration.NewService(func(ctx context.Context, id string) (*sql.DB, error) {
 		connection, err := databaseRegistry.GetConnectionConfig(ctx, id)
 		if err != nil {
 			return nil, err
 		}
 		return targetConnector.Open(ctx, connection)
 	})
-	if err := migrationService.Initialize(startupCtx); err != nil {
-		return err
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	accessHandler := access.NewHTTPHandler(accessService, cfg.SecureCookie)
@@ -80,7 +81,7 @@ func run() error {
 	migrationHandler := migration.NewHTTPHandler(migrationService, accessHandler)
 	server := &http.Server{
 		Addr:              cfg.Address(),
-		Handler:           app.RoutesWithModules(accessHandler, databaseHandler, viewerHandler, migrationHandler),
+		Handler:           app.RoutesWithModulesAndFrontend(accessHandler, databaseHandler, viewerHandler, migrationHandler, web.NewHandler(accessService, accessHandler)),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

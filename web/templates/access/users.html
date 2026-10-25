@@ -1,0 +1,31 @@
+{{define "content"}}
+<main class="container">
+  <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/">Workspace</a><span aria-hidden="true">/</span><span>Users</span></nav>
+  <div class="page-heading"><div><p class="eyebrow">PLATFORM ADMINISTRATION</p><h1>Users</h1><p class="muted">Create accounts and manage platform roles.</p></div><span class="count-badge">{{len .Users}} total</span></div>
+  {{if .Notice}}<p class="notice" role="status">{{.Notice}}</p>{{end}}
+  <section class="panel form-panel"><div class="panel-heading"><div><h2>Add a user</h2><p class="muted">Passwords must be at least 12 characters.</p></div></div>
+    <form action="/manage/users" method="post" class="form-row">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <label>Username<input name="username" minlength="3" maxlength="64" pattern="[A-Za-z0-9._-]+" required></label>
+      <label>Temporary password<input name="password" type="password" minlength="12" required autocomplete="new-password"></label>
+      <label>Platform role<select name="platform_admin"><option value="false">User</option><option value="true">Platform Admin</option></select></label>
+      <button class="button primary" type="submit">Create user</button>
+    </form>
+  </section>
+  <section class="panel table-panel"><div class="panel-heading"><div><h2>All users</h2><p class="muted">Platform Admin is a platform role, not database access.</p></div></div>
+    <div class="table-wrap"><table><thead><tr><th>User</th><th>Status</th><th>Role</th><th>Created</th><th>Update</th></tr></thead><tbody>
+    {{range .Users}}
+    <tr><td><strong>{{.Username}}</strong>{{if eq .ID $.User.ID}} <span class="small-tag">You</span>{{end}}<span class="subline">{{.ID}}</span></td><td>{{if .Active}}<span class="state active">Active</span>{{else}}<span class="state inactive">Inactive</span>{{end}}</td><td>{{if .PlatformAdmin}}Platform Admin{{else}}User{{end}}</td><td>{{.CreatedAt.Format "2006-01-02"}}</td><td>
+      <form action="/manage/users/{{.ID}}" method="post" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+        <select name="active" aria-label="{{.Username}} account status"><option value="true" {{if .Active}}selected{{end}}>Active</option><option value="false" {{if not .Active}}selected{{end}}>Inactive</option></select>
+        <select name="platform_admin" aria-label="{{.Username}} platform role"><option value="false" {{if not .PlatformAdmin}}selected{{end}}>User</option><option value="true" {{if .PlatformAdmin}}selected{{end}}>Admin</option></select>
+        <button class="button small" type="submit">Save</button>
+      </form>
+    </td></tr>
+    {{else}}<tr><td colspan="5" class="empty-cell">No users found.</td></tr>{{end}}
+    </tbody></table></div>
+  </section>
+  <footer class="page-footer"><a href="/">← Back to workspace</a></footer>
+</main>
+{{end}}

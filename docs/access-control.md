@@ -80,3 +80,15 @@ Database viewer and migration handlers should use
 and `HTTPHandler.RequireDatabaseAccess(access.ViewEdit, next)` for edits or
 migrations. The wrapped route must have a `{databaseID}` path value. This keeps
 the authorization check on the backend for each operation.
+
+## Browser interface
+
+Open `/login` to sign in. The home page lists databases granted through the
+user's groups. Platform Admins can manage users and groups at `/manage/users`
+and `/manage/groups`, and register target databases at `/manage/databases`.
+Users open a database workspace at `/workspace/databases/{databaseID}` and its
+migration page at `/workspace/databases/{databaseID}/migrations`.
+
+Browser forms send a session-bound CSRF token. The browser interface and JSON
+API use the same backend authorization checks. Page handlers, templates, and
+static assets live in `web/`.

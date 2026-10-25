@@ -1,0 +1,19 @@
+{{define "content"}}
+<main class="container">
+  <div class="page-heading"><div><p class="eyebrow">WORKSPACE</p><h1>Good to see you, {{.User.Username}}</h1><p class="muted">Your database access is managed through group membership.</p></div>{{if .IsAdmin}}<span class="role-badge">Platform Admin</span>{{end}}</div>
+  {{if .IsAdmin}}
+  <section class="card-grid" aria-label="Platform administration">
+    <a class="feature-card" href="/manage/users"><span class="eyebrow">IDENTITY</span><h2>Users</h2><p>Manage accounts, roles, and access status.</p><span class="card-link">Manage users →</span></a>
+    <a class="feature-card" href="/manage/groups"><span class="eyebrow">ACCESS</span><h2>Groups</h2><p>Organize members and database permissions.</p><span class="card-link">Manage groups →</span></a>
+    <a class="feature-card" href="/manage/databases"><span class="eyebrow">DATABASES</span><h2>Target databases</h2><p>Register and maintain PostgreSQL connections.</p><span class="card-link">Manage databases →</span></a>
+  </section>
+  {{end}}
+  <section class="panel workspace-panel">
+    <div class="panel-heading"><div><p class="eyebrow">DATABASES</p><h2>Your workspaces</h2></div></div>
+    <div id="workspace-notice" class="notice" hidden role="status"></div>
+    <div id="workspace-list" class="card-grid" aria-live="polite" aria-busy="true"><p class="muted">Loading databases…</p></div>
+  </section>
+  <footer class="page-footer">Atlas DB · Database Management Platform</footer>
+</main>
+<script src="/assets/js/platform.js" defer></script><script src="/assets/js/workspace.js" defer></script>
+{{end}}
