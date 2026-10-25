@@ -563,6 +563,7 @@ tbody tr:last-child td {
 .login-card .eyebrow {
   margin-bottom:8px
 }
+.pagination { display:flex; gap:8px; margin-top:16px }
 
 @media(max-width:800px) {
   .container {

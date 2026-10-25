@@ -10,5 +10,5 @@
   </section>
   <section class="panel table-panel"><div class="panel-heading"><div><h2>Registered databases</h2><p class="muted">Deleting a registration does not delete the real database.</p></div></div><div class="table-wrap"><table><thead><tr><th>Name</th><th>Connection</th><th>SSL</th><th>Actions</th></tr></thead><tbody id="database-list"><tr><td colspan="4" class="empty-cell">Loading databases…</td></tr></tbody></table></div></section>
 </main>
-<script>window.databaseAdmin={csrf:{{printf "%q" .CSRFToken}}}</script><script src="/assets/js/database-admin.js" defer></script>
+<script src="/assets/js/platform.js" defer></script><script src="/assets/js/database-admin.js" defer></script>
 {{end}}
