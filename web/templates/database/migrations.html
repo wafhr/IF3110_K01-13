@@ -1,0 +1,11 @@
+{{define "content"}}
+<main class="container" id="migration-workspace" data-database-id="{{.DatabaseID}}" data-version="{{.MigrationVersion}}">
+  <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/">Workspace</a><span aria-hidden="true">/</span><a href="/workspace/databases/{{.DatabaseID}}">Database</a><span aria-hidden="true">/</span><span>Migrations</span></nav>
+  <div class="page-heading"><div><p class="eyebrow">DATABASE WORKSPACE</p><h1 id="migration-database-title">Migrations</h1><p id="migration-permission" class="muted">Loading permissions…</p></div></div>
+  <p id="migration-notice" class="notice" hidden role="status"></p>
+  <section class="panel"><div class="panel-heading"><div><p class="eyebrow">HISTORY</p><h2>Migration runs</h2></div></div><div class="table-wrap"><table><thead><tr><th>Version</th><th>Name</th><th>Status</th><th>Started</th><th>Finished</th></tr></thead><tbody id="migration-list"><tr><td colspan="5" class="empty-cell">Loading migrations…</td></tr></tbody></table></div></section>
+  <section id="migration-detail" class="panel" hidden></section>
+  <section id="migration-editor" class="panel" hidden><div class="panel-heading"><div><p class="eyebrow">VIEW + EDIT ACCESS</p><h2>Run a migration</h2><p class="muted">SQL runs transactionally. Failed statements are rolled back and retained in history.</p></div></div><form id="migration-form" class="stack"><label for="migration-name">Name</label><input id="migration-name" maxlength="160" required><label for="migration-sql">SQL</label><textarea id="migration-sql" rows="12" required maxlength="1048576"></textarea><button class="button primary" type="submit">Run migration</button></form></section>
+</main>
+<script src="/assets/js/platform.js" defer></script><script src="/assets/js/migrations.js" defer></script>
+{{end}}

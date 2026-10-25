@@ -7,18 +7,19 @@ import (
 )
 
 type pageData struct {
-	Title      string
-	User       access.User
-	CSRFToken  string
-	Notice     string
-	Users      []access.User
-	Groups     []access.Group
-	Members    []access.GroupMember
-	Grants     []access.DatabaseGrant
-	GroupID    string
-	GroupName  string
-	IsAdmin    bool
-	DatabaseID string
+	Title            string
+	User             access.User
+	CSRFToken        string
+	Notice           string
+	Users            []access.User
+	Groups           []access.Group
+	Members          []access.GroupMember
+	Grants           []access.DatabaseGrant
+	GroupID          string
+	GroupName        string
+	IsAdmin          bool
+	DatabaseID       string
+	MigrationVersion string
 }
 
 func loginPage(w http.ResponseWriter, r *http.Request) {
@@ -85,4 +86,10 @@ func databasesPage(w http.ResponseWriter, r *http.Request) {
 func databaseWorkspacePage(w http.ResponseWriter, r *http.Request) {
 	user := access.CurrentUser(r.Context())
 	render(w, "database/workspace", pageData{Title: "Database workspace", User: user, CSRFToken: access.CSRFToken(r.Context()), IsAdmin: user.PlatformAdmin, DatabaseID: r.PathValue("databaseID")})
+}
+
+func migrationWorkspacePage(w http.ResponseWriter, r *http.Request) {
+	user := access.CurrentUser(r.Context())
+	render(w, "database/migrations", pageData{Title: "Migrations", User: user, CSRFToken: access.CSRFToken(r.Context()), IsAdmin: user.PlatformAdmin,
+		DatabaseID: r.PathValue("databaseID"), MigrationVersion: r.PathValue("version")})
 }

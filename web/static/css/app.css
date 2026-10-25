@@ -564,6 +564,8 @@ tbody tr:last-child td {
   margin-bottom:8px
 }
 .pagination { display:flex; gap:8px; margin-top:16px }
+textarea { min-height:180px; border:1px solid #dce4de; border-radius:8px; padding:10px 12px; font:14px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; resize:vertical }
+pre { white-space:pre-wrap; overflow-wrap:anywhere; background:#f4f7f5; padding:16px; border-radius:8px }
 
 @media(max-width:800px) {
   .container {

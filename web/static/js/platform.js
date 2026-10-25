@@ -10,7 +10,7 @@ window.Atlas = (() => {
     }
     const response = await fetch(url, {method, headers, body: body === undefined ? undefined : JSON.stringify(body)});
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || 'Request failed. Please try again.');
+    if (!response.ok) { const error=new Error(data.error || 'Request failed. Please try again.'); error.data=data; error.status=response.status; throw error; }
     return data;
   }
 
