@@ -79,7 +79,8 @@ func run() error {
 	accessHandler := access.NewHTTPHandler(accessService, cfg.SecureCookie)
 	databaseHandler := databasehttp.NewHandler(databaseRegistry, targetConnections, accessHandler)
 	viewerHandler := databasehttp.NewViewerHandler(databaseRegistry, drivers.NewInspector(databaseRegistry, targetConnections), accessHandler)
-	migrationHandler := migration.NewHTTPHandler(migrationService, accessHandler)
+	schemaInspector := drivers.NewInspector(databaseRegistry, targetConnections)
+	migrationHandler := migration.NewHTTPHandler(migrationService, accessHandler, schemaInspector)
 	server := &http.Server{
 		Addr:              cfg.Address(),
 		Handler:           app.RoutesWithModulesAndFrontend(accessHandler, databaseHandler, viewerHandler, migrationHandler, web.NewHandler(accessService, accessHandler)),

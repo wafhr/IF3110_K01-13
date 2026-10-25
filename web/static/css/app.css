@@ -684,3 +684,6 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; background:#f4f7f5; padding:
     font-size:.75rem
   }
 }
+ .schema-diff-tool { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--line, #d8ddd9); }
+ .schema-diff-tool summary { cursor: pointer; font-weight: 600; }
+ .schema-example { white-space: pre-wrap; overflow-wrap: anywhere; padding: .8rem; background: #f3f6f4; border-radius: .5rem; }

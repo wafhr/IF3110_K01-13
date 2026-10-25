@@ -14,6 +14,14 @@
       <p class="notice" id="query-plan-warning" hidden>EXPLAIN ANALYZE executes SQL to measure actual performance. Transactional changes are rolled back, but sequence or auto-increment values, implicit DDL commits, and external effects from functions or triggers may persist.</p>
       <div class="form-row"><label>Preview mode<select id="query-plan-mode"><option value="explain">EXPLAIN · estimates only</option><option value="explain_analyze">EXPLAIN ANALYZE · execute and roll back</option></select></label><button id="preview-query-plan" class="button" type="button">Preview execution plan</button><button class="button primary" type="submit">Run migration</button></div>
     </form>
+    <details class="schema-diff-tool">
+      <summary>Compare with desired schema and generate SQL</summary>
+      <p class="muted">Describe the tables and columns you want. The comparison checks schemas you name below. Generated SQL only creates missing tables and adds missing columns; column changes and omitted objects are reported for manual review.</p>
+      <pre class="schema-example">{"tables":[{"schema":"public","name":"products","columns":[{"name":"id","type":"bigint","nullable":false},{"name":"title","type":"varchar(200)","nullable":false}]}]}</pre>
+      <label for="desired-schema">Desired schema JSON</label><textarea id="desired-schema" rows="10" spellcheck="false"></textarea>
+      <button id="compare-schema" class="button" type="button">Compare schemas</button>
+      <div id="schema-diff-results" hidden aria-live="polite"></div>
+    </details>
   </section>
   <section id="query-plan" class="panel" hidden aria-live="polite"></section>
 </main>
