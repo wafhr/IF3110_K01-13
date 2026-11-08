@@ -119,7 +119,7 @@ func (r *repositoryRows) Next(values []driver.Value) error {
 	return nil
 }
 
-func testMigrationRepository(t *testing.T, steps ...repositoryStep) *migration.Repository {
+func testMigrationDatabase(t *testing.T, steps ...repositoryStep) *sql.DB {
 	t.Helper()
 	script := &repositoryScript{t: t, steps: steps}
 	db := sql.OpenDB(script)
@@ -131,6 +131,12 @@ func testMigrationRepository(t *testing.T, steps ...repositoryStep) *migration.R
 			t.Errorf("consumed %d of %d repository operations", script.next, len(script.steps))
 		}
 	})
+	return db
+}
+
+func testMigrationRepository(t *testing.T, steps ...repositoryStep) *migration.Repository {
+	t.Helper()
+	db := testMigrationDatabase(t, steps...)
 	repository, err := migration.NewRepository(db)
 	if err != nil {
 		t.Fatal(err)

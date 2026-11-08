@@ -69,6 +69,9 @@ type Revision struct {
 // RevertsExecutionID menghubungkan rollback dengan eksekusi committed yang dibatalkan.
 // Migration history Milestone 2 menyimpan eksekusi yang berhasil di-commit.
 type Execution struct {
+	Sequence           int64      `json:"sequence"`
+	Name               string     `json:"name"`
+	LegacyVersion      *int64     `json:"legacy_version,omitempty"`
 	ID                 string     `json:"id"`
 	DatabaseID         string     `json:"database_id"`
 	MigrationID        string     `json:"migration_id"`
