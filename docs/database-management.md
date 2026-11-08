@@ -118,7 +118,7 @@ PostgreSQL dan MySQL disposable. Konfigurasi server tersedia di
 docker compose -f compose.test.yaml up -d --wait
 $env:TEST_DATABASE_URL = 'postgres://if3110_test_admin:if3110-integration-password@localhost:55432/postgres?sslmode=disable'
 $env:TEST_MYSQL_DSN = 'if3110_test_admin:if3110-mysql-test-password@tcp(127.0.0.1:53306)/if3110_mysql_test?tls=false'
-go test -tags=integration ./tests/database_management/integration
+go test -tags=integration ./tests
 docker compose -f compose.test.yaml down -v
 ```
 
