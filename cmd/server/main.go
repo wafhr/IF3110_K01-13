@@ -21,14 +21,17 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/platformdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb/drivers"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 	"github.com/wafhr/IF3110_K01-13/web"
 )
 
 func main() {
+	slog.SetDefault(telemetry.NewLogger(os.Stdout, "server"))
 	if err := run(); err != nil {
-		slog.Error("server stopped", "error", err)
+		slog.Error("server_stopped", "actor", "system", "status", "failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("server_stopped", "actor", "system", "status", "success")
 }
 
 func run() error {
@@ -39,6 +42,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	slog.SetDefault(telemetry.NewLogger(os.Stdout, "server",
+		cfg.PlatformDatabaseURL, cfg.DatabaseEncryptionKey, cfg.BootstrapAdminPassword))
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancelStartup()
 	db, err := platformdb.Open(startupCtx, cfg.PlatformDatabaseURL)
@@ -98,7 +103,7 @@ func run() error {
 	}
 	result := make(chan error, 1)
 	go func() { result <- server.ListenAndServe() }()
-	slog.Info("starting HTTP server", "address", server.Addr)
+	slog.Info("server_starting", "actor", "system", "status", "running", "address", server.Addr)
 	select {
 	case err := <-result:
 		if errors.Is(err, http.ErrServerClosed) {
@@ -108,7 +113,7 @@ func run() error {
 	case <-ctx.Done():
 		stop() // Interupsi kedua mengikuti perilaku sinyal bawaan.
 	}
-	slog.Info("shutting down HTTP server")
+	slog.Info("server_stopping", "actor", "system", "status", "running")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
