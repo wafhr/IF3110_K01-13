@@ -17,6 +17,7 @@ var (
 	ErrNotFound              = errors.New("migration not found")
 	ErrConflict              = errors.New("migration conflict")
 	ErrStorage               = errors.New("migration storage failure")
+	ErrInvalidHistory        = fmt.Errorf("%w: execution history is inconsistent", ErrStorage)
 	ErrImmutableMigration    = fmt.Errorf("%w: executed migration cannot be revised", ErrConflict)
 	ErrInvalidMigration      = errors.New("invalid migration request")
 	ErrIrreversibleMigration = fmt.Errorf("%w: migration is irreversible", ErrInvalidMigration)

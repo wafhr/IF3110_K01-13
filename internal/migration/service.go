@@ -17,11 +17,74 @@ import (
 type TargetOpener func(context.Context, string) (*sql.DB, database.DBMS, error)
 
 type Service struct {
-	openTarget TargetOpener
+	openTarget  TargetOpener
+	definitions DefinitionReader
 }
 
 // NewService menggunakan registry database untuk membuka setiap koneksi target.
 func NewService(openTarget TargetOpener) *Service { return &Service{openTarget: openTarget} }
+
+// DefinitionReader menyediakan definisi dan revisi asli dari database platform.
+type DefinitionReader interface {
+	Get(context.Context, string, string) (Migration, error)
+	GetRevision(context.Context, string, string, int64) (Revision, error)
+}
+
+func NewServiceWithRepository(openTarget TargetOpener, definitions DefinitionReader) *Service {
+	service := NewService(openTarget)
+	service.definitions = definitions
+	return service
+}
+
+// PrepareAction menyusun rencana tanpa menjalankan SQL migration. Rencana
+// permintaan harus diperiksa kembali setelah lock dan sebelum eksekusi worker.
+func (s *Service) PrepareAction(ctx context.Context, databaseID, migrationID string, action Action) (ActionPlan, error) {
+	if !validUUID(databaseID) || !validUUID(migrationID) {
+		return ActionPlan{}, ErrInvalidMigration
+	}
+	if action != Apply && action != Rollback && action != Forward {
+		return ActionPlan{}, ErrInvalidMigration
+	}
+	if s.definitions == nil || s.openTarget == nil {
+		return ActionPlan{}, fmt.Errorf("%w: migration definition dependencies are unavailable", ErrStorage)
+	}
+	definition, err := s.definitions.Get(ctx, databaseID, migrationID)
+	if err != nil {
+		return ActionPlan{}, err
+	}
+	db, dbms, err := s.target(ctx, databaseID)
+	if err != nil {
+		return ActionPlan{}, err
+	}
+	defer db.Close()
+	if dbms != database.PostgreSQL {
+		return ActionPlan{}, fmt.Errorf("%w: revision actions require PostgreSQL", ErrInvalidMigration)
+	}
+	history, err := NewHistoryRepository(db)
+	if err != nil {
+		return ActionPlan{}, err
+	}
+	if err := history.Initialize(ctx, databaseID); err != nil {
+		return ActionPlan{}, err
+	}
+	executions, err := history.List(ctx, databaseID, false)
+	if err != nil {
+		return ActionPlan{}, err
+	}
+	state, err := BuildMigrationState(databaseID, executions)
+	if err != nil {
+		return ActionPlan{}, err
+	}
+	number, _, err := state.actionRevision(definition, action)
+	if err != nil {
+		return ActionPlan{}, err
+	}
+	revision, err := s.definitions.GetRevision(ctx, databaseID, migrationID, number)
+	if err != nil {
+		return ActionPlan{}, err
+	}
+	return state.planAction(definition, revision, action)
+}
 
 func (s *Service) target(ctx context.Context, id string) (*sql.DB, database.DBMS, error) {
 	return s.openTarget(ctx, id)
