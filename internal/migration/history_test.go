@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
+	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 )
 
 func executionID(number int) string {
@@ -87,6 +88,7 @@ func historyInitializationSteps(legacy bool) []repositoryStep {
 		{operation: "query", statement: "to_regclass('platform_migrations')", rows: [][]driver.Value{{legacy}}},
 	}
 	if legacy {
+		steps = append(steps, repositoryStep{operation: "query", statement: "SELECT EXISTS", rows: [][]driver.Value{{true}}, check: repositoryArguments(repositoryDatabaseID)})
 		steps = append(steps, repositoryStep{operation: "exec", statement: "WHERE status = 'success' ORDER BY version", check: repositoryArguments(repositoryDatabaseID)})
 	}
 	return append(steps, repositoryStep{operation: "commit"})
@@ -103,12 +105,12 @@ func TestHistoryRepositoryInitialize(t *testing.T) {
 }
 
 func TestHistoryRepositoryInitializeRollsBackOnFailure(t *testing.T) {
-	for failure, name := range []string{"begin", "schema lock", "DDL", "legacy lookup", "legacy import", "commit"} {
+	for failure, name := range []string{"begin", "schema lock", "DDL", "legacy lookup", "legacy pending lookup", "legacy import", "commit"} {
 		t.Run(name, func(t *testing.T) {
 			steps := historyInitializationSteps(true)
 			steps[failure].err = errors.New("private database detail")
 			steps = steps[:failure+1]
-			if failure > 0 && failure < 5 {
+			if failure > 0 && failure < 6 {
 				steps = append(steps, repositoryStep{operation: "rollback"})
 			}
 			err := testHistoryRepository(t, steps...).Initialize(context.Background(), repositoryDatabaseID)
@@ -190,6 +192,9 @@ func TestHistoryAppendMapsStorageErrors(t *testing.T) {
 		{"duplicate ID", &pgconn.PgError{Code: "23505"}, migration.ErrConflict},
 		{"missing origin", &pgconn.PgError{Code: "23503"}, migration.ErrNotFound},
 		{"invalid origin", &pgconn.PgError{Code: "23514"}, migration.ErrInvalidMigration},
+		{"target permission", &pgconn.PgError{Code: "42501"}, targetdb.ErrPermissionDenied},
+		{"target shutdown", &pgconn.PgError{Code: "57P01"}, targetdb.ErrConnection},
+		{"connection lost", &pgconn.PgError{Code: "08006"}, targetdb.ErrConnection},
 		{"canceled", context.Canceled, context.Canceled},
 		{"other", errors.New("private SQL detail"), migration.ErrStorage},
 	} {

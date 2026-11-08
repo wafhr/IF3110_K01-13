@@ -8,13 +8,21 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
+	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 )
 
 //go:embed target_schema.sql
 var executionSchema string
 
 const executionColumns = `id::text, sequence, database_id::text, migration_id::text, revision, name, action, sql, status, executed_by::text, started_at, finished_at, reverts_execution_id::text, legacy_version`
+
+// ExecutionHistory memisahkan commit sukses dari attempt lama yang belum sukses.
+type ExecutionHistory struct {
+	Executions     []Execution `json:"executions"`
+	LegacyAttempts []Record    `json:"legacy_attempts"`
+}
 
 // HistoryRepository menyimpan history commit pada database target PostgreSQL.
 // Pemanggil memeriksa permission dan menggunakan koneksi target yang sesuai.
@@ -37,30 +45,64 @@ func (r *HistoryRepository) Initialize(ctx context.Context, databaseID string) e
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return repositoryError("begin history initialization", err)
+		return historyError("begin history initialization", err)
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(311003)`); err != nil {
-		return repositoryError("lock history initialization", err)
+		return historyError("lock history initialization", err)
 	}
 	if _, err := tx.ExecContext(ctx, executionSchema); err != nil {
-		return repositoryError("initialize execution history", err)
+		return historyError("initialize execution history", err)
 	}
-	var legacyExists bool
-	if err := tx.QueryRowContext(ctx, `SELECT to_regclass('platform_migrations') IS NOT NULL`).Scan(&legacyExists); err != nil {
-		return repositoryError("find legacy history", err)
+	if err := importLegacyHistory(ctx, tx, databaseID); err != nil {
+		return err
 	}
-	if legacyExists {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO platform_migration_executions
-			(database_id, name, action, sql, status, executed_by, started_at, finished_at, legacy_version)
-			SELECT $1, name, 'apply', sql, 'success', executed_by, started_at, finished_at, version
-			FROM platform_migrations WHERE status = 'success' ORDER BY version
-			ON CONFLICT (database_id, legacy_version) DO NOTHING`, databaseID); err != nil {
-			return repositoryError("import committed legacy history", err)
-		}
+	return historyError("commit history initialization", tx.Commit())
+}
+
+type historyConnection interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+// ensureInitialized memakai schema yang sudah tersedia pada jalur pembacaan.
+// Schema baru disiapkan saat tabel history belum ada.
+func (r *HistoryRepository) ensureInitialized(ctx context.Context, databaseID string) error {
+	var exists bool
+	if err := r.db.QueryRowContext(ctx, `SELECT to_regclass('platform_migration_executions') IS NOT NULL`).Scan(&exists); err != nil {
+		return historyError("find execution history", err)
 	}
-	return repositoryError("commit history initialization", tx.Commit())
+	if !exists {
+		return r.Initialize(ctx, databaseID)
+	}
+	return importLegacyHistory(ctx, r.db, databaseID)
+}
+
+func importLegacyHistory(ctx context.Context, connection historyConnection, databaseID string) error {
+	var exists bool
+	if err := connection.QueryRowContext(ctx, `SELECT to_regclass('platform_migrations') IS NOT NULL`).Scan(&exists); err != nil {
+		return historyError("find legacy history", err)
+	}
+	if !exists {
+		return nil
+	}
+	var pending bool
+	if err := connection.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1 FROM platform_migrations legacy WHERE status = 'success' AND NOT EXISTS (
+			SELECT 1 FROM platform_migration_executions history WHERE database_id = $1 AND legacy_version = legacy.version
+		))`, databaseID).Scan(&pending); err != nil {
+		return historyError("find unimported legacy history", err)
+	}
+	if !pending {
+		return nil
+	}
+	_, err := connection.ExecContext(ctx, `
+		INSERT INTO platform_migration_executions
+		(database_id, name, action, sql, status, executed_by, started_at, finished_at, legacy_version)
+		SELECT $1, name, 'apply', sql, 'success', executed_by, started_at, finished_at, version
+		FROM platform_migrations WHERE status = 'success' ORDER BY version
+		ON CONFLICT (database_id, legacy_version) DO NOTHING`, databaseID)
+	return historyError("import committed legacy history", err)
 }
 
 // Append mencatat SQL yang berhasil melalui transaksi target milik executor.
@@ -82,7 +124,7 @@ func (r *HistoryRepository) Append(ctx context.Context, tx *sql.Tx, execution Ex
 		RETURNING `+executionColumns, execution.ID, execution.DatabaseID, execution.MigrationID, execution.Revision,
 		execution.Name, execution.Action, execution.SQL, execution.ExecutedBy, execution.StartedAt, execution.FinishedAt, execution.RevertsExecutionID))
 	if err != nil {
-		return Execution{}, repositoryError("append committed execution", err)
+		return Execution{}, historyError("append committed execution", err)
 	}
 	return stored, nil
 }
@@ -94,7 +136,7 @@ func (r *HistoryRepository) Get(ctx context.Context, databaseID, executionID str
 	execution, err := scanExecution(r.db.QueryRowContext(ctx, `SELECT `+executionColumns+`
 		FROM platform_migration_executions WHERE database_id = $1 AND id = $2`, databaseID, executionID))
 	if err != nil {
-		return Execution{}, repositoryError("get committed execution", err)
+		return Execution{}, historyError("get committed execution", err)
 	}
 	return execution, nil
 }
@@ -108,19 +150,19 @@ func (r *HistoryRepository) List(ctx context.Context, databaseID string, hideRol
 	rows, err := r.db.QueryContext(ctx, `SELECT `+executionColumns+`
 		FROM platform_migration_executions WHERE database_id = $1 ORDER BY sequence DESC`, databaseID)
 	if err != nil {
-		return nil, repositoryError("list committed executions", err)
+		return nil, historyError("list committed executions", err)
 	}
 	defer rows.Close()
 	executions := make([]Execution, 0)
 	for rows.Next() {
 		execution, err := scanExecution(rows)
 		if err != nil {
-			return nil, repositoryError("read committed execution", err)
+			return nil, historyError("read committed execution", err)
 		}
 		executions = append(executions, execution)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, repositoryError("list committed executions", err)
+		return nil, historyError("list committed executions", err)
 	}
 	if hideRollback {
 		return HideRollback(executions), nil
@@ -133,7 +175,7 @@ func (r *HistoryRepository) List(ctx context.Context, databaseID string, hideRol
 func (r *HistoryRepository) LegacyAttempts(ctx context.Context) ([]Record, error) {
 	var exists bool
 	if err := r.db.QueryRowContext(ctx, `SELECT to_regclass('platform_migrations') IS NOT NULL`).Scan(&exists); err != nil {
-		return nil, repositoryError("find legacy attempts", err)
+		return nil, historyError("find legacy attempts", err)
 	}
 	attempts := make([]Record, 0)
 	if !exists {
@@ -142,19 +184,19 @@ func (r *HistoryRepository) LegacyAttempts(ctx context.Context) ([]Record, error
 	rows, err := r.db.QueryContext(ctx, `SELECT `+historyColumns(database.PostgreSQL)+`
 		FROM platform_migrations WHERE status <> 'success' ORDER BY version DESC`)
 	if err != nil {
-		return nil, repositoryError("list legacy attempts", err)
+		return nil, historyError("list legacy attempts", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var attempt Record
 		if err := rows.Scan(&attempt.Version, &attempt.Name, &attempt.SQL, &attempt.Status,
 			&attempt.ExecutedBy, &attempt.StartedAt, &attempt.FinishedAt); err != nil {
-			return nil, repositoryError("read legacy attempt", err)
+			return nil, historyError("read legacy attempt", err)
 		}
 		attempts = append(attempts, attempt)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, repositoryError("list legacy attempts", err)
+		return nil, historyError("list legacy attempts", err)
 	}
 	return attempts, nil
 }
@@ -233,4 +275,18 @@ func scanExecution(row interface{ Scan(...any) error }) (Execution, error) {
 		execution.LegacyVersion = &legacyVersion.Int64
 	}
 	return execution, nil
+}
+
+// historyError mengelompokkan kegagalan target tanpa membocorkan detail driver.
+func historyError(operation string, err error) error {
+	var postgresError *pgconn.PgError
+	if errors.As(err, &postgresError) {
+		if postgresError.Code == "42501" {
+			return targetdb.ErrPermissionDenied
+		}
+		if strings.HasPrefix(postgresError.Code, "08") || postgresError.Code == "57P01" || postgresError.Code == "57P02" || postgresError.Code == "57P03" {
+			return targetdb.ErrConnection
+		}
+	}
+	return repositoryError(operation, err)
 }

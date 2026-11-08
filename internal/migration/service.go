@@ -52,21 +52,11 @@ func (s *Service) PrepareAction(ctx context.Context, databaseID, migrationID str
 	if err != nil {
 		return ActionPlan{}, err
 	}
-	db, dbms, err := s.target(ctx, databaseID)
+	db, history, err := s.openHistory(ctx, databaseID)
 	if err != nil {
 		return ActionPlan{}, err
 	}
 	defer db.Close()
-	if dbms != database.PostgreSQL {
-		return ActionPlan{}, fmt.Errorf("%w: revision actions require PostgreSQL", ErrInvalidMigration)
-	}
-	history, err := NewHistoryRepository(db)
-	if err != nil {
-		return ActionPlan{}, err
-	}
-	if err := history.Initialize(ctx, databaseID); err != nil {
-		return ActionPlan{}, err
-	}
 	executions, err := history.List(ctx, databaseID, false)
 	if err != nil {
 		return ActionPlan{}, err
@@ -84,6 +74,67 @@ func (s *Service) PrepareAction(ctx context.Context, databaseID, migrationID str
 		return ActionPlan{}, err
 	}
 	return state.planAction(definition, revision, action)
+}
+
+// ReadExecutionHistory menyajikan commit dan attempt legacy sebagai dua koleksi.
+func (s *Service) ReadExecutionHistory(ctx context.Context, databaseID string, hideRollback bool) (ExecutionHistory, error) {
+	db, history, err := s.openHistory(ctx, databaseID)
+	if err != nil {
+		return ExecutionHistory{}, err
+	}
+	defer db.Close()
+	executions, err := history.List(ctx, databaseID, hideRollback)
+	if err != nil {
+		return ExecutionHistory{}, err
+	}
+	attempts, err := history.LegacyAttempts(ctx)
+	if err != nil {
+		return ExecutionHistory{}, err
+	}
+	return ExecutionHistory{Executions: executions, LegacyAttempts: attempts}, nil
+}
+
+func (s *Service) GetExecution(ctx context.Context, databaseID, executionID string) (Execution, error) {
+	if !validUUID(executionID) {
+		return Execution{}, ErrNotFound
+	}
+	db, history, err := s.openHistory(ctx, databaseID)
+	if err != nil {
+		return Execution{}, err
+	}
+	defer db.Close()
+	return history.Get(ctx, databaseID, executionID)
+}
+
+// openHistory membuka pool milik operasi untuk menyiapkan history PostgreSQL.
+// Pemanggil menutup pool yang dikembalikan setelah pembacaan selesai.
+func (s *Service) openHistory(ctx context.Context, databaseID string) (*sql.DB, *HistoryRepository, error) {
+	if !validUUID(databaseID) {
+		return nil, nil, ErrInvalidMigration
+	}
+	if s.openTarget == nil {
+		return nil, nil, ErrStorage
+	}
+	db, dbms, err := s.target(ctx, databaseID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if db == nil {
+		return nil, nil, ErrStorage
+	}
+	if dbms != database.PostgreSQL {
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("%w: execution history requires PostgreSQL", ErrInvalidMigration)
+	}
+	history, err := NewHistoryRepository(db)
+	if err == nil {
+		err = history.ensureInitialized(ctx, databaseID)
+	}
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, err
+	}
+	return db, history, nil
 }
 
 func (s *Service) target(ctx context.Context, id string) (*sql.DB, database.DBMS, error) {

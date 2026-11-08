@@ -57,6 +57,10 @@ func TestModuleRouting(t *testing.T) {
 		{"GET", "/databases/id/migrations", "migration"},
 		{"POST", "/databases/id/migrations", "migration"},
 		{"GET", "/databases/id/migrations/1", "migration"},
+		{"POST", "/databases/id/migrations/definitions", "migration"},
+		{"PUT", "/databases/id/migrations/definitions/migration-id", "migration"},
+		{"GET", "/databases/id/migrations/definitions/migration-id/revisions/1", "migration"},
+		{"GET", "/databases/id/migrations/history/execution-id", "migration"},
 	} {
 		t.Run(tc.method+tc.path, func(t *testing.T) {
 			response := httptest.NewRecorder()

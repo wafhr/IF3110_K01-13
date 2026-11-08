@@ -79,7 +79,7 @@ func actionHistorySteps(history []migration.Execution) []repositoryStep {
 	for index := len(history) - 1; index >= 0; index-- {
 		rows = append(rows, executionValues(history[index]))
 	}
-	return append(historyInitializationSteps(false), repositoryStep{operation: "query",
+	return append(openedHistorySteps(), repositoryStep{operation: "query",
 		statement: "WHERE database_id = $1 ORDER BY sequence DESC", rows: rows, check: repositoryArguments(repositoryDatabaseID)})
 }
 
@@ -169,7 +169,7 @@ func TestPrepareActionPropagatesReadFailures(t *testing.T) {
 			case "target":
 				targetError, want, steps = context.DeadlineExceeded, context.DeadlineExceeded, nil
 			case "history initialization":
-				steps = []repositoryStep{{operation: "begin", err: errors.New("private detail")}}
+				steps = []repositoryStep{{operation: "query", err: errors.New("private detail")}}
 			case "history read":
 				steps[len(steps)-1].err = errors.New("private detail")
 			case "revision":
@@ -210,5 +210,29 @@ func TestPrepareActionRejectsMissingTargetOpener(t *testing.T) {
 	}
 	if reader.getCalls != 0 {
 		t.Fatal("dependency yang belum lengkap digunakan untuk membaca definisi")
+	}
+}
+
+func openedHistorySteps() []repositoryStep {
+	steps := []repositoryStep{{operation: "query", statement: "to_regclass('platform_migration_executions')", rows: [][]driver.Value{{false}}}}
+	return append(steps, historyInitializationSteps(false)...)
+}
+
+func TestExecutionHistoryReadsExistingSchemaWithReadOnlyQueries(t *testing.T) {
+	steps := []repositoryStep{
+		{operation: "query", statement: "to_regclass('platform_migration_executions')", rows: [][]driver.Value{{true}}},
+		{operation: "query", statement: "to_regclass('platform_migrations')", rows: [][]driver.Value{{true}}},
+		{operation: "query", statement: "SELECT EXISTS", rows: [][]driver.Value{{false}}},
+		{operation: "query", statement: "ORDER BY sequence DESC"},
+		{operation: "query", statement: "to_regclass('platform_migrations')", rows: [][]driver.Value{{true}}},
+		{operation: "query", statement: "WHERE status <> 'success'"},
+	}
+	target := testMigrationDatabase(t, steps...)
+	service := migration.NewService(func(context.Context, string) (*sql.DB, database.DBMS, error) {
+		return target, database.PostgreSQL, nil
+	})
+	history, err := service.ReadExecutionHistory(context.Background(), repositoryDatabaseID, false)
+	if err != nil || history.Executions == nil || history.LegacyAttempts == nil {
+		t.Fatalf("pembacaan history harus memakai query read-only pada schema siap pakai: %+v, %v", history, err)
 	}
 }
