@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -88,6 +89,39 @@ type Execution struct {
 	RevertsExecutionID string     `json:"reverts_execution_id,omitempty"`
 }
 
+// ExecutionHistory memisahkan commit sukses dari attempt lama yang belum sukses.
+type ExecutionHistory struct {
+	Executions     []Execution `json:"executions"`
+	LegacyAttempts []Record    `json:"legacy_attempts"`
+}
+
+// ActionPlan mengikat tindakan pada revisi asli dan posisi history saat rencana
+// disusun. Executor memvalidasi ulang rencana setelah memperoleh lock database.
+type ActionPlan struct {
+	DatabaseID         string `json:"database_id"`
+	MigrationID        string `json:"migration_id"`
+	Revision           int64  `json:"revision"`
+	Name               string `json:"name"`
+	Action             Action `json:"action"`
+	SQL                string `json:"sql"`
+	RevertsExecutionID string `json:"reverts_execution_id,omitempty"`
+	BaseExecutionID    string `json:"base_execution_id,omitempty"`
+}
+
+// ExecutionRequest mengikat job pada aktor, approval, revisi, SQL, dan posisi
+// history yang ditinjau. Antrean menyimpan seluruh payload secara persisten.
+type ExecutionRequest struct {
+	ExecutionID string     `json:"execution_id"`
+	ApprovalID  string     `json:"approval_id"`
+	ActorID     string     `json:"actor_id"`
+	Plan        ActionPlan `json:"plan"`
+}
+
+type QueuedAction struct {
+	JobID       string `json:"job_id"`
+	ExecutionID string `json:"execution_id"`
+}
+
 // Record mempertahankan format respons history Milestone 1 selama penyimpanan
 // dan API beralih ke history eksekusi yang mencatat revisi migration.
 type Record struct {
@@ -98,6 +132,14 @@ type Record struct {
 	ExecutedBy string     `json:"executed_by"`
 	StartedAt  time.Time  `json:"started_at"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
+}
+
+func validUUID(value string) bool {
+	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
+		return false
+	}
+	decoded, err := hex.DecodeString(strings.ReplaceAll(value, "-", ""))
+	return err == nil && len(decoded) == 16
 }
 
 func NormalizeMigrationName(name string) (string, error) {

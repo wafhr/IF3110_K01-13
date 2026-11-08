@@ -58,7 +58,7 @@ func (s *databaseScript) Driver() driver.Driver                        { return 
 
 type scriptDriver struct{ script *databaseScript }
 
-func (d scriptDriver) Open(string) (driver.Conn, error) { return scriptConn{d.script}, nil }
+func (d scriptDriver) Open(string) (driver.Conn, error) { return scriptConn(d), nil }
 
 type scriptConn struct{ script *databaseScript }
 

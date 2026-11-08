@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,6 +44,7 @@ type fixture struct {
 	admin, platform, target *sql.DB
 	registry                *database.Repository
 	legacyMigrations        *migration.Service
+	openTarget              migration.TargetOpener
 	pools                   *targetdb.Manager
 	inspector               *drivers.Inspector
 	server                  *httptest.Server
@@ -112,14 +114,15 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	f.inspector = drivers.NewInspector(f.registry, f.pools)
-	migrations := migration.NewService(func(ctx context.Context, id string) (*sql.DB, database.DBMS, error) {
+	f.openTarget = func(ctx context.Context, id string) (*sql.DB, database.DBMS, error) {
 		connection, err := f.registry.GetConnectionConfig(ctx, id)
 		if err != nil {
 			return nil, "", err
 		}
 		db, err := connector.Open(ctx, connection)
 		return db, connection.DBMS, err
-	})
+	}
+	migrations := migration.NewService(f.openTarget)
 	f.legacyMigrations = migrations
 	auth := access.NewHTTPHandler(authService, false)
 	f.server = httptest.NewServer(app.RoutesWithModulesAndFrontend(auth,
@@ -339,4 +342,216 @@ func registration(name string, settings database.ConnectionConfig) map[string]an
 
 func tableURL(id, schema, table string) string {
 	return fmt.Sprintf("/databases/%s/schemas/%s/tables/%s", id, url.PathEscape(schema), url.PathEscape(table))
+}
+
+// migrationFixture menghubungkan API dan repository nyata dengan provider uji
+// approval serta antrean. Pelaksanaan job dipanggil langsung melalui hook migration.
+type migrationFixture struct {
+	*fixture
+	definitions                        *migration.Repository
+	migrations                         *migration.Service
+	approvals                          *migrationTestApprovals
+	editor, reader, platformAdmin      *apiClient
+	databaseID, actorID, editorGroupID string
+}
+
+type migrationTestApproval struct {
+	actorID string
+	plan    migration.ActionPlan
+}
+
+type migrationTestApprovals struct {
+	mu        sync.Mutex
+	snapshots map[string]migrationTestApproval
+	next      int
+}
+
+func (a *migrationTestApprovals) ValidateApproval(_ context.Context, request migration.ExecutionRequest) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	approved, exists := a.snapshots[request.ApprovalID]
+	if !exists || approved.actorID != request.ActorID || approved.plan != request.Plan {
+		return migration.ErrApprovalRequired
+	}
+	return nil
+}
+
+// Antrean uji menyimpan payload di platform agar receipt dapat dibaca kembali.
+type migrationTestQueue struct{ db *sql.DB }
+
+func (q migrationTestQueue) Enqueue(ctx context.Context, request migration.ExecutionRequest) (string, error) {
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return "", err
+	}
+	_, err = q.db.ExecContext(ctx, `INSERT INTO integration_migration_jobs (id, payload) VALUES ($1, $2)`, request.ExecutionID, string(payload))
+	return request.ExecutionID, err
+}
+
+func newMigrationFixture(t *testing.T) *migrationFixture {
+	t.Helper()
+	f := newFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	definitions, err := migration.NewRepository(f.platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := definitions.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	execFixture(t, f.platform, `CREATE TABLE integration_migration_jobs (id UUID PRIMARY KEY, payload JSONB NOT NULL)`)
+	execFixture(t, f.target, `GRANT CREATE ON SCHEMA public TO `+pgx.Identifier{f.createdRole}.Sanitize())
+	approvals := &migrationTestApprovals{snapshots: make(map[string]migrationTestApproval)}
+	authService := access.NewService(f.platform)
+	migrations := migration.NewServiceWithExecution(f.openTarget, definitions, migration.ExecutionDependencies{
+		Authorizer: authService, Approvals: approvals, Queue: migrationTestQueue{f.platform},
+	})
+	auth := access.NewHTTPHandler(authService, false)
+	f.server.Close()
+	f.server = httptest.NewServer(app.RoutesWithModulesAndFrontend(auth,
+		databasehttp.NewHandler(f.registry, f.pools, auth),
+		databasehttp.NewViewerHandler(f.registry, f.inspector, auth),
+		migration.NewHTTPHandler(migrations, auth), nil))
+	result := &migrationFixture{fixture: f, definitions: definitions, migrations: migrations, approvals: approvals}
+	result.platformAdmin = f.login(t, "admin", adminPassword)
+	var registered struct {
+		Database database.Database `json:"database"`
+	}
+	decode(t, result.platformAdmin.do(t, "POST", "/admin/databases", registration("Migration target", f.settings), 201), &registered)
+	result.databaseID = registered.Database.ID
+	for _, permission := range []access.Permission{access.ViewEdit, access.ViewOnly} {
+		var user struct {
+			User access.User `json:"user"`
+		}
+		username := "migration_" + string(permission)
+		decode(t, result.platformAdmin.do(t, "POST", "/admin/users", map[string]any{"username": username, "password": memberPassword}, 201), &user)
+		var group struct {
+			Group access.Group `json:"group"`
+		}
+		decode(t, result.platformAdmin.do(t, "POST", "/admin/groups", map[string]string{"name": username}, 201), &group)
+		result.platformAdmin.do(t, "PUT", "/admin/groups/"+group.Group.ID+"/members/"+user.User.ID, nil, 204)
+		result.platformAdmin.do(t, "PUT", "/admin/groups/"+group.Group.ID+"/databases/"+result.databaseID, map[string]any{"permission": permission}, 204)
+		if permission == access.ViewEdit {
+			result.actorID, result.editorGroupID = user.User.ID, group.Group.ID
+			result.editor = f.login(t, username, memberPassword)
+		} else {
+			result.reader = f.login(t, username, memberPassword)
+		}
+	}
+	return result
+}
+
+func (f *migrationFixture) migrationPath() string {
+	return "/databases/" + f.databaseID + "/migrations"
+}
+
+func (f *migrationFixture) createMigration(t *testing.T, name, up, down string) migration.Migration {
+	t.Helper()
+	var result struct {
+		Migration migration.Migration `json:"migration"`
+	}
+	decode(t, f.editor.do(t, "POST", f.migrationPath()+"/definitions", map[string]any{
+		"name": name, "sql_up": up, "sql_down": down,
+	}, 201), &result)
+	return result.Migration
+}
+
+func (f *migrationFixture) queueAction(t *testing.T, definition migration.Migration, action migration.Action) migration.ExecutionRequest {
+	t.Helper()
+	plan, err := f.migrations.PrepareAction(context.Background(), f.databaseID, definition.ID, action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.approvals.mu.Lock()
+	f.approvals.next++
+	approvalID := fmt.Sprintf("00000000-0000-4000-8000-%012d", f.approvals.next)
+	f.approvals.snapshots[approvalID] = migrationTestApproval{actorID: f.actorID, plan: plan}
+	f.approvals.mu.Unlock()
+	var receipt migration.QueuedAction
+	decode(t, f.editor.do(t, "POST", f.migrationPath()+"/definitions/"+definition.ID+"/actions", map[string]any{
+		"action": action, "approval_id": approvalID,
+	}, 202), &receipt)
+	if receipt.JobID == "" || receipt.ExecutionID == "" {
+		t.Fatal("pengajuan tidak menghasilkan identitas job dan execution")
+	}
+	var payload []byte
+	if err := f.platform.QueryRow(`SELECT payload FROM integration_migration_jobs WHERE id=$1`, receipt.JobID).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	var request migration.ExecutionRequest
+	decode(t, payload, &request)
+	if request.ExecutionID != receipt.ExecutionID || request.Plan != plan || request.ActorID != f.actorID {
+		t.Fatal("payload antrean berbeda dari snapshot pengajuan")
+	}
+	return request
+}
+
+// executeJob menguji kontrak transaksi milik migration dengan koneksi registry.
+// Pengujian loop worker, retry, dan status job menjadi cakupan modul eksekusi.
+func (f *migrationFixture) executeJob(request migration.ExecutionRequest) (migration.Execution, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	db, _, err := f.openTarget(ctx, request.Plan.DatabaseID)
+	if err != nil {
+		return migration.Execution{}, err
+	}
+	defer db.Close()
+	connection, err := db.Conn(ctx)
+	if err != nil {
+		return migration.Execution{}, err
+	}
+	defer connection.Close()
+	key, err := migration.MigrationLockKey(request.Plan.DatabaseID)
+	if err != nil {
+		return migration.Execution{}, err
+	}
+	if _, err := connection.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, key); err != nil {
+		return migration.Execution{}, err
+	}
+	defer func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		_, _ = connection.ExecContext(cleanup, `SELECT pg_advisory_unlock($1)`, key)
+	}()
+	tx, err := connection.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return migration.Execution{}, err
+	}
+	defer tx.Rollback()
+	prepared, err := f.migrations.PrepareExecution(ctx, tx, request)
+	if err != nil {
+		return migration.Execution{}, err
+	}
+	if committed, exists := prepared.Committed(); exists {
+		return committed, nil
+	}
+	started := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, prepared.Plan().SQL); err != nil {
+		return migration.Execution{}, err
+	}
+	execution, err := prepared.Record(ctx, started)
+	if err != nil {
+		return migration.Execution{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return migration.Execution{}, err
+	}
+	return execution, nil
+}
+
+func (f *migrationFixture) runAction(t *testing.T, definition migration.Migration, action migration.Action) migration.Execution {
+	t.Helper()
+	execution, err := f.executeJob(f.queueAction(t, definition, action))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return execution
+}
+
+func (f *migrationFixture) executionHistory(t *testing.T, hideRollback bool) migration.ExecutionHistory {
+	t.Helper()
+	var result migration.ExecutionHistory
+	decode(t, f.reader.do(t, "GET", f.migrationPath()+"/history?hide_rollback="+fmt.Sprint(hideRollback), nil, 200), &result)
+	return result
 }

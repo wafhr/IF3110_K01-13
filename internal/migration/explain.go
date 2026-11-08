@@ -29,7 +29,7 @@ func (s *Service) Explain(ctx context.Context, databaseID, statement string, ana
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	db, dbms, err := s.target(ctx, databaseID)
+	db, dbms, err := s.openTarget(ctx, databaseID)
 	if err != nil {
 		return QueryPlan{}, planError(ctx, err, dbms)
 	}

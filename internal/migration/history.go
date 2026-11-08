@@ -18,12 +18,6 @@ var executionSchema string
 
 const executionColumns = `id::text, sequence, database_id::text, migration_id::text, revision, name, action, sql, status, executed_by::text, started_at, finished_at, reverts_execution_id::text, legacy_version`
 
-// ExecutionHistory memisahkan commit sukses dari attempt lama yang belum sukses.
-type ExecutionHistory struct {
-	Executions     []Execution `json:"executions"`
-	LegacyAttempts []Record    `json:"legacy_attempts"`
-}
-
 // HistoryRepository menyimpan history commit pada database target PostgreSQL.
 // Pemanggil memeriksa permission dan menggunakan koneksi target yang sesuai.
 type HistoryRepository struct {
@@ -138,12 +132,7 @@ func (r *HistoryRepository) Get(ctx context.Context, databaseID, executionID str
 	if !validUUID(databaseID) || !validUUID(executionID) {
 		return Execution{}, ErrNotFound
 	}
-	execution, err := scanExecution(r.db.QueryRowContext(ctx, `SELECT `+executionColumns+`
-		FROM platform_migration_executions WHERE database_id = $1 AND id = $2`, databaseID, executionID))
-	if err != nil {
-		return Execution{}, historyError("get committed execution", err)
-	}
-	return execution, nil
+	return getExecution(ctx, r.db, databaseID, executionID)
 }
 
 // List mengurutkan history dari pencatatan terbaru. Filter hanya memengaruhi
@@ -153,6 +142,7 @@ func (r *HistoryRepository) List(ctx context.Context, databaseID string, hideRol
 }
 
 type executionQueries interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
@@ -169,7 +159,11 @@ func GetExecutionInTransaction(ctx context.Context, tx *sql.Tx, databaseID, exec
 	if tx == nil || !validUUID(databaseID) || !validUUID(executionID) {
 		return Execution{}, ErrInvalidMigration
 	}
-	execution, err := scanExecution(tx.QueryRowContext(ctx, `SELECT `+executionColumns+`
+	return getExecution(ctx, tx, databaseID, executionID)
+}
+
+func getExecution(ctx context.Context, connection executionQueries, databaseID, executionID string) (Execution, error) {
+	execution, err := scanExecution(connection.QueryRowContext(ctx, `SELECT `+executionColumns+`
         FROM platform_migration_executions WHERE database_id = $1 AND id = $2`, databaseID, executionID))
 	if err != nil {
 		return Execution{}, historyError("get committed execution", err)

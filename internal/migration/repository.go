@@ -4,10 +4,8 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -242,14 +240,6 @@ func scanRevision(row interface{ Scan(...any) error }) (Revision, error) {
 	err := row.Scan(&revision.MigrationID, &revision.Number, &revision.SQLUp, &revision.SQLDown,
 		&revision.Irreversible, &revision.IrreversibleReason, &revision.CreatedBy, &revision.CreatedAt)
 	return revision, err
-}
-
-func validUUID(value string) bool {
-	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-		return false
-	}
-	decoded, err := hex.DecodeString(strings.ReplaceAll(value, "-", ""))
-	return err == nil && len(decoded) == 16
 }
 
 func repositoryError(operation string, err error) error {

@@ -30,7 +30,7 @@ func (c stubConnector) Driver() driver.Driver                        { return st
 
 type stubDriver struct{ config stubConnector }
 
-func (d stubDriver) Open(string) (driver.Conn, error) { return stubConn{config: d.config}, nil }
+func (d stubDriver) Open(string) (driver.Conn, error) { return stubConn(d), nil }
 
 type stubConn struct{ config stubConnector }
 

@@ -306,7 +306,7 @@ func (h *HTTPHandler) schemaDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	databaseID := r.PathValue("databaseID")
-	probe, dbms, err := h.service.target(r.Context(), databaseID)
+	probe, dbms, err := h.service.openTarget(r.Context(), databaseID)
 	if err != nil {
 		migrationError(w, err)
 		return

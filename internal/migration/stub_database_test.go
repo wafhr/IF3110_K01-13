@@ -62,7 +62,7 @@ func (s *repositoryScript) Driver() driver.Driver { return repositoryDriver{s} }
 
 type repositoryDriver struct{ script *repositoryScript }
 
-func (d repositoryDriver) Open(string) (driver.Conn, error) { return repositoryConn{d.script}, nil }
+func (d repositoryDriver) Open(string) (driver.Conn, error) { return repositoryConn(d), nil }
 
 type repositoryConn struct{ script *repositoryScript }
 
@@ -70,7 +70,7 @@ func (repositoryConn) Prepare(string) (driver.Stmt, error) { return nil, errors.
 func (repositoryConn) Close() error                        { return nil }
 func (c repositoryConn) Begin() (driver.Tx, error) {
 	_, err := c.script.take("begin", "", nil)
-	return repositoryTx{c.script}, err
+	return repositoryTx(c), err
 }
 func (c repositoryConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
 	return c.Begin()

@@ -403,3 +403,73 @@ func TestDefinitionUpdateRejectsMissingCSRFAndViewOnlyPermission(t *testing.T) {
 		})
 	}
 }
+
+func TestExecutionAPIQueuesAndFailsClosedThroughApplicationRoutes(t *testing.T) {
+	for _, alias := range []bool{false, true} {
+		store, request, dependencies := executionFixture(t)
+		target := testMigrationDatabase(t, actionHistorySteps(nil)...)
+		service := migration.NewServiceWithExecution(executionOpener(target), store, dependencies)
+		handler := migrationAPIHandler(t, service, migrationAuthorizationSteps(access.ViewEdit, false)...)
+		body := map[string]any{"action": request.Plan.Action, "approval_id": request.ApprovalID}
+		path := migrationAPIBase + "/definitions/" + repositoryMigrationID + "/actions"
+		if alias {
+			path = migrationAPIBase
+			body["migration_id"] = repositoryMigrationID
+		}
+		data, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, migrationRequest(http.MethodPost, path, string(data)))
+		var receipt migration.QueuedAction
+		if err := json.Unmarshal(response.Body.Bytes(), &receipt); err != nil {
+			t.Fatal(err)
+		}
+		if response.Code != http.StatusAccepted || receipt.JobID != "stored-job" || receipt.ExecutionID == "" {
+			t.Fatalf("pengajuan API = %d %s", response.Code, response.Body.String())
+		}
+	}
+	for _, scenario := range []string{"unavailable", "legacy SQL", "view-only", "CSRF", "approval", "permission"} {
+		t.Run(scenario, func(t *testing.T) {
+			store, request, dependencies := executionFixture(t)
+			path := migrationAPIBase + "/definitions/" + repositoryMigrationID + "/actions"
+			body := `{"action":"apply","approval_id":"` + request.ApprovalID + `"}`
+			want := http.StatusServiceUnavailable
+			authSteps := migrationAuthorizationSteps(access.ViewEdit, false)
+			var targetSteps []repositoryStep
+			switch scenario {
+			case "unavailable":
+				dependencies.Queue = nil
+			case "legacy SQL":
+				path = migrationAPIBase
+				body = `{"name":"direct","sql":"SELECT 1"}`
+				want = http.StatusBadRequest
+			case "view-only":
+				authSteps = migrationAuthorizationSteps(access.ViewOnly, false)
+				want = http.StatusForbidden
+			case "CSRF":
+				authSteps = authSteps[:len(authSteps)-1]
+				want = http.StatusForbidden
+			case "approval":
+				dependencies.Approvals = approvalCheckerFunc(func(context.Context, migration.ExecutionRequest) error { return migration.ErrApprovalRequired })
+				targetSteps = actionHistorySteps(nil)
+				want = http.StatusConflict
+			case "permission":
+				dependencies.Authorizer = actionAuthorizerFunc(func(context.Context, string, string, access.Permission) error { return access.ErrForbidden })
+				want = http.StatusForbidden
+			}
+			target := testMigrationDatabase(t, targetSteps...)
+			handler := migrationAPIHandler(t, migration.NewServiceWithExecution(executionOpener(target), store, dependencies), authSteps...)
+			httpRequest := migrationRequest(http.MethodPost, path, body)
+			if scenario == "CSRF" {
+				httpRequest.Header.Del("X-CSRF-Token")
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httpRequest)
+			if response.Code != want {
+				t.Fatalf("API = %d %s; ingin %d", response.Code, response.Body.String(), want)
+			}
+		})
+	}
+}

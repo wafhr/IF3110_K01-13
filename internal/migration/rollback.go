@@ -18,19 +18,6 @@ type MigrationState struct {
 	appliedMigrations map[string]bool
 }
 
-// ActionPlan mengikat tindakan pada revisi asli dan posisi history saat rencana
-// disusun. Executor memvalidasi ulang rencana setelah memperoleh lock database.
-type ActionPlan struct {
-	DatabaseID         string `json:"database_id"`
-	MigrationID        string `json:"migration_id"`
-	Revision           int64  `json:"revision"`
-	Name               string `json:"name"`
-	Action             Action `json:"action"`
-	SQL                string `json:"sql"`
-	RevertsExecutionID string `json:"reverts_execution_id,omitempty"`
-	BaseExecutionID    string `json:"base_execution_id,omitempty"`
-}
-
 // BuildMigrationState menerima history lengkap, termasuk pasangan rollback yang
 // disembunyikan UI. Attempt gagal/running tidak mengubah posisi migration.
 func BuildMigrationState(databaseID string, history []Execution) (MigrationState, error) {
