@@ -579,6 +579,7 @@ func (s *Service) EffectivePermission(ctx context.Context, userID, databaseID st
 	err := s.db.QueryRowContext(ctx, `
 		SELECT CASE WHEN bool_or(p.permission = 'view_edit') THEN 'view_edit' ELSE 'view_only' END
 		FROM access_group_members m
+		JOIN access_users u ON u.id = m.user_id AND u.is_active
 		JOIN access_group_database_permissions p ON p.group_id = m.group_id
 		WHERE m.user_id = $1 AND p.database_id = $2
 		HAVING count(*) > 0`, userID, databaseID).Scan(&permission)

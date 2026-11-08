@@ -73,14 +73,14 @@ func run() error {
 	if err := migrationRepository.Initialize(startupCtx); err != nil {
 		return err
 	}
-	migrationService := migration.NewServiceWithRepository(func(ctx context.Context, id string) (*sql.DB, database.DBMS, error) {
+	migrationService := migration.NewServiceWithExecution(func(ctx context.Context, id string) (*sql.DB, database.DBMS, error) {
 		connection, err := databaseRegistry.GetConnectionConfig(ctx, id)
 		if err != nil {
 			return nil, "", err
 		}
 		db, err := targetConnector.Open(ctx, connection)
 		return db, connection.DBMS, err
-	}, migrationRepository)
+	}, migrationRepository, migration.ExecutionDependencies{Authorizer: accessService})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	accessHandler := access.NewHTTPHandler(accessService, cfg.SecureCookie)

@@ -360,6 +360,7 @@ func TestEveryNewMigrationRouteRequiresAuthentication(t *testing.T) {
 		{http.MethodGet, "/definitions/" + repositoryMigrationID},
 		{http.MethodPut, "/definitions/" + repositoryMigrationID},
 		{http.MethodGet, "/definitions/" + repositoryMigrationID + "/revisions/1"},
+		{http.MethodPost, "/definitions/" + repositoryMigrationID + "/actions"},
 		{http.MethodGet, "/history"},
 		{http.MethodGet, "/history/" + executionID(1)},
 	} {

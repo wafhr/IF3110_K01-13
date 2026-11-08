@@ -42,6 +42,7 @@ const quotedTable = `Order"Items`
 type fixture struct {
 	admin, platform, target *sql.DB
 	registry                *database.Repository
+	legacyMigrations        *migration.Service
 	pools                   *targetdb.Manager
 	inspector               *drivers.Inspector
 	server                  *httptest.Server
@@ -119,6 +120,7 @@ func newFixture(t *testing.T) *fixture {
 		db, err := connector.Open(ctx, connection)
 		return db, connection.DBMS, err
 	})
+	f.legacyMigrations = migrations
 	auth := access.NewHTTPHandler(authService, false)
 	f.server = httptest.NewServer(app.RoutesWithModulesAndFrontend(auth,
 		databasehttp.NewHandler(f.registry, f.pools, auth),

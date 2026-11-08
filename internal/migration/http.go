@@ -56,6 +56,7 @@ func NewHTTPHandler(service *Service, auth *access.HTTPHandler, readers ...Schem
 	h.routes.Handle("GET /databases/{databaseID}/migrations/definitions/{migrationID}", auth.RequireDatabaseAccess(access.ViewOnly, h.withDefinitions(h.getDefinition)))
 	h.routes.Handle("PUT /databases/{databaseID}/migrations/definitions/{migrationID}", auth.RequireDatabaseAccess(access.ViewEdit, h.withDefinitions(h.reviseDefinition)))
 	h.routes.Handle("GET /databases/{databaseID}/migrations/definitions/{migrationID}/revisions/{revision}", auth.RequireDatabaseAccess(access.ViewOnly, h.withDefinitions(h.getDefinitionRevision)))
+	h.routes.Handle("POST /databases/{databaseID}/migrations/definitions/{migrationID}/actions", auth.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(h.submitAction)))
 	h.routes.Handle("GET /databases/{databaseID}/migrations/history", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.executionHistory)))
 	h.routes.Handle("GET /databases/{databaseID}/migrations/history/{executionID}", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.executionDetail)))
 	return h
@@ -252,26 +253,39 @@ func (h *HTTPHandler) detail(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"migration": row})
 }
+
+// execute mempertahankan jalur pengajuan lama dengan payload tindakan berapproval.
 func (h *HTTPHandler) execute(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Name string `json:"name"`
-		SQL  string `json:"sql"`
+		MigrationID string `json:"migration_id"`
+		Action      Action `json:"action"`
+		ApprovalID  string `json:"approval_id"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if !decodeRequestJSON(w, r, &input) {
+	if !decodeDefinitionJSON(w, r, &input) {
 		return
 	}
-	user := access.CurrentUser(r.Context())
-	row, err := h.service.Execute(r.Context(), r.PathValue("databaseID"), user.ID, input.Name, input.SQL)
+	h.enqueueAction(w, r, input.MigrationID, input.Action, input.ApprovalID)
+}
+
+func (h *HTTPHandler) submitAction(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Action     Action `json:"action"`
+		ApprovalID string `json:"approval_id"`
+	}
+	if !decodeDefinitionJSON(w, r, &input) {
+		return
+	}
+	h.enqueueAction(w, r, r.PathValue("migrationID"), input.Action, input.ApprovalID)
+}
+
+func (h *HTTPHandler) enqueueAction(w http.ResponseWriter, r *http.Request, migrationID string, action Action, approvalID string) {
+	result, err := h.service.SubmitAction(r.Context(), access.CurrentUser(r.Context()).ID,
+		r.PathValue("databaseID"), migrationID, action, approvalID)
 	if err != nil {
-		if row.Version > 0 {
-			jsonResponse(w, http.StatusUnprocessableEntity, map[string]any{"migration": row, "error": "migration failed and was rolled back"})
-			return
-		}
 		migrationError(w, err)
 		return
 	}
-	jsonResponse(w, http.StatusCreated, map[string]any{"migration": row})
+	jsonResponse(w, http.StatusAccepted, result)
 }
 
 func (h *HTTPHandler) schemaDiff(w http.ResponseWriter, r *http.Request) {
@@ -399,6 +413,10 @@ func writeJSONDecodeError(w http.ResponseWriter, err error) {
 func migrationError(w http.ResponseWriter, err error) {
 	status, message := http.StatusInternalServerError, "migration operation failed"
 	switch {
+	case errors.Is(err, ErrExecutionUnavailable):
+		status, message = http.StatusServiceUnavailable, "migration execution unavailable"
+	case errors.Is(err, ErrApprovalRequired):
+		status, message = http.StatusConflict, "migration approval required or outdated"
 	case errors.Is(err, ErrInvalidMigration), errors.Is(err, database.ErrInvalidInput):
 		status, message = http.StatusBadRequest, "invalid migration request"
 	case errors.Is(err, ErrNotFound), errors.Is(err, database.ErrNotFound), errors.Is(err, sql.ErrNoRows):
@@ -411,8 +429,8 @@ func migrationError(w http.ResponseWriter, err error) {
 		status, message = http.StatusGatewayTimeout, "migration operation timed out"
 	case errors.Is(err, context.Canceled):
 		status, message = http.StatusRequestTimeout, "request canceled"
-	case errors.Is(err, targetdb.ErrPermissionDenied):
-		status, message = http.StatusForbidden, "target database access denied"
+	case errors.Is(err, targetdb.ErrPermissionDenied), errors.Is(err, access.ErrForbidden):
+		status, message = http.StatusForbidden, "database access denied"
 	case errors.Is(err, targetdb.ErrAuthentication), errors.Is(err, targetdb.ErrConnection):
 		status, message = http.StatusBadGateway, "could not connect to the target database"
 	case errors.Is(err, targetdb.ErrClosed):

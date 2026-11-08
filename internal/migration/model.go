@@ -14,6 +14,8 @@ const (
 )
 
 var (
+	ErrExecutionUnavailable  = errors.New("migration execution dependencies unavailable")
+	ErrApprovalRequired      = fmt.Errorf("%w: approval is missing or no longer valid", ErrConflict)
 	ErrNotFound              = errors.New("migration not found")
 	ErrConflict              = errors.New("migration conflict")
 	ErrStorage               = errors.New("migration storage failure")

@@ -19,6 +19,7 @@ type TargetOpener func(context.Context, string) (*sql.DB, database.DBMS, error)
 type Service struct {
 	openTarget  TargetOpener
 	definitions DefinitionReader
+	execution   ExecutionDependencies
 }
 
 // NewService menggunakan registry database untuk membuka setiap koneksi target.
@@ -305,7 +306,7 @@ func sqlWord(statement string, position int) (string, int) {
 
 func skipSQLTrivia(statement string, position int, dbms database.DBMS) int {
 	for position < len(statement) {
-		if strings.ContainsRune(" \t\r\n\f", rune(statement[position])) {
+		if strings.ContainsRune(" \t\r\n\f\v", rune(statement[position])) {
 			position++
 			continue
 		}
@@ -556,4 +557,8 @@ func insertRunning(ctx context.Context, conn *sql.Conn, dbms database.DBMS, name
 		Scan(&row.Version, &row.Name, &row.SQL, &row.Status, &row.ExecutedBy, &row.StartedAt, &row.FinishedAt)
 	return row, err
 }
-func databaseLock(id string) uint32 { h := fnv.New32a(); _, _ = h.Write([]byte(id)); return h.Sum32() }
+func databaseLock(id string) uint32 {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(strings.ToLower(id)))
+	return hash.Sum32()
+}

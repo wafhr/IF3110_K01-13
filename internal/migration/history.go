@@ -109,6 +109,11 @@ func importLegacyHistory(ctx context.Context, connection historyConnection, data
 // Executor melakukan commit setelah SQL dan history berhasil disimpan bersama.
 // ID execution yang sama menimbulkan konflik agar pengulangan SQL di-rollback.
 func (r *HistoryRepository) Append(ctx context.Context, tx *sql.Tx, execution Execution) (Execution, error) {
+	return AppendExecution(ctx, tx, execution)
+}
+
+// AppendExecution mencatat history melalui transaksi target milik worker.
+func AppendExecution(ctx context.Context, tx *sql.Tx, execution Execution) (Execution, error) {
 	if tx == nil {
 		return Execution{}, fmt.Errorf("%w: target transaction is required", ErrInvalidMigration)
 	}
@@ -144,10 +149,39 @@ func (r *HistoryRepository) Get(ctx context.Context, databaseID, executionID str
 // List mengurutkan history dari pencatatan terbaru. Filter hanya memengaruhi
 // hasil pembacaan dan mempertahankan seluruh catatan yang sudah tersimpan.
 func (r *HistoryRepository) List(ctx context.Context, databaseID string, hideRollback bool) ([]Execution, error) {
+	return listExecutions(ctx, r.db, databaseID, hideRollback)
+}
+
+type executionQueries interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+// ListExecutionsInTransaction membaca history lengkap untuk validasi worker.
+func ListExecutionsInTransaction(ctx context.Context, tx *sql.Tx, databaseID string) ([]Execution, error) {
+	if tx == nil {
+		return nil, ErrInvalidMigration
+	}
+	return listExecutions(ctx, tx, databaseID, false)
+}
+
+// GetExecutionInTransaction mencari bukti commit pada koneksi target yang dikunci.
+func GetExecutionInTransaction(ctx context.Context, tx *sql.Tx, databaseID, executionID string) (Execution, error) {
+	if tx == nil || !validUUID(databaseID) || !validUUID(executionID) {
+		return Execution{}, ErrInvalidMigration
+	}
+	execution, err := scanExecution(tx.QueryRowContext(ctx, `SELECT `+executionColumns+`
+        FROM platform_migration_executions WHERE database_id = $1 AND id = $2`, databaseID, executionID))
+	if err != nil {
+		return Execution{}, historyError("get committed execution", err)
+	}
+	return execution, nil
+}
+
+func listExecutions(ctx context.Context, connection executionQueries, databaseID string, hideRollback bool) ([]Execution, error) {
 	if !validUUID(databaseID) {
 		return nil, ErrNotFound
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT `+executionColumns+`
+	rows, err := connection.QueryContext(ctx, `SELECT `+executionColumns+`
 		FROM platform_migration_executions WHERE database_id = $1 ORDER BY sequence DESC`, databaseID)
 	if err != nil {
 		return nil, historyError("list committed executions", err)

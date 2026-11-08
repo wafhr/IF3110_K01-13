@@ -286,7 +286,7 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 	})
 
 	t.Run("migration uses registered encrypted credentials alongside viewer", func(t *testing.T) {
-		// The migration runner needs DDL rights in addition to the viewer's SELECT.
+		// Runner legacy memerlukan hak DDL selain SELECT untuk viewer.
 		execFixture(t, f.target, `GRANT CREATE ON SCHEMA public TO `+pgx.Identifier{f.createdRole}.Sanitize())
 		migrationPath := "/databases/" + id + "/migrations"
 		admin.do(t, "GET", migrationPath, nil, 403)
@@ -299,7 +299,12 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 		var created struct {
 			Migration migration.Record `json:"migration"`
 		}
-		decode(t, member.do(t, "POST", migrationPath, input, 201), &created)
+		member.do(t, "POST", migrationPath, input, 400)
+		var err error
+		created.Migration, err = f.legacyMigrations.Execute(context.Background(), id, user.User.ID, input["name"], input["sql"])
+		if err != nil {
+			t.Fatal(err)
+		}
 		if created.Migration.Status != migration.Success || created.Migration.Version != 1 || created.Migration.ExecutedBy != user.User.ID {
 			t.Fatalf("unexpected migration result: %+v", created.Migration)
 		}
@@ -311,7 +316,10 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 			t.Fatal("migration detail lost SQL text")
 		}
 		input = map[string]string{"name": "rollback integration insert", "sql": "INSERT INTO public.integration_created VALUES (1); SELECT * FROM public.integration_missing;"}
-		decode(t, member.do(t, "POST", migrationPath, input, 422), &created)
+		created.Migration, err = f.legacyMigrations.Execute(context.Background(), id, user.User.ID, input["name"], input["sql"])
+		if err == nil {
+			t.Fatal("SQL legacy yang gagal diterima")
+		}
 		if created.Migration.Status != migration.Failed || created.Migration.Version != 2 {
 			t.Fatalf("unexpected failed migration: %+v", created.Migration)
 		}
