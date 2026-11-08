@@ -12,26 +12,6 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/database"
 )
 
-type Status string
-
-const (
-	Running Status = "running"
-	Success Status = "success"
-	Failed  Status = "failed"
-)
-
-var ErrInvalidMigration = errors.New("invalid migration request")
-
-type Record struct {
-	Version    int64      `json:"version"`
-	Name       string     `json:"name"`
-	SQL        string     `json:"sql"`
-	Status     Status     `json:"status"`
-	ExecutedBy string     `json:"executed_by"`
-	StartedAt  time.Time  `json:"started_at"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
-}
-
 // TargetOpener returns a new pool owned by the migration operation. It must not
 // return a shared viewer pool because the runner closes it after each operation.
 type TargetOpener func(context.Context, string) (*sql.DB, database.DBMS, error)
@@ -87,10 +67,13 @@ func (s *Service) Get(ctx context.Context, databaseID string, version int64) (Re
 }
 
 func (s *Service) Execute(ctx context.Context, databaseID, userID, name, statement string) (Record, error) {
-	name = strings.TrimSpace(name)
+	name, err := NormalizeMigrationName(name)
+	if err != nil {
+		return Record{}, err
+	}
 	statement = strings.TrimSpace(statement)
-	if name == "" || len(name) > 160 || statement == "" || len(statement) > 1<<20 {
-		return Record{}, fmt.Errorf("%w: migration name and SQL are required; limits are 160 and 1048576 characters", ErrInvalidMigration)
+	if err := validateSQL("sql", statement); err != nil {
+		return Record{}, err
 	}
 	db, dbms, err := s.target(ctx, databaseID)
 	if err != nil {
