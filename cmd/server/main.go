@@ -66,6 +66,13 @@ func run() error {
 	if err := accessService.Initialize(startupCtx, cfg.BootstrapAdminUsername, cfg.BootstrapAdminPassword); err != nil {
 		return err
 	}
+	migrationRepository, err := migration.NewRepository(db)
+	if err != nil {
+		return err
+	}
+	if err := migrationRepository.Initialize(startupCtx); err != nil {
+		return err
+	}
 	migrationService := migration.NewService(func(ctx context.Context, id string) (*sql.DB, database.DBMS, error) {
 		connection, err := databaseRegistry.GetConnectionConfig(ctx, id)
 		if err != nil {
@@ -99,7 +106,7 @@ func run() error {
 		}
 		return fmt.Errorf("serve HTTP: %w", err)
 	case <-ctx.Done():
-		stop() // A second interrupt uses the default signal behavior.
+		stop() // Interupsi kedua mengikuti perilaku sinyal bawaan.
 	}
 	slog.Info("shutting down HTTP server")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)

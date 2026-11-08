@@ -14,11 +14,15 @@ const (
 )
 
 var (
+	ErrNotFound              = errors.New("migration not found")
+	ErrConflict              = errors.New("migration conflict")
+	ErrStorage               = errors.New("migration storage failure")
+	ErrImmutableMigration    = fmt.Errorf("%w: executed migration cannot be revised", ErrConflict)
 	ErrInvalidMigration      = errors.New("invalid migration request")
 	ErrIrreversibleMigration = fmt.Errorf("%w: migration is irreversible", ErrInvalidMigration)
 )
 
-// Status describes an execution result. Workflow and queue states are separate.
+// Status menyatakan hasil eksekusi. Workflow dan antrean memiliki status masing-masing.
 type Status string
 
 const (
@@ -35,20 +39,21 @@ const (
 	Forward  Action = "forward"
 )
 
-// Migration identifies a definition within one registered target database.
-// CurrentRevision identifies its latest definition, independent of active history.
+// Migration menyimpan identitas definisi pada satu database target yang terdaftar.
+// CurrentRevision menunjuk revisi definisi terbaru, terpisah dari posisi migration aktif.
 type Migration struct {
-	ID              string    `json:"id"`
-	DatabaseID      string    `json:"database_id"`
-	Name            string    `json:"name"`
-	CurrentRevision int64     `json:"current_revision"`
-	CreatedBy       string    `json:"created_by"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID              string     `json:"id"`
+	DatabaseID      string     `json:"database_id"`
+	Name            string     `json:"name"`
+	CurrentRevision int64      `json:"current_revision"`
+	CreatedBy       string     `json:"created_by"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	FrozenAt        *time.Time `json:"frozen_at,omitempty"`
 }
 
-// Revision holds the exact SQL to review and execute. Revisions are numbered
-// from one within a migration and become immutable once execution is attempted.
+// Revision menyimpan SQL asli untuk ditinjau dan dieksekusi. Nomor revisi dimulai
+// dari satu untuk setiap migration dan bersifat immutable sejak percobaan eksekusi.
 type Revision struct {
 	MigrationID        string    `json:"migration_id"`
 	Number             int64     `json:"number"`
@@ -60,9 +65,9 @@ type Revision struct {
 	CreatedAt          time.Time `json:"created_at"`
 }
 
-// Execution is an individual attempt with a snapshot of the SQL actually run.
-// RevertsExecutionID links a rollback to the committed execution it reverses.
-// Only committed executions are stored in the Milestone 2 migration history.
+// Execution mencatat satu percobaan eksekusi beserta salinan SQL yang dijalankan.
+// RevertsExecutionID menghubungkan rollback dengan eksekusi committed yang dibatalkan.
+// Migration history Milestone 2 menyimpan eksekusi yang berhasil di-commit.
 type Execution struct {
 	ID                 string     `json:"id"`
 	DatabaseID         string     `json:"database_id"`
@@ -77,8 +82,8 @@ type Execution struct {
 	RevertsExecutionID string     `json:"reverts_execution_id,omitempty"`
 }
 
-// Record preserves the Milestone 1 history response while its storage and API
-// are migrated to revision-aware execution history.
+// Record mempertahankan format respons history Milestone 1 selama penyimpanan
+// dan API beralih ke history eksekusi yang mencatat revisi migration.
 type Record struct {
 	Version    int64      `json:"version"`
 	Name       string     `json:"name"`
@@ -97,8 +102,8 @@ func NormalizeMigrationName(name string) (string, error) {
 	return name, nil
 }
 
-// NormalizeRevision validates SQL pairing and normalizes the explanatory reason.
-// SQL bytes are preserved for approval, execution, and history snapshots.
+// NormalizeRevision memvalidasi pasangan SQL dan merapikan alasan irreversible.
+// Isi SQL dipertahankan persis untuk approval, eksekusi, dan salinan history.
 func NormalizeRevision(revision Revision) (Revision, error) {
 	if revision.Number < 1 {
 		return Revision{}, fmt.Errorf("%w: revision number must be positive", ErrInvalidMigration)
@@ -125,8 +130,8 @@ func NormalizeRevision(revision Revision) (Revision, error) {
 	return revision, nil
 }
 
-// SQLFor selects the original SQL for an action. Callers must check linear
-// ordering, permissions, approvals, and persisted revision immutability.
+// SQLFor memilih SQL asli sesuai tindakan. Pemanggil wajib memeriksa urutan
+// linear, permission, approval, dan perlindungan revisi pada penyimpanan.
 func (revision Revision) SQLFor(action Action) (string, error) {
 	revision, err := NormalizeRevision(revision)
 	if err != nil {

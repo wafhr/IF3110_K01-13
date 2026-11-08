@@ -12,15 +12,15 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/database"
 )
 
-// TargetOpener returns a new pool owned by the migration operation. It must not
-// return a shared viewer pool because the runner closes it after each operation.
+// TargetOpener mengembalikan pool baru yang dimiliki operasi migration.
+// Gunakan pool khusus karena runner menutupnya setelah setiap operasi selesai.
 type TargetOpener func(context.Context, string) (*sql.DB, database.DBMS, error)
 
 type Service struct {
 	openTarget TargetOpener
 }
 
-// NewService uses the database registry to open each target connection.
+// NewService menggunakan registry database untuk membuka setiap koneksi target.
 func NewService(openTarget TargetOpener) *Service { return &Service{openTarget: openTarget} }
 
 func (s *Service) target(ctx context.Context, id string) (*sql.DB, database.DBMS, error) {
