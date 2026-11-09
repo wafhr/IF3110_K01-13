@@ -99,7 +99,7 @@ func (input definitionInput) normalized(number int64) (string, Revision, error) 
 func (h *HTTPHandler) listDefinitions(w http.ResponseWriter, r *http.Request) {
 	definitions, err := h.definitions.List(r.Context(), r.PathValue("databaseID"))
 	if err != nil {
-		migrationError(w, err)
+		migrationError(w, r.Context(), err)
 		return
 	}
 	if definitions == nil {
@@ -115,13 +115,13 @@ func (h *HTTPHandler) createDefinition(w http.ResponseWriter, r *http.Request) {
 	}
 	name, revision, err := input.normalized(1)
 	if err != nil {
-		migrationError(w, err)
+		migrationError(w, r.Context(), err)
 		return
 	}
 	databaseID := r.PathValue("databaseID")
 	definition, stored, err := h.definitions.Create(r.Context(), databaseID, access.CurrentUser(r.Context()).ID, name, revision)
 	if err != nil {
-		migrationError(w, err)
+		migrationError(w, r.Context(), err)
 		return
 	}
 	w.Header().Set("Location", "/databases/"+databaseID+"/migrations/definitions/"+definition.ID)
@@ -132,12 +132,12 @@ func (h *HTTPHandler) getDefinition(w http.ResponseWriter, r *http.Request) {
 	databaseID, migrationID := r.PathValue("databaseID"), r.PathValue("migrationID")
 	definition, err := h.definitions.Get(r.Context(), databaseID, migrationID)
 	if err != nil {
-		migrationError(w, err)
+		migrationError(w, r.Context(), err)
 		return
 	}
 	revision, err := h.definitions.GetRevision(r.Context(), databaseID, migrationID, definition.CurrentRevision)
 	if err != nil {
-		migrationError(w, err)
+		migrationError(w, r.Context(), err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"migration": definition, "revision": revision})
@@ -152,18 +152,18 @@ func (h *HTTPHandler) reviseDefinition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.ExpectedRevision < 1 {
-		migrationError(w, ErrInvalidMigration)
+		migrationError(w, r.Context(), ErrInvalidMigration)
 		return
 	}
 	name, revision, err := input.normalized(input.ExpectedRevision + 1)
 	if err != nil {
-		migrationError(w, err)
+		migrationError(w, r.Context(), err)
 		return
 	}
 	definition, stored, err := h.definitions.Revise(r.Context(), r.PathValue("databaseID"), r.PathValue("migrationID"),
 		access.CurrentUser(r.Context()).ID, name, input.ExpectedRevision, revision)
 	if err != nil {
-		migrationError(w, err)
+		migrationError(w, r.Context(), err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"migration": definition, "revision": stored})
@@ -172,12 +172,12 @@ func (h *HTTPHandler) reviseDefinition(w http.ResponseWriter, r *http.Request) {
 func (h *HTTPHandler) getDefinitionRevision(w http.ResponseWriter, r *http.Request) {
 	number, err := strconv.ParseInt(r.PathValue("revision"), 10, 64)
 	if err != nil || number < 1 {
-		migrationError(w, ErrInvalidMigration)
+		migrationError(w, r.Context(), ErrInvalidMigration)
 		return
 	}
 	revision, err := h.definitions.GetRevision(r.Context(), r.PathValue("databaseID"), r.PathValue("migrationID"), number)
 	if err != nil {
-		migrationError(w, err)
+		migrationError(w, r.Context(), err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"revision": revision})
@@ -186,24 +186,24 @@ func (h *HTTPHandler) getDefinitionRevision(w http.ResponseWriter, r *http.Reque
 func (h *HTTPHandler) executionHistory(w http.ResponseWriter, r *http.Request) {
 	query, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil || len(query) > 1 || (len(query) == 1 && !query.Has("hide_rollback")) {
-		migrationError(w, ErrInvalidMigration)
+		migrationError(w, r.Context(), ErrInvalidMigration)
 		return
 	}
 	hideRollback := false
 	if values, exists := query["hide_rollback"]; exists {
 		if len(values) != 1 || (values[0] != "true" && values[0] != "false") {
-			migrationError(w, ErrInvalidMigration)
+			migrationError(w, r.Context(), ErrInvalidMigration)
 			return
 		}
 		hideRollback = values[0] == "true"
 	}
 	if h.service == nil {
-		migrationError(w, ErrStorage)
+		migrationError(w, r.Context(), ErrStorage)
 		return
 	}
 	history, err := h.service.ReadExecutionHistory(r.Context(), r.PathValue("databaseID"), hideRollback)
 	if err != nil {
-		migrationError(w, err)
+		migrationError(w, r.Context(), err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, history)
@@ -211,12 +211,12 @@ func (h *HTTPHandler) executionHistory(w http.ResponseWriter, r *http.Request) {
 
 func (h *HTTPHandler) executionDetail(w http.ResponseWriter, r *http.Request) {
 	if h.service == nil {
-		migrationError(w, ErrStorage)
+		migrationError(w, r.Context(), ErrStorage)
 		return
 	}
 	execution, err := h.service.GetExecution(r.Context(), r.PathValue("databaseID"), r.PathValue("executionID"))
 	if err != nil {
-		migrationError(w, err)
+		migrationError(w, r.Context(), err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"execution": execution})
@@ -235,7 +235,7 @@ func decodeDefinitionJSON(w http.ResponseWriter, r *http.Request, input any) boo
 func (h *HTTPHandler) list(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.service.List(r.Context(), r.PathValue("databaseID"))
 	if err != nil {
-		migrationError(w, err)
+		migrationError(w, r.Context(), err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"migrations": rows})
@@ -248,7 +248,7 @@ func (h *HTTPHandler) detail(w http.ResponseWriter, r *http.Request) {
 	}
 	row, err := h.service.Get(r.Context(), r.PathValue("databaseID"), v)
 	if err != nil {
-		migrationError(w, err)
+		migrationError(w, r.Context(), err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"migration": row})
@@ -282,7 +282,7 @@ func (h *HTTPHandler) enqueueAction(w http.ResponseWriter, r *http.Request, migr
 	result, err := h.service.SubmitAction(r.Context(), access.CurrentUser(r.Context()).ID,
 		r.PathValue("databaseID"), migrationID, action, approvalID)
 	if err != nil {
-		migrationError(w, err)
+		migrationError(w, r.Context(), err)
 		return
 	}
 	jsonResponse(w, http.StatusAccepted, result)
@@ -308,7 +308,7 @@ func (h *HTTPHandler) schemaDiff(w http.ResponseWriter, r *http.Request) {
 	databaseID := r.PathValue("databaseID")
 	probe, dbms, err := h.service.openTarget(r.Context(), databaseID)
 	if err != nil {
-		migrationError(w, err)
+		migrationError(w, r.Context(), err)
 		return
 	}
 	_ = probe.Close()
@@ -320,7 +320,7 @@ func (h *HTTPHandler) schemaDiff(w http.ResponseWriter, r *http.Request) {
 	for schema := range schemas {
 		tables, err := h.schemas.Tables(r.Context(), databaseID, schema)
 		if err != nil {
-			writeViewerSchemaError(w, err)
+			writeViewerSchemaError(w, r.Context(), err)
 			return
 		}
 		for _, table := range tables {
@@ -329,7 +329,7 @@ func (h *HTTPHandler) schemaDiff(w http.ResponseWriter, r *http.Request) {
 			}
 			detail, err := h.schemas.Table(r.Context(), databaseID, schema, table.Name)
 			if err != nil {
-				writeViewerSchemaError(w, err)
+				writeViewerSchemaError(w, r.Context(), err)
 				return
 			}
 			current = append(current, detail)
@@ -343,7 +343,7 @@ func (h *HTTPHandler) schemaDiff(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"schema_diff": diff})
 }
 
-func writeViewerSchemaError(w http.ResponseWriter, err error) {
+func writeViewerSchemaError(w http.ResponseWriter, ctx context.Context, err error) {
 	if errors.Is(err, targetdb.ErrPermissionDenied) {
 		jsonResponse(w, http.StatusForbidden, map[string]string{"error": "target database access denied"})
 		return
@@ -352,7 +352,7 @@ func writeViewerSchemaError(w http.ResponseWriter, err error) {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid desired schema"})
 		return
 	}
-	migrationError(w, err)
+	migrationError(w, ctx, err)
 }
 
 func (h *HTTPHandler) explain(w http.ResponseWriter, r *http.Request) {
@@ -410,7 +410,7 @@ func writeJSONDecodeError(w http.ResponseWriter, err error) {
 	jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "request must contain one valid JSON object"})
 }
 
-func migrationError(w http.ResponseWriter, err error) {
+func migrationError(w http.ResponseWriter, ctx context.Context, err error) {
 	status, message := http.StatusInternalServerError, "migration operation failed"
 	switch {
 	case errors.Is(err, ErrExecutionUnavailable):
@@ -436,7 +436,7 @@ func migrationError(w http.ResponseWriter, err error) {
 	case errors.Is(err, targetdb.ErrClosed):
 		status, message = http.StatusServiceUnavailable, "target database unavailable"
 	default:
-		slog.Error("migration operation failed")
+		slog.ErrorContext(ctx, "migration_operation_failed", "status", "failed")
 	}
 	jsonResponse(w, status, map[string]string{"error": message})
 }

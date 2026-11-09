@@ -245,3 +245,19 @@ func TestHTTPHandlerHandlesCancellationAndUnknownMethods(t *testing.T) {
 		t.Fatal("pembatalan request atau normalisasi metode tidak sesuai")
 	}
 }
+
+func TestHTTPCompletionUsesVerifiedActorAcrossRequestCopies(t *testing.T) {
+	_, logs := setupHTTPTracing(t)
+	handler := telemetry.HTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(telemetry.WithLogAttrs(r.Context(), slog.String("scope", "copied")))
+		r = r.WithContext(telemetry.WithActor(r.Context(), "verified-actor"))
+		slog.InfoContext(r.Context(), "authenticated_handler")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	for _, record := range logRecords(t, logs.String()) {
+		if record["actor"] != "verified-actor" {
+			t.Fatal("log HTTP kehilangan aktor pada request salinan")
+		}
+	}
+}

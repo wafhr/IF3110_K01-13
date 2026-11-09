@@ -6,8 +6,10 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 //go:embed schema.sql
@@ -47,7 +49,10 @@ func (r *Repository) Initialize(ctx context.Context) error {
 }
 
 // Create menetapkan identitas, pembuat, dan revisi pertama di sisi server.
-func (r *Repository) Create(ctx context.Context, databaseID, actorID, name string, revision Revision) (Migration, Revision, error) {
+func (r *Repository) Create(ctx context.Context, databaseID, actorID, name string, revision Revision) (createdDefinition Migration, createdRevision Revision, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "migration_define", slog.String("database_id", databaseID), slog.String("actor", actorID))
+	defer activity.End(&activityErr)
+
 	if !validUUID(databaseID) {
 		return Migration{}, Revision{}, ErrNotFound
 	}
@@ -79,6 +84,8 @@ func (r *Repository) Create(ctx context.Context, databaseID, actorID, name strin
 	if err != nil {
 		return Migration{}, Revision{}, repositoryError("create migration definition", err)
 	}
+	activity.SetAttributes(slog.String("migration_id", definition.ID), slog.Int64("revision", revision.Number))
+	ctx = telemetry.WithLogAttrs(ctx, slog.String("migration_id", definition.ID), slog.Int64("revision", revision.Number))
 	revision.MigrationID = definition.ID
 	revision, err = insertRevision(ctx, tx, revision)
 	if err != nil {
@@ -90,7 +97,10 @@ func (r *Repository) Create(ctx context.Context, databaseID, actorID, name strin
 	return definition, revision, nil
 }
 
-func (r *Repository) Get(ctx context.Context, databaseID, migrationID string) (Migration, error) {
+func (r *Repository) Get(ctx context.Context, databaseID, migrationID string) (result Migration, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "migration_definition_read", slog.String("database_id", databaseID), slog.String("migration_id", migrationID))
+	defer activity.End(&activityErr)
+
 	if !validUUID(databaseID) || !validUUID(migrationID) {
 		return Migration{}, ErrNotFound
 	}
@@ -99,7 +109,10 @@ func (r *Repository) Get(ctx context.Context, databaseID, migrationID string) (M
 	return definition, repositoryError("get migration definition", err)
 }
 
-func (r *Repository) List(ctx context.Context, databaseID string) ([]Migration, error) {
+func (r *Repository) List(ctx context.Context, databaseID string) (result []Migration, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "migration_definitions_list", slog.String("database_id", databaseID))
+	defer activity.End(&activityErr)
+
 	if !validUUID(databaseID) {
 		return nil, ErrNotFound
 	}
@@ -123,7 +136,10 @@ func (r *Repository) List(ctx context.Context, databaseID string) ([]Migration, 
 	return definitions, nil
 }
 
-func (r *Repository) GetRevision(ctx context.Context, databaseID, migrationID string, number int64) (Revision, error) {
+func (r *Repository) GetRevision(ctx context.Context, databaseID, migrationID string, number int64) (result Revision, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "migration_revision_read", slog.String("database_id", databaseID), slog.String("migration_id", migrationID), slog.Int64("revision", number))
+	defer activity.End(&activityErr)
+
 	if !validUUID(databaseID) || !validUUID(migrationID) {
 		return Revision{}, ErrNotFound
 	}
@@ -139,7 +155,10 @@ func (r *Repository) GetRevision(ctx context.Context, databaseID, migrationID st
 // Revise menambahkan revisi selama definisi masih dapat diedit. expectedRevision
 // mencegah perubahan dari editor dengan revisi usang menimpa definisi terbaru.
 // Perubahan pada definisi yang sudah dieksekusi atau dibekukan memerlukan migration baru.
-func (r *Repository) Revise(ctx context.Context, databaseID, migrationID, actorID, name string, expectedRevision int64, revision Revision) (Migration, Revision, error) {
+func (r *Repository) Revise(ctx context.Context, databaseID, migrationID, actorID, name string, expectedRevision int64, revision Revision) (updatedDefinition Migration, updatedRevision Revision, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "migration_revise", slog.String("database_id", databaseID), slog.String("migration_id", migrationID), slog.String("actor", actorID))
+	defer activity.End(&activityErr)
+
 	if !validUUID(databaseID) || !validUUID(migrationID) {
 		return Migration{}, Revision{}, ErrNotFound
 	}
@@ -150,6 +169,8 @@ func (r *Repository) Revise(ctx context.Context, databaseID, migrationID, actorI
 	if err != nil {
 		return Migration{}, Revision{}, err
 	}
+	activity.SetAttributes(slog.Int64("revision", expectedRevision+1))
+	ctx = telemetry.WithLogAttrs(ctx, slog.Int64("revision", expectedRevision+1))
 	revision.MigrationID, revision.Number, revision.CreatedBy = migrationID, expectedRevision+1, actorID
 	revision, err = NormalizeRevision(revision)
 	if err != nil {

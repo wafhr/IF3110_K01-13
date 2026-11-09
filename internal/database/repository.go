@@ -10,6 +10,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
+
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 //go:embed schema.sql
@@ -64,7 +67,10 @@ func (r *Repository) Initialize(ctx context.Context) error {
 	return nil
 }
 
-func (r *Repository) Create(ctx context.Context, name string, config ConnectionConfig) (Database, error) {
+func (r *Repository) Create(ctx context.Context, name string, config ConnectionConfig) (registeredDatabase Database, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "database_register")
+	defer activity.End(&activityErr)
+
 	name, config, err := normalizeRegistration(name, config)
 	if err != nil {
 		return Database{}, err
@@ -80,10 +86,14 @@ func (r *Repository) Create(ctx context.Context, name string, config ConnectionC
 	if err != nil {
 		return Database{}, storageError("create database", err)
 	}
+	activity.SetAttributes(slog.String("database_id", database.ID))
 	return database, nil
 }
 
-func (r *Repository) Get(ctx context.Context, id string) (Database, error) {
+func (r *Repository) Get(ctx context.Context, id string) (result Database, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "database_read", slog.String("database_id", id))
+	defer activity.End(&activityErr)
+
 	if !validID(id) {
 		return Database{}, ErrNotFound
 	}
@@ -96,7 +106,10 @@ func (r *Repository) Get(ctx context.Context, id string) (Database, error) {
 
 // List returns all registered databases. It is intended for platform management;
 // a user-facing database list must additionally filter by group-derived access.
-func (r *Repository) List(ctx context.Context) ([]Database, error) {
+func (r *Repository) List(ctx context.Context) (result []Database, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "databases_list")
+	defer activity.End(&activityErr)
+
 	rows, err := r.db.QueryContext(ctx, `SELECT `+metadataColumns+` FROM managed_databases ORDER BY name, id`)
 	if err != nil {
 		return nil, storageError("list databases", err)
@@ -118,7 +131,10 @@ func (r *Repository) List(ctx context.Context) ([]Database, error) {
 
 // Update replaces all connection fields, including the password. An empty
 // password intentionally replaces the old one; it does not mean "unchanged".
-func (r *Repository) Update(ctx context.Context, id, name string, config ConnectionConfig) (Database, error) {
+func (r *Repository) Update(ctx context.Context, id, name string, config ConnectionConfig) (updatedDatabase Database, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "database_update", slog.String("database_id", id))
+	defer activity.End(&activityErr)
+
 	if !validID(id) {
 		return Database{}, ErrNotFound
 	}
@@ -142,7 +158,10 @@ func (r *Repository) Update(ctx context.Context, id, name string, config Connect
 }
 
 // Delete removes a registration only; it never drops the actual target database.
-func (r *Repository) Delete(ctx context.Context, id string) error {
+func (r *Repository) Delete(ctx context.Context, id string) (activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "database_delete", slog.String("database_id", id))
+	defer activity.End(&activityErr)
+
 	if !validID(id) {
 		return ErrNotFound
 	}

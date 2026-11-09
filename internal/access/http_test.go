@@ -1,12 +1,19 @@
 package access_test
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/wafhr/IF3110_K01-13/internal/access"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 func TestRequireDatabaseAccess(t *testing.T) {
@@ -100,4 +107,46 @@ func newHandler(t *testing.T, permission access.Permission, platformAdmin bool) 
 		}
 	})
 	return access.NewHTTPHandler(access.NewService(db), false)
+}
+
+func TestAccessAuditUsesVerifiedActorAndProtectsSession(t *testing.T) {
+	var output bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(telemetry.NewLogger(&output, "server"))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	handler := newHandler(t, access.ViewOnly, false)
+	protected := handler.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("izin edit seharusnya ditolak") }))
+	request := httptest.NewRequest(http.MethodGet, "/databases/database/data", nil)
+	request.SetPathValue("databaseID", "00000000-0000-4000-8000-000000000002")
+	request.AddCookie(&http.Cookie{Name: "platform_session", Value: testSessionToken})
+	response := httptest.NewRecorder()
+	telemetry.HTTPHandler(protected).ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatal("respons penolakan akses berubah")
+	}
+	raw := output.String()
+	decoder := json.NewDecoder(&output)
+	found := false
+	for {
+		var record map[string]any
+		err := decoder.Decode(&record)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if record["event"] == "access_denied" {
+			found = true
+			if record["actor"] != testUserID || record["reason"] != "database_permission_required" || record["status"] != "failed" {
+				t.Fatal("audit penolakan tidak sesuai identitas terverifikasi")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("penolakan akses tidak dicatat")
+	}
+	if strings.Contains(raw, testSessionToken) || strings.Contains(raw, "test-csrf") || strings.Contains(raw, `"reader"`) {
+		t.Fatal("credential atau session muncul pada audit")
+	}
 }

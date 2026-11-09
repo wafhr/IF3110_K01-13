@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
@@ -160,6 +163,122 @@ func TestLoggerOmitsIDsWithoutValidSpan(t *testing.T) {
 		}
 		if _, exists := record["span_id"]; exists {
 			t.Fatal("span_id palsu ditambahkan tanpa span valid")
+		}
+	}
+}
+
+func logRecords(t *testing.T, data string) []map[string]any {
+	t.Helper()
+	decoder := json.NewDecoder(strings.NewReader(data))
+	var records []map[string]any
+	for {
+		var record map[string]any
+		err := decoder.Decode(&record)
+		if errors.Is(err, io.EOF) {
+			return records
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		records = append(records, record)
+	}
+}
+
+func TestLogContextScopesRemainIndependent(t *testing.T) {
+	_, logs := setupHTTPTracing(t)
+	parent := telemetry.WithLogAttrs(context.Background(), slog.String("actor", "actor-1"), slog.String("database_id", "database-1"))
+	child := telemetry.WithLogAttrs(parent, slog.String("database_id", "database-2"), slog.String("migration_id", "migration-1"))
+	slog.InfoContext(child, "child")
+	slog.InfoContext(parent, "parent")
+	slog.InfoContext(context.Background(), "system")
+	records := logRecords(t, logs.String())
+	if records[0]["database_id"] != "database-2" || records[0]["actor"] != "actor-1" || records[1]["database_id"] != "database-1" || records[2]["actor"] != "system" {
+		t.Fatal("metadata context bercampur")
+	}
+	if _, exists := records[1]["migration_id"]; exists {
+		t.Fatal("metadata child mengubah parent")
+	}
+	var output bytes.Buffer
+	telemetry.NewLogger(&output, "server").With("actor", "bound-actor").InfoContext(parent, "explicit", "database_id", "explicit-database")
+	record := decodeLog(t, output.Bytes())
+	if record["actor"] != "bound-actor" || record["database_id"] != "explicit-database" || strings.Count(output.String(), `"actor"`) != 1 {
+		t.Fatal("metadata menduplikasi atau menimpa atribut eksplisit")
+	}
+}
+
+func TestActivityRecordsOutcomeAndPreservesPanic(t *testing.T) {
+	for _, scenario := range []string{"success", "failure", "panic"} {
+		t.Run(scenario, func(t *testing.T) {
+			recorder, logs := setupHTTPTracing(t)
+			failure := errors.New("fixture-private-error")
+			operation := func() (activityErr error) {
+				_, activity := telemetry.StartActivity(context.Background(), "operation", slog.String("actor", "actor-1"))
+				defer activity.End(&activityErr)
+				activity.SetAttributes(slog.String("database_id", "created-database"))
+				if scenario == "panic" {
+					panic("fixture-private-panic")
+				}
+				if scenario == "failure" {
+					return failure
+				}
+				return nil
+			}
+			var operationErr error
+			var panicValue any
+			func() {
+				defer func() { panicValue = recover() }()
+				operationErr = operation()
+			}()
+			if scenario == "failure" && operationErr != failure {
+				t.Fatal("audit mengubah error operasi")
+			}
+			if scenario == "panic" && panicValue != "fixture-private-panic" {
+				t.Fatal("audit menelan atau mengubah panic")
+			}
+			records := logRecords(t, logs.String())
+			if len(records) != 2 || records[0]["event"] != "operation_started" || records[1]["event"] != "operation_completed" || records[1]["database_id"] != "created-database" {
+				t.Fatal("log lifecycle tidak lengkap")
+			}
+			if (records[1]["status"] == "failed") != (scenario != "success") || records[1]["actor"] != "actor-1" {
+				t.Fatal("hasil atau aktor audit tidak sesuai")
+			}
+			span := recorder.Ended()[0]
+			if span.Name() != "operation" || (span.Status().Code == codes.Error) != (scenario != "success") {
+				t.Fatal("hasil span berbeda dari hasil operasi")
+			}
+			encoded, _ := json.Marshal(tracetest.SpanStubsFromReadOnlySpans(recorder.Ended()))
+			if strings.Contains(logs.String(), "fixture-private-") || strings.Contains(string(encoded), "fixture-private-") {
+				t.Fatal("pesan error atau panic mentah tercatat")
+			}
+		})
+	}
+}
+
+func TestActivityContextReachesSQLLogsAndSpans(t *testing.T) {
+	recorder, logs := setupHTTPTracing(t)
+	db := openSQLFixture(t, &sqlFixture{}, "postgresql", "target")
+	ctx, parent := otel.Tracer("test").Start(context.Background(), "request")
+	defer parent.End()
+	var operationErr error
+	ctx, activity := telemetry.StartActivity(ctx, "migration_test", slog.String("actor", "actor-1"), slog.String("database_id", "database-1"), slog.String("migration_id", "migration-1"))
+	_, operationErr = db.ExecContext(ctx, "SELECT 1")
+	activity.End(&operationErr)
+	if operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	record := findSQLRecord(t, logRecords(t, logs.String()), "sql_exec_completed")
+	if record["actor"] != "actor-1" || record["database_id"] != "database-1" || record["migration_id"] != "migration-1" || record["trace_id"] != parent.SpanContext().TraceID().String() {
+		t.Fatal("SQL kehilangan metadata aktivitas")
+	}
+	for _, span := range recorder.Ended() {
+		if span.Name() == "db.exec" {
+			attrs := make(map[string]any)
+			for _, attr := range span.Attributes() {
+				attrs[string(attr.Key)] = attr.Value.AsInterface()
+			}
+			if attrs["actor"] != "actor-1" || attrs["database_id"] != "database-1" || attrs["migration_id"] != "migration-1" {
+				t.Fatal("span SQL kehilangan metadata aktivitas")
+			}
 		}
 	}
 }

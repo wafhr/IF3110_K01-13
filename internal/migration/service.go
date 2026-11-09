@@ -6,11 +6,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/wafhr/IF3110_K01-13/internal/access"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 // TargetOpener mengembalikan pool baru yang dimiliki operasi migration.
@@ -114,11 +116,15 @@ func (s *Service) PrepareAction(ctx context.Context, databaseID, migrationID str
 
 // SubmitAction memvalidasi pengajuan tanpa menjalankan SQL. Approval mengikat
 // snapshot hasil PrepareAction yang juga tersedia bagi modul workflow.
-func (s *Service) SubmitAction(ctx context.Context, actorID, databaseID, migrationID string, action Action, approvalID string) (QueuedAction, error) {
+func (s *Service) SubmitAction(ctx context.Context, actorID, databaseID, migrationID string, action Action, approvalID string) (queuedAction QueuedAction, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "migration_submit", slog.String("actor", actorID), slog.String("database_id", databaseID), slog.String("migration_id", migrationID))
+	defer activity.End(&activityErr)
+
 	if !validUUID(actorID) || !validUUID(databaseID) || !validUUID(migrationID) || !validUUID(approvalID) ||
 		(action != Apply && action != Rollback && action != Forward) {
 		return QueuedAction{}, ErrInvalidMigration
 	}
+	activity.SetAttributes(slog.String("action", string(action)))
 	if s.execution.Authorizer == nil || s.execution.Approvals == nil || s.execution.Queue == nil {
 		return QueuedAction{}, ErrExecutionUnavailable
 	}
@@ -138,6 +144,8 @@ func (s *Service) SubmitAction(ctx context.Context, actorID, databaseID, migrati
 	}
 	id[6], id[8] = (id[6]&0x0f)|0x40, (id[8]&0x3f)|0x80
 	executionID := fmt.Sprintf("%x-%x-%x-%x-%x", id[:4], id[4:6], id[6:8], id[8:10], id[10:])
+	activity.SetAttributes(slog.String("execution_id", executionID), slog.Int64("revision", plan.Revision))
+	ctx = telemetry.WithLogAttrs(ctx, slog.String("execution_id", executionID), slog.Int64("revision", plan.Revision))
 	request := ExecutionRequest{ExecutionID: executionID, ApprovalID: approvalID, ActorID: actorID, Plan: plan}
 	if err := s.execution.Approvals.ValidateApproval(ctx, request); err != nil {
 		return QueuedAction{}, err
@@ -149,6 +157,7 @@ func (s *Service) SubmitAction(ctx context.Context, actorID, databaseID, migrati
 	if jobID == "" {
 		return QueuedAction{}, ErrStorage
 	}
+	activity.SetAttributes(slog.String("job_id", jobID))
 	return QueuedAction{JobID: jobID, ExecutionID: executionID}, nil
 }
 
@@ -301,7 +310,10 @@ func (s *Service) PrepareExecution(ctx context.Context, tx *sql.Tx, request Exec
 }
 
 // ReadExecutionHistory menyajikan commit dan attempt legacy sebagai dua koleksi.
-func (s *Service) ReadExecutionHistory(ctx context.Context, databaseID string, hideRollback bool) (ExecutionHistory, error) {
+func (s *Service) ReadExecutionHistory(ctx context.Context, databaseID string, hideRollback bool) (result ExecutionHistory, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "migration_history_read", slog.String("database_id", databaseID))
+	defer activity.End(&activityErr)
+
 	db, history, err := s.openHistory(ctx, databaseID)
 	if err != nil {
 		return ExecutionHistory{}, err
@@ -318,7 +330,10 @@ func (s *Service) ReadExecutionHistory(ctx context.Context, databaseID string, h
 	return ExecutionHistory{Executions: executions, LegacyAttempts: attempts}, nil
 }
 
-func (s *Service) GetExecution(ctx context.Context, databaseID, executionID string) (Execution, error) {
+func (s *Service) GetExecution(ctx context.Context, databaseID, executionID string) (result Execution, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "migration_execution_read", slog.String("database_id", databaseID), slog.String("execution_id", executionID))
+	defer activity.End(&activityErr)
+
 	if !validUUID(executionID) {
 		return Execution{}, ErrNotFound
 	}

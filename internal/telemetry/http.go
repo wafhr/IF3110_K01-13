@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -27,7 +28,8 @@ func HTTPHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		method := requestMethod(r.Method)
-		ctx := propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx := context.WithValue(r.Context(), requestActorKey{}, &requestActor{id: "anonymous"})
+		ctx = propagator.Extract(ctx, propagation.HeaderCarrier(r.Header))
 		ctx, span := tracer.Start(ctx, method, trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(attribute.String("http.request.method", method)))
 		// Pembungkus mencegah SDK merekam nilai panic mentah saat span diakhiri.
@@ -86,6 +88,7 @@ func HTTPHandler(next http.Handler) http.Handler {
 			if recovered != nil {
 				span.RecordError(errors.New("HTTP handler " + errorType))
 			}
+			span.SetAttributes(spanAttrs(contextAttrs(ctx))...)
 			attrs = append(attrs, slog.String("status", status))
 			slog.LogAttrs(ctx, level, "http_request_completed", attrs...)
 			if recovered != nil {

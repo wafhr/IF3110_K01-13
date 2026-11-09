@@ -1,16 +1,21 @@
 package migration_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/wafhr/IF3110_K01-13/internal/access"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 func TestExecuteValidatesBeforeOpeningTarget(t *testing.T) {
@@ -566,6 +571,58 @@ func TestRecordSearchPathFailuresRequireTransactionRollback(t *testing.T) {
 			result, err := prepared.Record(context.Background(), repositoryTime)
 			if !errors.Is(err, migration.ErrStorage) || result != (migration.Execution{}) {
 				t.Fatalf("kegagalan metadata menghasilkan %+v, %v", result, err)
+			}
+		})
+	}
+}
+
+func TestSubmissionAuditRecordsQueuedIDsAndFailedQueue(t *testing.T) {
+	for _, rejected := range []bool{false, true} {
+		t.Run(map[bool]string{false: "queued", true: "rejected"}[rejected], func(t *testing.T) {
+			var output bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(telemetry.NewLogger(&output, "server"))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			store, request, dependencies := executionFixture(t)
+			failure := errors.New("fixture-private-queue-error")
+			dependencies.Queue = actionQueueFunc(func(context.Context, migration.ExecutionRequest) (string, error) {
+				if rejected {
+					return "", failure
+				}
+				return "queued-job", nil
+			})
+			service := migration.NewServiceWithExecution(executionOpener(testMigrationDatabase(t, actionHistorySteps(nil)...)), store, dependencies)
+			result, err := service.SubmitAction(context.Background(), request.ActorID, request.Plan.DatabaseID, request.Plan.MigrationID, request.Plan.Action, request.ApprovalID)
+			if rejected && err != failure {
+				t.Fatal("hasil antrean berubah")
+			}
+			if !rejected && err != nil {
+				t.Fatal(err)
+			}
+			raw := output.String()
+			decoder := json.NewDecoder(&output)
+			found := false
+			for {
+				var record map[string]any
+				err := decoder.Decode(&record)
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if record["event"] == "migration_submit_completed" {
+					found = true
+					if record["actor"] != request.ActorID || record["database_id"] != request.Plan.DatabaseID || record["migration_id"] != request.Plan.MigrationID || (record["status"] == "failed") != rejected {
+						t.Fatal("scope atau hasil audit pengajuan tidak sesuai")
+					}
+					if !rejected && (record["job_id"] != result.JobID || record["execution_id"] != result.ExecutionID) {
+						t.Fatal("ID job/eksekusi tidak sesuai hasil antrean")
+					}
+				}
+			}
+			if !found || strings.Contains(raw, "fixture-private-queue-error") || strings.Contains(raw, request.Plan.SQL) {
+				t.Fatal("audit pengajuan hilang atau mencatat payload sensitif")
 			}
 		})
 	}

@@ -96,7 +96,7 @@ func (input connectionInput) config() (database.ConnectionConfig, error) {
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	databases, err := h.registry.List(r.Context())
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	if databases == nil {
@@ -108,7 +108,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	metadata, err := h.registry.Get(r.Context(), r.PathValue("databaseID"))
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"database": metadata})
@@ -121,12 +121,12 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	config, err := input.config()
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	metadata, err := h.registry.Create(r.Context(), input.Name, config)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	w.Header().Set("Location", "/admin/databases/"+metadata.ID)
@@ -140,40 +140,40 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	}
 	config, err := input.config()
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	id := r.PathValue("databaseID")
 	metadata, err := h.registry.Update(r.Context(), id, input.Name, config)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
-	h.invalidate(id)
+	h.invalidate(r.Context(), id)
 	writeJSON(w, http.StatusOK, map[string]any{"database": metadata})
 }
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("databaseID")
 	if err := h.registry.DeleteWithAccessCleanup(r.Context(), id); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
-	h.invalidate(id)
+	h.invalidate(r.Context(), id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *Handler) invalidate(id string) {
+func (h *Handler) invalidate(ctx context.Context, id string) {
 	if err := h.connections.Invalidate(id); err != nil {
 		// The write has already committed. Invalidate removes the cache entry
 		// before closing its pool, so a close error must not imply a failed write.
-		slog.Error("database pool cleanup failed")
+		slog.ErrorContext(ctx, "database_pool_cleanup_failed", "database_id", id, "status", "failed")
 	}
 }
 
 func (h *Handler) checkConnection(w http.ResponseWriter, r *http.Request) {
 	if err := h.connections.Check(r.Context(), r.PathValue("databaseID")); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -186,11 +186,11 @@ func (h *Handler) testConnection(w http.ResponseWriter, r *http.Request) {
 	}
 	config, err := input.config()
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	if err := h.connections.Test(r.Context(), config); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -236,7 +236,7 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-func writeServiceError(w http.ResponseWriter, err error) {
+func writeServiceError(w http.ResponseWriter, ctx context.Context, err error) {
 	switch {
 	case errors.Is(err, database.ErrInvalidInput):
 		writeError(w, http.StatusBadRequest, "invalid database configuration")
@@ -259,7 +259,7 @@ func writeServiceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, targetdb.ErrClosed):
 		writeError(w, http.StatusServiceUnavailable, "database connections unavailable")
 	default:
-		slog.Error("database management operation failed")
+		slog.ErrorContext(ctx, "database_management_failed", "status", "failed")
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}
 }

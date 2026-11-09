@@ -1,12 +1,20 @@
 package database
 
-import "context"
+import (
+	"context"
+	"log/slog"
+
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
+)
 
 // DeleteWithAccessCleanup removes a registration, its grants, and affected
 // sessions atomically. It requires the access-control schema to be initialized.
 // The target database itself is never modified. Administrative callers should
 // use this method instead of the low-level registry-only Delete operation.
-func (r *Repository) DeleteWithAccessCleanup(ctx context.Context, id string) error {
+func (r *Repository) DeleteWithAccessCleanup(ctx context.Context, id string) (activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "database_delete", slog.String("database_id", id))
+	defer activity.End(&activityErr)
+
 	if !validID(id) {
 		return ErrNotFound
 	}

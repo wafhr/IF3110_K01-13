@@ -55,17 +55,18 @@ func (i *sqlInterceptor) start(ctx context.Context, operation, query string, par
 		slog.String("database", i.database), slog.String("database_role", i.role),
 		slog.String("db_system", i.system), slog.String("operation", operation),
 	}
-	spanAttrs := []attribute.KeyValue{
+	attributes := []attribute.KeyValue{
 		attribute.String("db.system.name", i.system), attribute.String("db.namespace", i.database),
 		attribute.String("db.operation.name", operation), attribute.String("database_role", i.role),
 	}
 	if operation == "exec" || operation == "query" || operation == "prepare" {
 		template := SanitizeSQL(query, i.system)
 		attrs = append(attrs, slog.String("query_template", template), slog.String("parameters", Redacted), slog.Int("parameter_count", parameterCount))
-		spanAttrs = append(spanAttrs, attribute.String("db.query.summary", template), attribute.String("db.query.parameters", Redacted), attribute.Int("db.query.parameter_count", parameterCount))
+		attributes = append(attributes, attribute.String("db.query.summary", template), attribute.String("db.query.parameters", Redacted), attribute.Int("db.query.parameter_count", parameterCount))
 	}
+	attributes = append(attributes, spanAttrs(contextAttrs(ctx))...)
 	ctx, span := otel.Tracer("github.com/wafhr/IF3110_K01-13/internal/telemetry/sql").Start(ctx, "db."+operation,
-		trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(spanAttrs...))
+		trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attributes...))
 	activity := &sqlActivity{ctx: ctx, span: span, started: time.Now(), attrs: attrs}
 	startedAttrs := append(append([]slog.Attr(nil), attrs...), slog.String("status", "running"))
 	slog.LogAttrs(ctx, slog.LevelInfo, "sql_"+operation+"_started", startedAttrs...)

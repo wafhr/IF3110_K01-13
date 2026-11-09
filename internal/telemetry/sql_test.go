@@ -159,23 +159,6 @@ func (unavailableRowCount) RowsAffected() (int64, error) {
 	return 0, errors.New("unsupported row count")
 }
 
-func sqlRecords(t *testing.T, data string) []map[string]any {
-	t.Helper()
-	decoder := json.NewDecoder(strings.NewReader(data))
-	var records []map[string]any
-	for {
-		var record map[string]any
-		err := decoder.Decode(&record)
-		if errors.Is(err, io.EOF) {
-			return records
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		records = append(records, record)
-	}
-}
-
 func findSQLRecord(t *testing.T, records []map[string]any, event string) map[string]any {
 	t.Helper()
 	for _, record := range records {
@@ -211,7 +194,7 @@ func TestSQLExecPreservesInputsAndCorrelatesLogs(t *testing.T) {
 	if fixture.query != query || fixture.args[0].Value != "fixture-parameter-secret" || fixture.args[1].Value != int64(42) {
 		t.Fatal("SQL atau parameter driver berubah")
 	}
-	records := sqlRecords(t, logs.String())
+	records := logRecords(t, logs.String())
 	started := findSQLRecord(t, records, "sql_exec_started")
 	completed := findSQLRecord(t, records, "sql_exec_completed")
 	if completed["rows_affected"] != float64(3) || completed["parameter_count"] != float64(2) || completed["status"] != "success" || completed["database_role"] != "platform" || completed["database"] != "application" || completed["parameters"] != telemetry.Redacted {
@@ -271,7 +254,7 @@ func TestSQLQueriesCountRowsAndPreserveMetadata(t *testing.T) {
 			if err := rows.Close(); err != nil {
 				t.Fatal(err)
 			}
-			completed := findSQLRecord(t, sqlRecords(t, logs.String()), "sql_query_completed")
+			completed := findSQLRecord(t, logRecords(t, logs.String()), "sql_query_completed")
 			if completed["rows_read"] != float64(count) || completed["rows_complete"] != !partial || completed["status"] != "success" {
 				t.Fatal("jumlah row atau kelengkapan hasil tidak sesuai")
 			}
@@ -304,7 +287,7 @@ func TestSQLReportsSafeErrorsAndPreservesOriginalError(t *testing.T) {
 			if err != test.err {
 				t.Fatal("error driver diubah")
 			}
-			completed := findSQLRecord(t, sqlRecords(t, logs.String()), "sql_exec_completed")
+			completed := findSQLRecord(t, logRecords(t, logs.String()), "sql_exec_completed")
 			if completed["status"] != "failed" || completed["error"] != test.category || completed["level"] != "ERROR" {
 				t.Fatal("kategori error tidak sesuai")
 			}
@@ -401,7 +384,7 @@ func TestSQLTransactionsRecordFinalOutcomeSeparately(t *testing.T) {
 				t.Fatal("hasil transaksi berubah")
 			}
 			_ = tx.Rollback()
-			records := sqlRecords(t, logs.String())
+			records := logRecords(t, logs.String())
 			findSQLRecord(t, records, "sql_begin_completed")
 			findSQLRecord(t, records, "sql_exec_completed")
 			completed := findSQLRecord(t, records, "sql_"+operation+"_completed")
@@ -449,7 +432,7 @@ func TestSQLStreamingAndMultipleResultErrors(t *testing.T) {
 			if test.failed && err != failure {
 				t.Fatal("error streaming tidak diteruskan")
 			}
-			completed := findSQLRecord(t, sqlRecords(t, logs.String()), "sql_query_completed")
+			completed := findSQLRecord(t, logRecords(t, logs.String()), "sql_query_completed")
 			if completed["rows_read"] != float64(test.expectedCount) || (completed["status"] == "failed") != test.failed || (!test.failed && completed["rows_complete"] != true) {
 				t.Fatal("hasil streaming tidak tercatat dengan benar")
 			}
@@ -467,7 +450,7 @@ func TestSQLUnavailableRowCountKeepsResultUsable(t *testing.T) {
 	if id, err := result.LastInsertId(); err != nil || id != 77 {
 		t.Fatal("LastInsertId berubah")
 	}
-	completed := findSQLRecord(t, sqlRecords(t, logs.String()), "sql_exec_completed")
+	completed := findSQLRecord(t, logRecords(t, logs.String()), "sql_exec_completed")
 	if _, exists := completed["rows_affected"]; exists {
 		t.Fatal("row count dibuat saat tidak tersedia")
 	}
@@ -504,7 +487,7 @@ func TestSQLSetupAndInitialQueryFailures(t *testing.T) {
 			if err != failure {
 				t.Fatal("error driver awal tidak diteruskan")
 			}
-			record := findSQLRecord(t, sqlRecords(t, logs.String()), "sql_"+operation+"_completed")
+			record := findSQLRecord(t, logRecords(t, logs.String()), "sql_"+operation+"_completed")
 			if record["status"] != "failed" || record["sqlstate"] != "42501" {
 				t.Fatal("kegagalan awal tidak tercatat")
 			}
@@ -527,7 +510,7 @@ func TestSQLEmptyStatementIncludesQueryMetadata(t *testing.T) {
 	if _, err := db.ExecContext(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
-	record := findSQLRecord(t, sqlRecords(t, logs.String()), "sql_exec_completed")
+	record := findSQLRecord(t, logRecords(t, logs.String()), "sql_exec_completed")
 	if record["query_template"] != "" || record["parameter_count"] != float64(0) || record["parameters"] != telemetry.Redacted {
 		t.Fatal("metadata SQL kosong tidak lengkap")
 	}
@@ -544,7 +527,7 @@ func TestSQLCanceledReaderRecordsFailureWhenClosed(t *testing.T) {
 	}
 	cancel()
 	_ = rows.Close()
-	record := findSQLRecord(t, sqlRecords(t, logs.String()), "sql_query_completed")
+	record := findSQLRecord(t, logRecords(t, logs.String()), "sql_query_completed")
 	if record["status"] != "failed" || record["error"] != "canceled" || record["rows_complete"] != false {
 		t.Fatal("reader yang dibatalkan tercatat sukses")
 	}

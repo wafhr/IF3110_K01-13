@@ -1,16 +1,21 @@
 package migration_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"math"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 func TestNewMigrationRepositoryRejectsNilDatabase(t *testing.T) {
@@ -329,6 +334,47 @@ func TestMigrationRepositoryFreezeRollsBackOnFailure(t *testing.T) {
 			err := testMigrationRepository(t, steps...).FreezeRevision(context.Background(), repositoryDatabaseID, repositoryMigrationID, 1)
 			if !errors.Is(err, migration.ErrStorage) {
 				t.Fatalf("FreezeRevision() error = %v; want storage error", err)
+			}
+		})
+	}
+}
+
+func TestDefinitionAuditFollowsCommitOutcome(t *testing.T) {
+	for _, failedCommit := range []bool{false, true} {
+		t.Run(map[bool]string{false: "committed", true: "failed commit"}[failedCommit], func(t *testing.T) {
+			var output bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(telemetry.NewLogger(&output, "server"))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			steps := createRepositorySteps()
+			if failedCommit {
+				steps[len(steps)-1].err = errors.New("fixture-private-commit-error")
+			}
+			_, _, operationErr := testMigrationRepository(t, steps...).Create(context.Background(), repositoryDatabaseID, repositoryActorID, "create customers", validRevision())
+			if (operationErr != nil) != failedCommit {
+				t.Fatal("hasil commit berubah")
+			}
+			raw := output.String()
+			decoder := json.NewDecoder(&output)
+			found := false
+			for {
+				var record map[string]any
+				err := decoder.Decode(&record)
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if record["event"] == "migration_define_completed" {
+					found = true
+					if (record["status"] == "failed") != failedCommit || record["migration_id"] != repositoryMigrationID || record["actor"] != repositoryActorID {
+						t.Fatal("audit tidak mengikuti hasil commit")
+					}
+				}
+			}
+			if !found || strings.Contains(raw, "fixture-private-commit-error") {
+				t.Fatal("audit hilang atau mencatat detail driver")
 			}
 		})
 	}
