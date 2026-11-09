@@ -8,9 +8,11 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // NewTracerProvider mengekspor span sebagai JSON melalui antrean batch.
@@ -92,4 +94,27 @@ func (s redactedSpan) InstrumentationScope() instrumentation.Scope {
 	scope.SchemaURL = s.redactor.String(scope.SchemaURL)
 	scope.Attributes = attribute.NewSet(s.redactor.traceAttributes(scope.Attributes.ToSlice())...)
 	return scope
+}
+
+// TraceContext adalah metadata W3C yang dapat disimpan pada payload antrean.
+// Identitas aktor diperiksa dari snapshot bisnis yang disimpan secara persisten.
+type TraceContext struct {
+	TraceParent string `json:"traceparent,omitempty"`
+	TraceState  string `json:"tracestate,omitempty"`
+}
+
+func CaptureTraceContext(ctx context.Context) TraceContext {
+	carrier := propagation.MapCarrier{}
+	propagation.TraceContext{}.Inject(ctx, carrier)
+	return TraceContext{TraceParent: carrier.Get("traceparent"), TraceState: carrier.Get("tracestate")}
+}
+
+// RestoreTraceContext mempertahankan pembatalan/deadline worker. Parent lokal
+// dibersihkan agar payload lama atau rusak memulai trace tersendiri.
+func RestoreTraceContext(ctx context.Context, parent TraceContext) context.Context {
+	ctx = trace.ContextWithSpanContext(ctx, trace.SpanContext{})
+	return propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{
+		"traceparent": parent.TraceParent,
+		"tracestate":  parent.TraceState,
+	})
 }

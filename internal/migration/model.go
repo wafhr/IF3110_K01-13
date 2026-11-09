@@ -1,12 +1,18 @@
 package migration
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 const (
@@ -111,10 +117,25 @@ type ActionPlan struct {
 // ExecutionRequest mengikat job pada aktor, approval, revisi, SQL, dan posisi
 // history yang ditinjau. Antrean menyimpan seluruh payload secara persisten.
 type ExecutionRequest struct {
-	ExecutionID string     `json:"execution_id"`
-	ApprovalID  string     `json:"approval_id"`
-	ActorID     string     `json:"actor_id"`
-	Plan        ActionPlan `json:"plan"`
+	ExecutionID  string                 `json:"execution_id"`
+	ApprovalID   string                 `json:"approval_id"`
+	ActorID      string                 `json:"actor_id"`
+	Plan         ActionPlan             `json:"plan"`
+	TraceContext telemetry.TraceContext `json:"trace_context,omitzero"`
+}
+
+// ExecutionContext menambahkan identitas dari snapshot persisten dan memulihkan
+// parent payload ketika context belum memiliki span aktif. Worker memulai span
+// consumer sebelum membuka koneksi agar lock dan transaksi ikut berkorelasi.
+func (r ExecutionRequest) ExecutionContext(ctx context.Context) context.Context {
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		ctx = telemetry.RestoreTraceContext(ctx, r.TraceContext)
+	}
+	return telemetry.WithLogAttrs(ctx,
+		slog.String("actor", r.ActorID), slog.String("database_id", r.Plan.DatabaseID),
+		slog.String("migration_id", r.Plan.MigrationID), slog.String("execution_id", r.ExecutionID),
+		slog.Int64("revision", r.Plan.Revision), slog.String("action", string(r.Plan.Action)),
+	)
 }
 
 type QueuedAction struct {

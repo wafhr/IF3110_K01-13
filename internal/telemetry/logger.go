@@ -166,9 +166,23 @@ type Activity struct {
 }
 
 func StartActivity(ctx context.Context, event string, attrs ...slog.Attr) (context.Context, *Activity) {
+	return startActivity(ctx, event, trace.SpanKindInternal, attrs...)
+}
+
+// StartProducerActivity mencakup penyimpanan pesan sebelum antrean mengembalikan ID.
+func StartProducerActivity(ctx context.Context, event string, attrs ...slog.Attr) (context.Context, *Activity) {
+	return startActivity(ctx, event, trace.SpanKindProducer, attrs...)
+}
+
+// StartConsumerActivity memulihkan parent pesan pada context proses worker.
+func StartConsumerActivity(ctx context.Context, parent TraceContext, event string, attrs ...slog.Attr) (context.Context, *Activity) {
+	return startActivity(RestoreTraceContext(ctx, parent), event, trace.SpanKindConsumer, attrs...)
+}
+
+func startActivity(ctx context.Context, event string, kind trace.SpanKind, attrs ...slog.Attr) (context.Context, *Activity) {
 	ctx = WithLogAttrs(ctx, attrs...)
 	ctx, span := otel.Tracer("github.com/wafhr/IF3110_K01-13/internal/telemetry").Start(ctx, event,
-		trace.WithAttributes(spanAttrs(contextAttrs(ctx))...))
+		trace.WithSpanKind(kind), trace.WithAttributes(spanAttrs(contextAttrs(ctx))...))
 	activity := &Activity{ctx: ctx, span: span, event: event, started: time.Now()}
 	slog.InfoContext(ctx, event+"_started", "status", "running")
 	return ctx, activity

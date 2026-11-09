@@ -150,15 +150,29 @@ func (s *Service) SubmitAction(ctx context.Context, actorID, databaseID, migrati
 	if err := s.execution.Approvals.ValidateApproval(ctx, request); err != nil {
 		return QueuedAction{}, err
 	}
-	jobID, err := s.execution.Queue.Enqueue(ctx, request)
+	jobID, err := s.enqueueAction(ctx, request)
 	if err != nil {
 		return QueuedAction{}, err
 	}
-	if jobID == "" {
-		return QueuedAction{}, ErrStorage
-	}
 	activity.SetAttributes(slog.String("job_id", jobID))
 	return QueuedAction{JobID: jobID, ExecutionID: executionID}, nil
+}
+
+// Trace parent disalin dari span producer setelah approval selesai diperiksa.
+// Antrean menyimpan seluruh ExecutionRequest agar retry memakai parent yang sama.
+func (s *Service) enqueueAction(ctx context.Context, request ExecutionRequest) (jobID string, activityErr error) {
+	ctx, activity := telemetry.StartProducerActivity(ctx, "migration_enqueue")
+	defer activity.End(&activityErr)
+	request.TraceContext = telemetry.CaptureTraceContext(ctx)
+	jobID, err := s.execution.Queue.Enqueue(ctx, request)
+	if err != nil {
+		return "", err
+	}
+	if jobID == "" {
+		return "", ErrStorage
+	}
+	activity.SetAttributes(slog.String("job_id", jobID))
+	return jobID, nil
 }
 
 // PostgreSQL membatasi advisory lock pada database fisik tempat koneksi dibuka.
@@ -198,7 +212,11 @@ func (p PreparedExecution) Committed() (Execution, bool) {
 
 // Record menyimpan history pada transaksi perubahan target. Nilai kembali baru
 // menjadi bukti sukses setelah worker menerima hasil commit yang pasti.
-func (p PreparedExecution) Record(ctx context.Context, startedAt time.Time) (Execution, error) {
+func (p PreparedExecution) Record(ctx context.Context, startedAt time.Time) (recorded Execution, activityErr error) {
+	ctx = p.request.ExecutionContext(ctx)
+	ctx, activity := telemetry.StartActivity(ctx, "migration_history_stage", slog.Bool("commit_pending", true))
+	defer activity.End(&activityErr)
+
 	if p.tx == nil || p.committed != nil {
 		return Execution{}, ErrConflict
 	}
@@ -231,7 +249,11 @@ func (p PreparedExecution) Record(ctx context.Context, startedAt time.Time) (Exe
 // PrepareExecution dipanggil worker sebelum SQL. Schema history disiapkan oleh
 // jalur pengajuan. Pemeriksaan ulang menggunakan history lengkap di transaksi
 // target, permission terkini, dan approval yang masih sesuai snapshot.
-func (s *Service) PrepareExecution(ctx context.Context, tx *sql.Tx, request ExecutionRequest) (PreparedExecution, error) {
+func (s *Service) PrepareExecution(ctx context.Context, tx *sql.Tx, request ExecutionRequest) (prepared PreparedExecution, activityErr error) {
+	ctx = request.ExecutionContext(ctx)
+	ctx, activity := telemetry.StartActivity(ctx, "migration_execution_prepare")
+	defer activity.End(&activityErr)
+
 	plan := request.Plan
 	if tx == nil || !validUUID(request.ExecutionID) || !validUUID(request.ApprovalID) || !validUUID(request.ActorID) ||
 		!validUUID(plan.DatabaseID) || !validUUID(plan.MigrationID) || plan.Revision < 1 ||
@@ -258,6 +280,7 @@ func (s *Service) PrepareExecution(ctx context.Context, tx *sql.Tx, request Exec
 			existing.RevertsExecutionID != plan.RevertsExecutionID {
 			return PreparedExecution{}, ErrConflict
 		}
+		activity.SetAttributes(slog.Bool("commit_proof", true))
 		return PreparedExecution{tx: tx, request: request, committed: &existing}, nil
 	}
 	if !errors.Is(err, ErrNotFound) {
@@ -415,7 +438,10 @@ func (s *Service) Get(ctx context.Context, databaseID string, version int64) (Re
 	return row, err
 }
 
-func (s *Service) Execute(ctx context.Context, databaseID, userID, name, statement string) (Record, error) {
+func (s *Service) Execute(ctx context.Context, databaseID, userID, name, statement string) (executed Record, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "migration_legacy_execute", slog.String("actor", userID), slog.String("database_id", databaseID))
+	defer activity.End(&activityErr)
+
 	name, err := NormalizeMigrationName(name)
 	if err != nil {
 		return Record{}, err
@@ -449,6 +475,8 @@ func (s *Service) Execute(ctx context.Context, databaseID, userID, name, stateme
 	if err != nil {
 		return Record{}, fmt.Errorf("record migration: %w", err)
 	}
+	activity.SetAttributes(slog.Int64("legacy_version", row.Version))
+	ctx = telemetry.WithLogAttrs(ctx, slog.Int64("legacy_version", row.Version))
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		s.markFailed(ctx, conn, dbms, row.Version)
@@ -746,7 +774,11 @@ func placeholder(dbms database.DBMS, position int) string {
 	return fmt.Sprintf("$%d", position)
 }
 
-func acquireLock(ctx context.Context, conn *sql.Conn, id string, dbms database.DBMS) (func(), error) {
+func acquireLock(ctx context.Context, conn *sql.Conn, id string, dbms database.DBMS) (unlock func(), activityErr error) {
+	parent := ctx
+	ctx, activity := telemetry.StartActivity(ctx, "migration_lock_acquire", slog.String("database_id", id))
+	defer activity.End(&activityErr)
+
 	if dbms == database.MySQL {
 		var acquired sql.NullInt64
 		if err := conn.QueryRowContext(ctx, `SELECT GET_LOCK(?, 5)`, "if3110_migration_"+id).Scan(&acquired); err != nil {
@@ -755,9 +787,7 @@ func acquireLock(ctx context.Context, conn *sql.Conn, id string, dbms database.D
 		if !acquired.Valid || acquired.Int64 != 1 {
 			return nil, errors.New("could not acquire migration lock")
 		}
-		return func() {
-			_, _ = conn.ExecContext(context.Background(), `SELECT RELEASE_LOCK(?)`, "if3110_migration_"+id)
-		}, nil
+		return func() { releaseLock(context.WithoutCancel(parent), conn, id, dbms) }, nil
 	}
 	if dbms != database.PostgreSQL {
 		return nil, database.ErrInvalidInput
@@ -766,7 +796,19 @@ func acquireLock(ctx context.Context, conn *sql.Conn, id string, dbms database.D
 	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, lock); err != nil {
 		return nil, err
 	}
-	return func() { _, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, lock) }, nil
+	return func() { releaseLock(context.WithoutCancel(parent), conn, id, dbms) }, nil
+}
+
+// Cleanup mempertahankan korelasi meskipun request yang memegang lock dibatalkan.
+func releaseLock(ctx context.Context, conn *sql.Conn, id string, dbms database.DBMS) {
+	ctx, activity := telemetry.StartActivity(ctx, "migration_lock_release", slog.String("database_id", id))
+	var releaseErr error
+	defer activity.End(&releaseErr)
+	if dbms == database.MySQL {
+		_, releaseErr = conn.ExecContext(ctx, `SELECT RELEASE_LOCK(?)`, "if3110_migration_"+id)
+	} else {
+		_, releaseErr = conn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, targetMigrationLockKey)
+	}
 }
 
 func insertRunning(ctx context.Context, conn *sql.Conn, dbms database.DBMS, name, statement, userID string) (Record, error) {

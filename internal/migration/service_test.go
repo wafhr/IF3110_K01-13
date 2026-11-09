@@ -12,6 +12,10 @@ import (
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/wafhr/IF3110_K01-13/internal/access"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
@@ -625,5 +629,70 @@ func TestSubmissionAuditRecordsQueuedIDsAndFailedQueue(t *testing.T) {
 				t.Fatal("audit pengajuan hilang atau mencatat payload sensitif")
 			}
 		})
+	}
+}
+
+func TestSubmitActionPersistsProducerTraceAfterApproval(t *testing.T) {
+	provider, err := telemetry.NewTracerProvider(io.Discard, "server")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := tracetest.NewSpanRecorder()
+	provider.RegisterSpanProcessor(recorder)
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(previous)
+	})
+	store, request, dependencies := executionFixture(t)
+	approved := false
+	dependencies.Approvals = approvalCheckerFunc(func(ctx context.Context, value migration.ExecutionRequest) error {
+		approved = true
+		if value.Plan != request.Plan || value.TraceContext != (telemetry.TraceContext{}) {
+			t.Fatal("metadata trace mengubah pemeriksaan approval")
+		}
+		return nil
+	})
+	var payload []byte
+	var producerID trace.SpanID
+	dependencies.Queue = actionQueueFunc(func(ctx context.Context, value migration.ExecutionRequest) (string, error) {
+		if !approved {
+			t.Fatal("enqueue mendahului approval")
+		}
+		expected := telemetry.CaptureTraceContext(ctx)
+		if value.TraceContext != expected || expected.TraceParent == "" {
+			t.Fatal("parent producer tidak masuk payload")
+		}
+		producerID = trace.SpanContextFromContext(ctx).SpanID()
+		payload, err = json.Marshal(value)
+		return "stored-job", err
+	})
+	service := migration.NewServiceWithExecution(executionOpener(testMigrationDatabase(t, actionHistorySteps(nil)...)), store, dependencies)
+	ctx, requestSpan := provider.Tracer("http-test").Start(context.Background(), "request")
+	result, err := service.SubmitAction(ctx, request.ActorID, request.Plan.DatabaseID, request.Plan.MigrationID, request.Plan.Action, request.ApprovalID)
+	requestSpan.End()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored migration.ExecutionRequest
+	if err := json.Unmarshal(payload, &restored); err != nil {
+		t.Fatal(err)
+	}
+	parent := trace.SpanContextFromContext(telemetry.RestoreTraceContext(context.Background(), restored.TraceContext))
+	if parent.TraceID() != requestSpan.SpanContext().TraceID() || parent.SpanID() != producerID || restored.ExecutionID != result.ExecutionID || restored.Plan != request.Plan {
+		t.Fatal("payload persisten kehilangan korelasi atau snapshot")
+	}
+	found := false
+	for _, span := range recorder.Ended() {
+		if span.Name() == "migration_enqueue" {
+			found = true
+			if span.SpanKind() != trace.SpanKindProducer || span.SpanContext().SpanID() != producerID {
+				t.Fatal("kind atau ID span producer salah")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("span producer tidak diakhiri")
 	}
 }

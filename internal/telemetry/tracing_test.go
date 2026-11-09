@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -163,6 +165,84 @@ func TestTracerProviderRejectsMissingOutputOrService(t *testing.T) {
 	}{{nil, "server"}, {io.Discard, "  "}} {
 		if provider, err := telemetry.NewTracerProvider(test.output, test.service); err == nil || provider != nil {
 			t.Fatal("konfigurasi tracing tidak valid diterima")
+		}
+	}
+}
+
+func TestTraceContextSurvivesJSONAndDetachesRequestCancellation(t *testing.T) {
+	_, _ = setupHTTPTracing(t)
+	source, cancelRequest := context.WithCancel(context.Background())
+	source, producer := otel.Tracer("test").Start(source, "producer", trace.WithSpanKind(trace.SpanKindProducer))
+	member, err := baggage.NewMember("session", "fixture-private-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bag, err := baggage.New(member)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source = baggage.ContextWithBaggage(source, bag)
+	carrier := telemetry.CaptureTraceContext(source)
+	encoded, err := json.Marshal(carrier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "fixture-private-session") || strings.Contains(string(encoded), "baggage") {
+		t.Fatal("baggage ikut diserialisasi")
+	}
+	var restored telemetry.TraceContext
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	producer.End()
+	cancelRequest()
+	type workerKey struct{}
+	base := context.WithValue(context.Background(), workerKey{}, "worker-value")
+	workerCtx, cancelWorker := context.WithTimeout(base, time.Minute)
+	defer cancelWorker()
+	ctx := telemetry.RestoreTraceContext(workerCtx, restored)
+	parent := trace.SpanContextFromContext(ctx)
+	if !parent.IsRemote() || parent.TraceID() != producer.SpanContext().TraceID() || parent.SpanID() != producer.SpanContext().SpanID() || ctx.Err() != nil || ctx.Value(workerKey{}) != "worker-value" {
+		t.Fatal("parent atau context worker tidak dipertahankan")
+	}
+	originalDeadline, _ := workerCtx.Deadline()
+	deadline, present := ctx.Deadline()
+	if !present || !deadline.Equal(originalDeadline) {
+		t.Fatal("deadline worker berubah")
+	}
+	cancelWorker()
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatal("pembatalan worker tidak diteruskan")
+	}
+}
+
+func TestRestoreTraceContextClearsLocalParentForMissingOrInvalidPayload(t *testing.T) {
+	_, _ = setupHTTPTracing(t)
+	pollerCtx, poller := otel.Tracer("test").Start(context.Background(), "poller")
+	defer poller.End()
+	for _, carrier := range []telemetry.TraceContext{{}, {TraceParent: "malformed"}, {TraceParent: "00-00000000000000000000000000000000-0000000000000000-01"}} {
+		restored := telemetry.RestoreTraceContext(pollerCtx, carrier)
+		if trace.SpanContextFromContext(restored).IsValid() {
+			t.Fatal("payload tanpa parent valid memakai trace poller")
+		}
+	}
+}
+
+func TestTraceContextPreservesTraceStateAndSampling(t *testing.T) {
+	state, err := trace.ParseTraceState("vendor=opaque")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sampled := range []bool{false, true} {
+		var flags trace.TraceFlags
+		if sampled {
+			flags = trace.FlagsSampled
+		}
+		original := trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{1}, SpanID: trace.SpanID{2}, TraceState: state, TraceFlags: flags})
+		carrier := telemetry.CaptureTraceContext(trace.ContextWithSpanContext(context.Background(), original))
+		restored := trace.SpanContextFromContext(telemetry.RestoreTraceContext(context.Background(), carrier))
+		if restored.TraceState().String() != state.String() || restored.IsSampled() != sampled || restored.TraceID() != original.TraceID() {
+			t.Fatal("tracestate atau keputusan sampling berubah")
 		}
 	}
 }

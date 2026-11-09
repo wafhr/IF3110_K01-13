@@ -1,6 +1,7 @@
 package migration_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -8,6 +9,8 @@ import (
 	"time"
 
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestNormalizeMigrationName(t *testing.T) {
@@ -198,5 +201,33 @@ func TestRecordPreservesLegacyJSON(t *testing.T) {
 	want := `{"version":1,"name":"create customers","sql":"SELECT 1","status":"success","executed_by":"00000000-0000-4000-8000-000000000001","started_at":"2026-11-08T00:00:00Z"}`
 	if string(data) != want {
 		t.Fatalf("legacy response = %s; want %s", data, want)
+	}
+}
+
+func TestExecutionRequestTraceContextIsOptionalAndRoundTrips(t *testing.T) {
+	request := migration.ExecutionRequest{ExecutionID: "execution", ActorID: "actor", Plan: migration.ActionPlan{SQL: "SELECT 'fixture-private-value'"}}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "trace_context") {
+		t.Fatal("payload lama memperoleh field trace kosong")
+	}
+	var legacy migration.ExecutionRequest
+	if err := json.Unmarshal(encoded, &legacy); err != nil || legacy != request {
+		t.Fatal("payload tanpa trace tidak kompatibel")
+	}
+	request.TraceContext = telemetry.TraceContext{TraceParent: "00-11111111111111111111111111111111-2222222222222222-01"}
+	encoded, err = json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded migration.ExecutionRequest
+	if err := json.Unmarshal(encoded, &decoded); err != nil || decoded != request {
+		t.Fatal("trace context atau snapshot berubah setelah serialisasi")
+	}
+	parent := trace.SpanContextFromContext(decoded.ExecutionContext(context.Background()))
+	if !parent.IsRemote() || parent.TraceID().String() != "11111111111111111111111111111111" {
+		t.Fatal("context hook tidak memulihkan parent payload")
 	}
 }
