@@ -160,7 +160,7 @@ func TestTraceAttemptPreservesProducerParentAcrossRetryAndSQLScopes(t *testing.T
 	if completed != 2 || !sqlSeen {
 		t.Fatal("log attempt atau SQL tidak lengkap")
 	}
-	if strings.Contains(logs.String(), "fixture-private-") || strings.Contains(logs.String(), "private_table") {
+	if strings.Contains(logs.String(), "fixture-private-") {
 		t.Fatal("payload atau error mentah muncul pada log worker")
 	}
 }

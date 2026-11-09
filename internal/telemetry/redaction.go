@@ -194,13 +194,18 @@ func (r *Redactor) traceValue(value attribute.Value) attribute.Value {
 	}
 }
 
-// SanitizeSQL mempertahankan struktur SQL dan menyamarkan literal serta identifier.
+// SanitizeSQL mempertahankan identifier objek dan menyamarkan literal SQL.
+// Pernyataan pengaturan akun/hak akses disamarkan seluruhnya agar nama akun aman.
 // Komentar dihapus. Token yang tidak dikenali menyebabkan seluruh query disamarkan.
 func SanitizeSQL(query, system string) string {
 	lexer := sqllexer.New(query, sqllexer.WithDBMS(sqllexer.DBMSType(system)))
 	var tokens []string
 	for {
 		token := lexer.Scan()
+		switch strings.ToUpper(token.Value) {
+		case "USER", "ROLE", "OWNER", "AUTHORIZATION", "GRANT", "REVOKE":
+			return Redacted
+		}
 		switch token.Type {
 		case sqllexer.EOF:
 			return strings.Join(tokens, " ")
@@ -211,6 +216,8 @@ func SanitizeSQL(query, system string) string {
 		case sqllexer.COMMAND, sqllexer.KEYWORD, sqllexer.OPERATOR, sqllexer.WILDCARD,
 			sqllexer.PUNCTUATION, sqllexer.JSON_OP, sqllexer.PROC_INDICATOR, sqllexer.CTE_INDICATOR, sqllexer.ALIAS_INDICATOR:
 			tokens = append(tokens, strings.ToUpper(token.Value))
+		case sqllexer.IDENT, sqllexer.QUOTED_IDENT:
+			tokens = append(tokens, token.Value)
 		default:
 			tokens = append(tokens, "?")
 		}

@@ -22,39 +22,6 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
-func TestExecuteValidatesBeforeOpeningTarget(t *testing.T) {
-	for _, tc := range []struct {
-		name, migrationName, statement string
-		wantError                      error
-		wantOpens                      int
-	}{
-		{"empty name", "", "SELECT 1", migration.ErrInvalidMigration, 0},
-		{"oversized name", strings.Repeat("a", migration.MaxMigrationNameBytes+1), "SELECT 1", migration.ErrInvalidMigration, 0},
-		{"NUL name", "private\x00name", "SELECT 1", migration.ErrInvalidMigration, 0},
-		{"invalid UTF-8 name", string([]byte{0xff}), "SELECT 1", migration.ErrInvalidMigration, 0},
-		{"empty SQL", "preview", " \t\n", migration.ErrInvalidMigration, 0},
-		{"oversized SQL", "preview", strings.Repeat("a", migration.MaxSQLBytes+1), migration.ErrInvalidMigration, 0},
-		{"NUL SQL", "preview", "SELECT 1\x00", migration.ErrInvalidMigration, 0},
-		{"invalid UTF-8 SQL", "preview", string([]byte{0xff}), migration.ErrInvalidMigration, 0},
-		{"legacy SQL without down", " preview ", " SELECT 1 ", context.Canceled, 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			opens := 0
-			service := migration.NewService(func(_ context.Context, databaseID string) (*sql.DB, database.DBMS, error) {
-				opens++
-				if databaseID != "target-id" {
-					t.Errorf("target database ID = %q", databaseID)
-				}
-				return nil, database.PostgreSQL, context.Canceled
-			})
-			record, err := service.Execute(context.Background(), "target-id", "user-id", tc.migrationName, tc.statement)
-			if !errors.Is(err, tc.wantError) || opens != tc.wantOpens || record != (migration.Record{}) {
-				t.Fatalf("Execute() = %+v, %v; target opens = %d; want %v and %d opens", record, err, opens, tc.wantError, tc.wantOpens)
-			}
-		})
-	}
-}
-
 type actionDefinitionReader struct {
 	t                *testing.T
 	definition       migration.Migration
@@ -90,7 +57,7 @@ func actionHistorySteps(history []migration.Execution) []repositoryStep {
 		rows = append(rows, executionValues(history[index]))
 	}
 	return append(openedHistorySteps(), repositoryStep{operation: "query",
-		statement: "WHERE database_id = $1 ORDER BY sequence DESC", rows: rows, check: repositoryArguments(repositoryDatabaseID)})
+		statement: "FROM platform_migration_executions ORDER BY sequence DESC", rows: rows, check: repositoryArguments([]any{}...)})
 }
 
 func TestPrepareActionLoadsOriginalRevision(t *testing.T) {
@@ -396,7 +363,7 @@ func TestPrepareExecutionRevalidatesAndRecordsInWorkerTransaction(t *testing.T) 
 		}},
 		repositoryStep{operation: "exec", statement: "set_config('search_path'", check: repositoryArguments("application")},
 		repositoryStep{operation: "commit"})
-	_, tx := testHistoryTransaction(t, steps...)
+	tx := testHistoryTransaction(t, steps...)
 	service := migration.NewServiceWithExecution(nil, store, dependencies)
 	prepared, err := service.PrepareExecution(context.Background(), tx, request)
 	if err != nil || !store.frozen || prepared.Plan() != request.Plan {
@@ -448,7 +415,7 @@ func TestPrepareExecutionRejectsChangedAuthorizationAndPlan(t *testing.T) {
 				}
 			}
 			steps = append(steps, repositoryStep{operation: "rollback"})
-			_, tx := testHistoryTransaction(t, steps...)
+			tx := testHistoryTransaction(t, steps...)
 			service := migration.NewServiceWithExecution(nil, store, dependencies)
 			prepared, err := service.PrepareExecution(context.Background(), tx, request)
 			if scenario == "SQL failure" && err == nil {
@@ -474,7 +441,7 @@ func TestPrepareExecutionUsesCommitProofForRedelivery(t *testing.T) {
 				existing.SQL = "SELECT 2"
 			}
 			steps := append(executionPreparationSteps(true, &existing), repositoryStep{operation: "rollback"})
-			_, tx := testHistoryTransaction(t, steps...)
+			tx := testHistoryTransaction(t, steps...)
 			prepared, err := migration.NewService(nil).PrepareExecution(context.Background(), tx, request)
 			if mismatch {
 				if !errors.Is(err, migration.ErrConflict) {
@@ -564,7 +531,7 @@ func TestRecordSearchPathFailuresRequireTransactionRollback(t *testing.T) {
 			}
 			steps = append(steps, recording...)
 			steps = append(steps, repositoryStep{operation: "rollback"})
-			_, tx := testHistoryTransaction(t, steps...)
+			tx := testHistoryTransaction(t, steps...)
 			prepared, err := migration.NewServiceWithExecution(nil, store, dependencies).PrepareExecution(context.Background(), tx, request)
 			if err != nil {
 				t.Fatal(err)
@@ -694,5 +661,40 @@ func TestSubmitActionPersistsProducerTraceAfterApproval(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("span producer tidak diakhiri")
+	}
+}
+
+func TestSubmitActionRejectsTransactionControl(t *testing.T) {
+	for _, statement := range []string{
+		"COMMIT", "SELECT 1; COMMIT AND CHAIN", "SELECT 'literal; COMMIT'; /* komentar */ ROLLBACK",
+		"DO $body$ BEGIN PERFORM 1; END $body$; COMMIT", "SELECT 1; /* luar /* dalam */ selesai */ SAVEPOINT a",
+		"SET LOCAL TRANSACTION READ ONLY", "SELECT 1; SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+	} {
+		t.Run(statement, func(t *testing.T) {
+			store, request, dependencies := executionFixture(t)
+			store.revision.SQLUp = statement
+			service := migration.NewServiceWithExecution(executionOpener(testMigrationDatabase(t, actionHistorySteps(nil)...)), store, dependencies)
+			if _, err := service.SubmitAction(context.Background(), request.ActorID, request.Plan.DatabaseID, request.Plan.MigrationID, migration.Apply, request.ApprovalID); !errors.Is(err, migration.ErrInvalidMigration) {
+				t.Fatal("kendali transaksi diterima", err)
+			}
+		})
+	}
+}
+
+func TestSubmitActionPreservesTransactionWordsInsideSQLValues(t *testing.T) {
+	for _, statement := range []string{
+		"SELECT 'literal; COMMIT'", "SELECT 'don''t; ROLLBACK'",
+		"DO $body$ BEGIN PERFORM 1; END $body$; SELECT 1",
+		"SELECT 1 /* luar /* COMMIT */ selesai */; -- ROLLBACK\nSELECT 2",
+	} {
+		t.Run(statement, func(t *testing.T) {
+			store, request, dependencies := executionFixture(t)
+			store.revision.SQLUp = statement
+			dependencies.Approvals = approvalCheckerFunc(func(context.Context, migration.ExecutionRequest) error { return migration.ErrApprovalRequired })
+			service := migration.NewServiceWithExecution(executionOpener(testMigrationDatabase(t, actionHistorySteps(nil)...)), store, dependencies)
+			if _, err := service.SubmitAction(context.Background(), request.ActorID, request.Plan.DatabaseID, request.Plan.MigrationID, migration.Apply, request.ApprovalID); !errors.Is(err, migration.ErrApprovalRequired) {
+				t.Fatal("SQL valid tertolak sebelum pemeriksaan approval", err)
+			}
+		})
 	}
 }

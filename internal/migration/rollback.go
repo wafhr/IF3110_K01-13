@@ -19,7 +19,8 @@ type MigrationState struct {
 }
 
 // BuildMigrationState menerima history lengkap, termasuk pasangan rollback yang
-// disembunyikan UI. Attempt gagal/running tidak mengubah posisi migration.
+// disembunyikan UI dan commit lewat alias registrasi pada target fisik yang sama.
+// Attempt gagal/running tidak mengubah posisi migration.
 func BuildMigrationState(databaseID string, history []Execution) (MigrationState, error) {
 	if !validUUID(databaseID) {
 		return MigrationState{}, ErrInvalidMigration
@@ -41,10 +42,11 @@ func BuildMigrationState(databaseID string, history []Execution) (MigrationState
 		appliedMigrations: make(map[string]bool),
 	}
 	seenExecutions := make(map[string]bool, len(committed))
+	seenLegacy := make(map[int64]Execution)
 	var previousSequence int64
 	for _, execution := range committed {
 		key := strings.ToLower(execution.ID)
-		if !validUUID(execution.ID) || !strings.EqualFold(execution.DatabaseID, databaseID) ||
+		if !validUUID(execution.ID) || !validUUID(execution.DatabaseID) ||
 			execution.Sequence <= previousSequence || seenExecutions[key] {
 			return MigrationState{}, ErrInvalidHistory
 		}
@@ -52,6 +54,16 @@ func BuildMigrationState(databaseID string, history []Execution) (MigrationState
 			if *execution.LegacyVersion < 1 || execution.MigrationID != "" || execution.Revision != 0 || execution.Action != Apply {
 				return MigrationState{}, ErrInvalidHistory
 			}
+			// Impor lama melalui beberapa alias dapat menyalin versi legacy yang sama.
+			if original, exists := seenLegacy[*execution.LegacyVersion]; exists {
+				if execution.SQL != original.SQL || execution.Name != original.Name || execution.ExecutedBy != original.ExecutedBy {
+					return MigrationState{}, ErrInvalidHistory
+				}
+				seenExecutions[key] = true
+				previousSequence = execution.Sequence
+				continue
+			}
+			seenLegacy[*execution.LegacyVersion] = execution
 		} else if !validUUID(execution.MigrationID) || execution.Revision < 1 {
 			return MigrationState{}, ErrInvalidHistory
 		}
@@ -71,6 +83,7 @@ func BuildMigrationState(databaseID string, history []Execution) (MigrationState
 			}
 			original := state.Active[len(state.Active)-1]
 			if !strings.EqualFold(execution.RevertsExecutionID, original.ID) ||
+				!strings.EqualFold(execution.DatabaseID, original.DatabaseID) ||
 				!strings.EqualFold(execution.MigrationID, original.MigrationID) || execution.Revision != original.Revision {
 				return MigrationState{}, ErrInvalidHistory
 			}
@@ -82,6 +95,7 @@ func BuildMigrationState(databaseID string, history []Execution) (MigrationState
 			}
 			original := state.PendingForward[len(state.PendingForward)-1]
 			if execution.RevertsExecutionID != "" || !strings.EqualFold(execution.MigrationID, original.MigrationID) ||
+				!strings.EqualFold(execution.DatabaseID, original.DatabaseID) ||
 				execution.Revision != original.Revision || execution.SQL != original.SQL {
 				return MigrationState{}, ErrInvalidHistory
 			}

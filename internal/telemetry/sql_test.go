@@ -200,11 +200,14 @@ func TestSQLExecPreservesInputsAndCorrelatesLogs(t *testing.T) {
 	if completed["rows_affected"] != float64(3) || completed["parameter_count"] != float64(2) || completed["status"] != "success" || completed["database_role"] != "platform" || completed["database"] != "application" || completed["parameters"] != telemetry.Redacted {
 		t.Fatal("atribut SQL tidak sesuai")
 	}
+	if completed["query_template"] != "UPDATE private_table SET private_column = ? WHERE id = ?" {
+		t.Fatal("nama objek SQL hilang dari catatan audit")
+	}
 	if started["trace_id"] != parent.SpanContext().TraceID().String() || started["trace_id"] != completed["trace_id"] || started["span_id"] != completed["span_id"] {
 		t.Fatal("log SQL kehilangan korelasi")
 	}
 	encoded, _ := json.Marshal(tracetest.SpanStubsFromReadOnlySpans(recorder.Ended()))
-	for _, secret := range []string{"private_table", "private_column", "fixture-comment-secret", "fixture-parameter-secret"} {
+	for _, secret := range []string{"fixture-comment-secret", "fixture-parameter-secret"} {
 		if strings.Contains(logs.String(), secret) || strings.Contains(string(encoded), secret) {
 			t.Fatal("SQL sensitif muncul pada log atau span")
 		}

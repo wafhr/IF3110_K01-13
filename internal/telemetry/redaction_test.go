@@ -118,16 +118,18 @@ func TestLoggerResolvesLogValuerBeforeRedaction(t *testing.T) {
 	}
 }
 
-func TestSanitizeSQLHidesLiteralsIdentifiersAndComments(t *testing.T) {
+func TestSanitizeSQLPreservesObjectsAndHidesSensitiveValues(t *testing.T) {
 	for _, test := range []struct {
 		system, query string
 		hidden        []string
 	}{
-		{"postgresql", "SELECT private_field FROM private_table WHERE private_field = 'fixture-secret' AND private_id = $1 /* fixture-comment */", []string{"private_field", "private_table", "private_id", "fixture-secret", "fixture-comment"}},
+		{"postgresql", "SELECT private_field FROM private_table WHERE private_field = 'fixture-secret' AND private_id = $1 /* fixture-comment */", []string{"fixture-secret", "fixture-comment"}},
 		{"postgresql", `DO $body$ BEGIN RAISE NOTICE 'fixture-dollar-secret'; END $body$`, []string{"fixture-dollar-secret", "RAISE"}},
 		{"postgresql", `CREATE ROLE private_user PASSWORD 'fixture-password'`, []string{"private_user", "fixture-password"}},
+		{"postgresql", `GRANT editors TO private_user`, []string{"private_user", "editors"}},
+		{"postgresql", `ALTER TABLE customers OWNER TO private_user`, []string{"private_user"}},
 		{"postgresql", `SELECT E'fixture-escape-secret\\value', 12345, \"private_identifier\"`, []string{"fixture-escape-secret", "12345", "private_identifier"}},
-		{"mysql", "SELECT `private_field` FROM `private_table` WHERE id = \"fixture-double-secret\" # fixture-comment", []string{"private_field", "private_table", "fixture-double-secret", "fixture-comment"}},
+		{"mysql", "SELECT `private_field` FROM `private_table` WHERE id = \"fixture-double-secret\" # fixture-comment", []string{"fixture-double-secret", "fixture-comment"}},
 		{"mysql", "SELECT 'fixture-unterminated", []string{"fixture-unterminated"}},
 		{"mysql", "CREATE USER private_user IDENTIFIED BY 'fixture-password'", []string{"private_user", "fixture-password"}},
 		{"mysql", "SELECT /* comment */ 0xDEADBEEF; /*! fixture-executable-comment */", []string{"DEADBEEF", "fixture-executable-comment"}},
@@ -144,7 +146,7 @@ func TestSanitizeSQLHidesLiteralsIdentifiersAndComments(t *testing.T) {
 			}
 		})
 	}
-	if got := telemetry.SanitizeSQL("SELECT name FROM users WHERE id = $1", "postgresql"); got != "SELECT ? FROM ? WHERE ? = ?" {
+	if got := telemetry.SanitizeSQL("SELECT name FROM users WHERE id = $1", "postgresql"); got != "SELECT name FROM users WHERE id = ?" {
 		t.Fatalf("template = %q", got)
 	}
 }

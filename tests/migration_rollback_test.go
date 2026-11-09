@@ -167,3 +167,34 @@ func TestMigrationDefinitionAccessAndIrreversibleIntegration(t *testing.T) {
 	}
 	f.editor.do(t, "POST", path+"/"+created.Migration.ID+"/actions", map[string]string{"action": "rollback", "approval_id": "00000000-0000-4000-8000-000000000001"}, 400)
 }
+
+func TestMigrationFailedRollbackAndForwardIntegration(t *testing.T) {
+	for _, action := range []migration.Action{migration.Rollback, migration.Forward} {
+		t.Run(string(action), func(t *testing.T) {
+			f := newMigrationFixture(t)
+			base := f.createMigration(t, "data uji kegagalan", "CREATE TABLE failure_rows (id int PRIMARY KEY)", "DROP TABLE failure_rows")
+			f.runAction(t, base, migration.Apply)
+			down := "DELETE FROM failure_rows WHERE id=1"
+			if action == migration.Rollback {
+				down += "; SELECT 1/0"
+			}
+			definition := f.createMigration(t, "uji kegagalan tindakan", "INSERT INTO failure_rows VALUES(1)", down)
+			f.runAction(t, definition, migration.Apply)
+			if action == migration.Forward {
+				f.runAction(t, definition, migration.Rollback)
+				execFixture(t, f.target, "INSERT INTO failure_rows VALUES(1)")
+			}
+			before := len(f.executionHistory(t, false).Executions)
+			if _, err := f.executeJob(f.queueAction(t, definition, action)); err == nil {
+				t.Fatal("SQL gagal dianggap sukses")
+			}
+			assertCount(t, f.target, "SELECT count(*) FROM failure_rows", 1)
+			if len(f.executionHistory(t, false).Executions) != before {
+				t.Fatal("attempt gagal menambah history commit")
+			}
+			if _, err := f.migrations.PrepareAction(context.Background(), f.databaseID, definition.ID, action); err != nil {
+				t.Fatal("attempt gagal mengubah posisi migration", err)
+			}
+		})
+	}
+}

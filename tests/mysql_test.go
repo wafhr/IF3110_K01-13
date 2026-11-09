@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"net"
 	"os"
 	"strconv"
@@ -166,15 +165,9 @@ func TestMySQLTargetIntegration(t *testing.T) {
 	assertCount(t, db, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='platform_migrations'", 0)
 	rejectedSQL := "INSERT INTO `" + table + "` (amount,note) VALUES (3,'marker; COMMIT'); /* runner owns the transaction */ COMMIT; SELECT * FROM `missing_integration_table`"
 	admin.do(t, "POST", migrationPath, map[string]string{"name": "reject transaction control", "sql": rejectedSQL}, 400)
-	if _, err := f.legacyMigrations.Execute(context.Background(), databaseID, current.User.ID, "reject transaction control", rejectedSQL); !errors.Is(err, migration.ErrInvalidMigration) {
-		t.Fatal("kontrol transaksi legacy diterima")
-	}
 	assertCount(t, db, "SELECT COUNT(*) FROM `"+table+"`", 2)
 	autocommitSQL := "INSERT INTO `" + table + "` (amount,note) VALUES (4,'autocommit'); SET @migration_flag = 1, autocommit = 1; SELECT * FROM `missing_integration_table`"
 	admin.do(t, "POST", migrationPath, map[string]string{"name": "reject autocommit change", "sql": autocommitSQL}, 400)
-	if _, err := f.legacyMigrations.Execute(context.Background(), databaseID, current.User.ID, "reject autocommit change", autocommitSQL); !errors.Is(err, migration.ErrInvalidMigration) {
-		t.Fatal("perubahan autocommit legacy diterima")
-	}
 	assertCount(t, db, "SELECT COUNT(*) FROM `"+table+"`", 2)
 
 	createdSQL := "CREATE TABLE `" + migrationTable + "` (id INTEGER PRIMARY KEY, note VARCHAR(80) DEFAULT 'literal; COMMIT') ENGINE=InnoDB"
@@ -182,7 +175,7 @@ func TestMySQLTargetIntegration(t *testing.T) {
 		Migration migration.Record `json:"migration"`
 	}
 	admin.do(t, "POST", migrationPath, map[string]string{"name": "create mysql target table", "sql": createdSQL}, 400)
-	result.Migration, err = f.legacyMigrations.Execute(context.Background(), databaseID, current.User.ID, "create mysql target table", createdSQL)
+	result.Migration, err = f.seedLegacyMigration(context.Background(), databaseID, current.User.ID, "create mysql target table", createdSQL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +199,7 @@ func TestMySQLTargetIntegration(t *testing.T) {
 	viewer.do(t, "POST", planEndpoint, map[string]any{"sql": "SELECT 1"}, 403)
 
 	failedSQL := "INSERT INTO `" + table + "` (amount) VALUES (3); SELECT * FROM `missing_integration_table`"
-	result.Migration, err = f.legacyMigrations.Execute(context.Background(), databaseID, current.User.ID, "rollback mysql insert", failedSQL)
+	result.Migration, err = f.seedLegacyMigration(context.Background(), databaseID, current.User.ID, "rollback mysql insert", failedSQL)
 	if err == nil {
 		t.Fatal("SQL legacy yang gagal diterima")
 	}

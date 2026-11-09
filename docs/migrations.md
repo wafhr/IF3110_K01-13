@@ -37,9 +37,16 @@ group-derived grants.
 
 Definitions can be saved for registered targets. Milestone 2 action planning
 and history currently support PostgreSQL. MySQL viewer, plan preview, and
-legacy history reads follow the Milestone 1 implementation. The PostgreSQL
-target account needs permission to create history metadata in the active
+legacy history reads remain available. Historical test data is seeded by the
+integration fixture. Application execution uses the queue/worker contracts.
+The PostgreSQL target account needs permission to create history metadata in the active
 schema and execute the approved SQL.
+
+Planning and worker revalidation use the complete history on the physical target,
+including other registrations pointing to that target. They share one linear
+order and history head. API history and definition reads remain scoped to the
+authorized registration. Duplicate legacy imports from aliases count once when
+reconstructing the physical target state.
 
 ## Definitions, revisions, and execution identities
 
@@ -174,8 +181,8 @@ parameter to read complete history. The API accepts one `hide_rollback`
 parameter with a value of `true` or `false`.
 
 `executions` contains committed actions. Failed or running Milestone 1 attempts
-appear separately in `legacy_attempts`. The job and logging modules provide
-Milestone 2 attempts once integrated.
+appear separately in `legacy_attempts`. Telemetry records Milestone 2 attempt
+logs. Job status becomes available when its module is integrated.
 
 Milestone 1 history remains readable through `GET /migrations` and
 `GET /migrations/{version}`. Opening Milestone 2 history imports successful

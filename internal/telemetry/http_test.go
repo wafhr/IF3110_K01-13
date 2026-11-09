@@ -163,7 +163,7 @@ func TestHTTPHandlerStartsTraceWithoutValidIncomingParent(t *testing.T) {
 	}
 }
 
-func TestHTTPHandlerRecordsPanicAndPreservesPropagation(t *testing.T) {
+func TestHTTPHandlerRecordsPanicAndAbortsSafely(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		value     any
@@ -177,8 +177,8 @@ func TestHTTPHandlerRecordsPanicAndPreservesPropagation(t *testing.T) {
 			handler := telemetry.HTTPHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic(test.value) }))
 			func() {
 				defer func() {
-					if got := recover(); got != test.value {
-						t.Fatal("nilai panic berubah atau ditelan")
+					if got := recover(); got != http.ErrAbortHandler {
+						t.Fatal("panic belum menjadi sinyal penghentian HTTP yang aman")
 					}
 				}()
 				handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))

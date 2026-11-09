@@ -286,7 +286,7 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 	})
 
 	t.Run("migration uses registered encrypted credentials alongside viewer", func(t *testing.T) {
-		// Runner legacy memerlukan hak DDL selain SELECT untuk viewer.
+		// Fixture history lama memerlukan hak DDL selain SELECT untuk viewer.
 		execFixture(t, f.target, `GRANT CREATE ON SCHEMA public TO `+pgx.Identifier{f.createdRole}.Sanitize())
 		migrationPath := "/databases/" + id + "/migrations"
 		admin.do(t, "GET", migrationPath, nil, 403)
@@ -301,7 +301,7 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 		}
 		member.do(t, "POST", migrationPath, input, 400)
 		var err error
-		created.Migration, err = f.legacyMigrations.Execute(context.Background(), id, user.User.ID, input["name"], input["sql"])
+		created.Migration, err = f.seedLegacyMigration(context.Background(), id, user.User.ID, input["name"], input["sql"])
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -316,7 +316,7 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 			t.Fatal("migration detail lost SQL text")
 		}
 		input = map[string]string{"name": "rollback integration insert", "sql": "INSERT INTO public.integration_created VALUES (1); SELECT * FROM public.integration_missing;"}
-		created.Migration, err = f.legacyMigrations.Execute(context.Background(), id, user.User.ID, input["name"], input["sql"])
+		created.Migration, err = f.seedLegacyMigration(context.Background(), id, user.User.ID, input["name"], input["sql"])
 		if err == nil {
 			t.Fatal("SQL legacy yang gagal diterima")
 		}

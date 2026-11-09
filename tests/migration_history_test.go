@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/wafhr/IF3110_K01-13/internal/access"
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
 )
 
@@ -131,11 +132,11 @@ func TestMigrationLegacyHistoryIntegration(t *testing.T) {
 	f := newMigrationFixture(t)
 	ctx := context.Background()
 	legacySQL := "CREATE TABLE migration_legacy_rows (id int PRIMARY KEY)"
-	success, err := f.legacyMigrations.Execute(ctx, f.databaseID, f.actorID, "legacy sukses", legacySQL)
+	success, err := f.seedLegacyMigration(ctx, f.databaseID, f.actorID, "legacy sukses", legacySQL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	failed, err := f.legacyMigrations.Execute(ctx, f.databaseID, f.actorID, "legacy gagal", "INSERT INTO migration_legacy_rows VALUES (1); SELECT 1/0")
+	failed, err := f.seedLegacyMigration(ctx, f.databaseID, f.actorID, "legacy gagal", "INSERT INTO migration_legacy_rows VALUES (1); SELECT 1/0")
 	if err == nil || failed.Status != migration.Failed {
 		t.Fatalf("fixture legacy gagal = %+v, %v", failed, err)
 	}
@@ -253,4 +254,51 @@ func TestMigrationTargetLockIntegration(t *testing.T) {
 		t.Fatalf("alias tetap terhalang sesudah lock dilepas: %t, %v", locked, err)
 	}
 	defer second.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, secondKey)
+}
+
+func TestMigrationAliasOrderIntegration(t *testing.T) {
+	f := newMigrationFixture(t)
+	ctx := context.Background()
+	firstID := f.databaseID
+	first := f.createMigration(t, "alias pertama", "CREATE TABLE alias_first (id int)", "DROP TABLE alias_first")
+	f.runAction(t, first, migration.Apply)
+	pendingRollback := f.queueAction(t, first, migration.Rollback)
+	pending := f.createMigration(t, "snapshot lintas alias", "SELECT 1", "SELECT 2")
+	pendingApply := f.queueAction(t, pending, migration.Apply)
+	alias, err := f.registry.Create(ctx, "Alias urutan migration", f.settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := access.NewService(f.platform).SetDatabasePermission(ctx, f.editorGroupID, alias.ID, access.ViewEdit); err != nil {
+		t.Fatal(err)
+	}
+	f.databaseID = alias.ID
+	second := f.createMigration(t, "alias kedua", "CREATE TABLE alias_second (id int)", "DROP TABLE alias_second")
+	f.runAction(t, second, migration.Apply)
+	f.databaseID = firstID
+	if _, err := f.migrations.PrepareAction(ctx, firstID, first.ID, migration.Rollback); !errors.Is(err, migration.ErrConflict) {
+		t.Fatalf("rollback melompati commit alias lain: %v", err)
+	}
+	if _, err := f.executeJob(pendingRollback); !errors.Is(err, migration.ErrConflict) {
+		t.Fatalf("worker menerima snapshot sebelum commit alias lain: %v", err)
+	}
+	if _, err := f.executeJob(pendingApply); !errors.Is(err, migration.ErrConflict) {
+		t.Fatalf("worker menerima apply dengan posisi history alias yang usang: %v", err)
+	}
+	// Respons history tetap terikat izin registrasi pengguna.
+	if history := f.executionHistory(t, false); len(history.Executions) != 1 || history.Executions[0].MigrationID != first.ID {
+		t.Fatal("history registrasi lain masuk ke respons API")
+	}
+	f.databaseID = alias.ID
+	f.runAction(t, second, migration.Rollback)
+	f.databaseID = firstID
+	f.runAction(t, first, migration.Rollback)
+	f.databaseID = alias.ID
+	if _, err := f.migrations.PrepareAction(ctx, alias.ID, second.ID, migration.Forward); !errors.Is(err, migration.ErrConflict) {
+		t.Fatalf("forward melompati alias pertama: %v", err)
+	}
+	f.databaseID = firstID
+	f.runAction(t, first, migration.Forward)
+	f.databaseID = alias.ID
+	f.runAction(t, second, migration.Forward)
 }

@@ -99,13 +99,6 @@ func importLegacyHistory(ctx context.Context, connection historyConnection, data
 	return historyError("import committed legacy history", err)
 }
 
-// Append mencatat SQL yang berhasil melalui transaksi target milik executor.
-// Executor melakukan commit setelah SQL dan history berhasil disimpan bersama.
-// ID execution yang sama menimbulkan konflik agar pengulangan SQL di-rollback.
-func (r *HistoryRepository) Append(ctx context.Context, tx *sql.Tx, execution Execution) (Execution, error) {
-	return AppendExecution(ctx, tx, execution)
-}
-
 // AppendExecution mencatat history melalui transaksi target milik worker.
 func AppendExecution(ctx context.Context, tx *sql.Tx, execution Execution) (Execution, error) {
 	if tx == nil {
@@ -138,6 +131,9 @@ func (r *HistoryRepository) Get(ctx context.Context, databaseID, executionID str
 // List mengurutkan history dari pencatatan terbaru. Filter hanya memengaruhi
 // hasil pembacaan dan mempertahankan seluruh catatan yang sudah tersimpan.
 func (r *HistoryRepository) List(ctx context.Context, databaseID string, hideRollback bool) ([]Execution, error) {
+	if !validUUID(databaseID) {
+		return nil, ErrNotFound
+	}
 	return listExecutions(ctx, r.db, databaseID, hideRollback)
 }
 
@@ -146,12 +142,13 @@ type executionQueries interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
-// ListExecutionsInTransaction membaca history lengkap untuk validasi worker.
+// ListExecutionsInTransaction membaca seluruh history database fisik untuk validasi
+// worker. Identitas registrasi divalidasi, sedangkan alias memakai urutan bersama.
 func ListExecutionsInTransaction(ctx context.Context, tx *sql.Tx, databaseID string) ([]Execution, error) {
-	if tx == nil {
+	if tx == nil || !validUUID(databaseID) {
 		return nil, ErrInvalidMigration
 	}
-	return listExecutions(ctx, tx, databaseID, false)
+	return listExecutions(ctx, tx, "", false)
 }
 
 // GetExecutionInTransaction mencari bukti commit pada koneksi target yang dikunci.
@@ -171,12 +168,16 @@ func getExecution(ctx context.Context, connection executionQueries, databaseID, 
 	return execution, nil
 }
 
+// databaseID kosong hanya dipakai internal untuk memeriksa urutan seluruh target.
+// Pembacaan API memvalidasi ID registrasi sebelum meneruskan filter.
 func listExecutions(ctx context.Context, connection executionQueries, databaseID string, hideRollback bool) ([]Execution, error) {
-	if !validUUID(databaseID) {
-		return nil, ErrNotFound
+	statement := `SELECT ` + executionColumns + ` FROM platform_migration_executions`
+	var args []any
+	if databaseID != "" {
+		statement += ` WHERE database_id = $1`
+		args = append(args, databaseID)
 	}
-	rows, err := connection.QueryContext(ctx, `SELECT `+executionColumns+`
-		FROM platform_migration_executions WHERE database_id = $1 ORDER BY sequence DESC`, databaseID)
+	rows, err := connection.QueryContext(ctx, statement+` ORDER BY sequence DESC`, args...)
 	if err != nil {
 		return nil, historyError("list committed executions", err)
 	}

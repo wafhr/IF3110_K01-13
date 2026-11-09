@@ -90,12 +90,12 @@ func (s *Service) PrepareAction(ctx context.Context, databaseID, migrationID str
 	if err != nil {
 		return ActionPlan{}, err
 	}
-	db, history, err := s.openHistory(ctx, databaseID)
+	db, _, err := s.openHistory(ctx, databaseID)
 	if err != nil {
 		return ActionPlan{}, err
 	}
 	defer db.Close()
-	executions, err := history.List(ctx, databaseID, false)
+	executions, err := listExecutions(ctx, db, "", false)
 	if err != nil {
 		return ActionPlan{}, err
 	}
@@ -135,7 +135,7 @@ func (s *Service) SubmitAction(ctx context.Context, actorID, databaseID, migrati
 	if err != nil {
 		return QueuedAction{}, err
 	}
-	if transactionControl(plan.SQL, database.PostgreSQL) {
+	if transactionControl(plan.SQL) {
 		return QueuedAction{}, ErrInvalidMigration
 	}
 	var id [16]byte
@@ -312,7 +312,7 @@ func (s *Service) PrepareExecution(ctx context.Context, tx *sql.Tx, request Exec
 	if fresh != plan {
 		return PreparedExecution{}, ErrConflict
 	}
-	if transactionControl(fresh.SQL, database.PostgreSQL) {
+	if transactionControl(fresh.SQL) {
 		return PreparedExecution{}, ErrInvalidMigration
 	}
 	if err := s.execution.Approvals.ValidateApproval(ctx, request); err != nil {
@@ -438,117 +438,36 @@ func (s *Service) Get(ctx context.Context, databaseID string, version int64) (Re
 	return row, err
 }
 
-func (s *Service) Execute(ctx context.Context, databaseID, userID, name, statement string) (executed Record, activityErr error) {
-	ctx, activity := telemetry.StartActivity(ctx, "migration_legacy_execute", slog.String("actor", userID), slog.String("database_id", databaseID))
-	defer activity.End(&activityErr)
-
-	name, err := NormalizeMigrationName(name)
-	if err != nil {
-		return Record{}, err
-	}
-	statement = strings.TrimSpace(statement)
-	if err := validateSQL("sql", statement); err != nil {
-		return Record{}, err
-	}
-	db, dbms, err := s.openTarget(ctx, databaseID)
-	if err != nil {
-		return Record{}, err
-	}
-	defer db.Close()
-	if transactionControl(statement, dbms) {
-		return Record{}, fmt.Errorf("%w: transaction control statements are managed by the migration runner", ErrInvalidMigration)
-	}
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return Record{}, err
-	}
-	defer conn.Close()
-	unlock, err := acquireLock(ctx, conn, databaseID, dbms)
-	if err != nil {
-		return Record{}, err
-	}
-	defer unlock()
-	if err := ensureHistory(ctx, conn, dbms); err != nil {
-		return Record{}, err
-	}
-	row, err := insertRunning(ctx, conn, dbms, name, statement, userID)
-	if err != nil {
-		return Record{}, fmt.Errorf("record migration: %w", err)
-	}
-	activity.SetAttributes(slog.Int64("legacy_version", row.Version))
-	ctx = telemetry.WithLogAttrs(ctx, slog.Int64("legacy_version", row.Version))
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		s.markFailed(ctx, conn, dbms, row.Version)
-		return row, err
-	}
-	if _, err = tx.ExecContext(ctx, statement); err != nil {
-		_ = tx.Rollback()
-		s.markFailed(ctx, conn, dbms, row.Version)
-		row.Status = Failed
-		finished := time.Now().UTC()
-		row.FinishedAt = &finished
-		return row, fmt.Errorf("migration execution failed (version %d): %w", row.Version, err)
-	}
-	finished := time.Now().UTC()
-	if _, err = tx.ExecContext(ctx, `UPDATE platform_migrations SET status='success',finished_at=`+placeholder(dbms, 1)+` WHERE version=`+placeholder(dbms, 2), finished, row.Version); err != nil {
-		_ = tx.Rollback()
-		s.markFailed(ctx, conn, dbms, row.Version)
-		return row, err
-	}
-	if err = tx.Commit(); err != nil {
-		s.markFailed(ctx, conn, dbms, row.Version)
-		return row, err
-	}
-	row.Status = Success
-	row.FinishedAt = &finished
-	return row, nil
+// Kedua mode quoting diperiksa agar pengaturan backslash target tidak dapat
+// menyembunyikan kendali transaksi dari runner PostgreSQL.
+func transactionControl(statement string) bool {
+	return sqlStatementsContainTransactionControl(statement, false) || sqlStatementsContainTransactionControl(statement, true)
 }
 
-func transactionControl(statement string, dbms database.DBMS) bool {
-	return transactionControlWithBackslashMode(statement, dbms, false) || transactionControlWithBackslashMode(statement, dbms, true)
-}
-
-func transactionControlWithBackslashMode(statement string, dbms database.DBMS, backslashEscapes bool) bool {
-	if dbms == database.MySQL && mysqlExecutableControl(statement, backslashEscapes) {
-		return true
-	}
-	return sqlStatementsContainTransactionControl(statement, dbms, backslashEscapes)
-}
-
-func sqlStatementsContainTransactionControl(statement string, dbms database.DBMS, backslashEscapes bool) bool {
+func sqlStatementsContainTransactionControl(statement string, backslashEscapes bool) bool {
 	for position := 0; position < len(statement); {
-		position = skipSQLTrivia(statement, position, dbms)
+		position = skipSQLTrivia(statement, position)
 		if position >= len(statement) {
 			return false
 		}
 		first, end := sqlWord(statement, position)
-		next := skipSQLTrivia(statement, end, dbms)
+		next := skipSQLTrivia(statement, end)
 		second, secondEnd := sqlWord(statement, next)
-		if forbiddenTransactionStatement(first, second, statement, end, secondEnd, dbms, backslashEscapes) {
+		switch first {
+		case "BEGIN", "START", "COMMIT", "END", "ROLLBACK", "ABORT", "SAVEPOINT", "RELEASE", "PREPARE":
 			return true
+		case "SET":
+			if second == "TRANSACTION" {
+				return true
+			}
+			if second == "LOCAL" || second == "SESSION" {
+				third, _ := sqlWord(statement, skipSQLTrivia(statement, secondEnd))
+				if third == "TRANSACTION" {
+					return true
+				}
+			}
 		}
-		position = nextSQLStatement(statement, end, dbms, backslashEscapes)
-	}
-	return false
-}
-
-func forbiddenTransactionStatement(first, second, statement string, firstEnd, secondEnd int, dbms database.DBMS, backslashEscapes bool) bool {
-	switch first {
-	case "BEGIN", "START", "COMMIT", "END", "ROLLBACK", "ABORT", "SAVEPOINT", "RELEASE", "PREPARE", "XA":
-		return true
-	case "LOCK", "UNLOCK":
-		return dbms == database.MySQL && second == "TABLES"
-	case "SET":
-		if second == "TRANSACTION" || strings.Contains(second, "AUTOCOMMIT") ||
-			(dbms == database.MySQL && sqlContainsWord(statement, firstEnd, dbms, backslashEscapes, "AUTOCOMMIT")) {
-			return true
-		}
-		if second == "LOCAL" || second == "SESSION" || second == "GLOBAL" {
-			next := skipSQLTrivia(statement, secondEnd, dbms)
-			third, _ := sqlWord(statement, next)
-			return third == "TRANSACTION" || strings.Contains(third, "AUTOCOMMIT")
-		}
+		position = nextSQLStatement(statement, end, backslashEscapes)
 	}
 	return false
 }
@@ -566,19 +485,14 @@ func sqlWord(statement string, position int) (string, int) {
 	return strings.ToUpper(statement[start:position]), position
 }
 
-func skipSQLTrivia(statement string, position int, dbms database.DBMS) int {
+func skipSQLTrivia(statement string, position int) int {
 	for position < len(statement) {
 		if strings.ContainsRune(" \t\r\n\f\v", rune(statement[position])) {
 			position++
 			continue
 		}
-		if position+1 < len(statement) && statement[position:position+2] == "--" &&
-			(dbms != database.MySQL || position+2 == len(statement) || statement[position+2] <= ' ') {
+		if position+1 < len(statement) && statement[position:position+2] == "--" {
 			position = skipSQLLine(statement, position+2)
-			continue
-		}
-		if dbms == database.MySQL && statement[position] == '#' {
-			position = skipSQLLine(statement, position+1)
 			continue
 		}
 		if position+1 < len(statement) && statement[position:position+2] == "/*" {
@@ -614,15 +528,10 @@ func skipSQLBlockComment(statement string, position int) int {
 	return position
 }
 
-func nextSQLStatement(statement string, position int, dbms database.DBMS, backslashEscapes bool) int {
+func nextSQLStatement(statement string, position int, backslashEscapes bool) int {
 	for position < len(statement) {
-		if position+1 < len(statement) && statement[position:position+2] == "--" &&
-			(dbms != database.MySQL || position+2 == len(statement) || statement[position+2] <= ' ') {
+		if position+1 < len(statement) && statement[position:position+2] == "--" {
 			position = skipSQLLine(statement, position+2)
-			continue
-		}
-		if dbms == database.MySQL && statement[position] == '#' {
-			position = skipSQLLine(statement, position+1)
 			continue
 		}
 		if position+1 < len(statement) && statement[position:position+2] == "/*" {
@@ -633,11 +542,11 @@ func nextSQLStatement(statement string, position int, dbms database.DBMS, backsl
 			return position + 1
 		}
 		quote := statement[position]
-		if quote == '\'' || quote == '"' || (quote == '`' && dbms == database.MySQL) {
+		if quote == '\'' || quote == '"' {
 			position = skipSQLQuoted(statement, position, quote, backslashEscapes)
 			continue
 		}
-		if dbms == database.PostgreSQL && statement[position] == '$' &&
+		if statement[position] == '$' &&
 			(position == 0 || !isSQLWordByte(statement[position-1])) {
 			if end := dollarQuoteEnd(statement, position); end > position {
 				position = end
@@ -668,37 +577,6 @@ func skipSQLQuoted(statement string, position int, quote byte, backslashEscapes 
 	return position
 }
 
-func sqlContainsWord(statement string, position int, dbms database.DBMS, backslashEscapes bool, target string) bool {
-	for position < len(statement) {
-		position = skipSQLTrivia(statement, position, dbms)
-		if position >= len(statement) || statement[position] == ';' {
-			return false
-		}
-		quote := statement[position]
-		if quote == '\'' || quote == '"' || (quote == '`' && dbms == database.MySQL) {
-			position = skipSQLQuoted(statement, position, quote, backslashEscapes)
-			continue
-		}
-		if dbms == database.PostgreSQL && quote == '$' &&
-			(position == 0 || !isSQLWordByte(statement[position-1])) {
-			if end := dollarQuoteEnd(statement, position); end > position {
-				position = end
-				continue
-			}
-		}
-		word, end := sqlWord(statement, position)
-		if strings.Contains(word, target) {
-			return true
-		}
-		if end == position {
-			position++
-		} else {
-			position = end
-		}
-	}
-	return false
-}
-
 func isSQLWordByte(b byte) bool {
 	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '_'
 }
@@ -719,30 +597,6 @@ func dollarQuoteEnd(statement string, position int) int {
 	return end + 1 + closing + len(delimiter)
 }
 
-func mysqlExecutableControl(statement string, backslashEscapes bool) bool {
-	for position := 0; ; {
-		start := strings.Index(statement[position:], "/*!")
-		if start < 0 {
-			return false
-		}
-		start += position + 3
-		end := strings.Index(statement[start:], "*/")
-		if end < 0 {
-			return false
-		}
-		end += start
-		for start < end && (statement[start] >= '0' && statement[start] <= '9' || statement[start] <= ' ') {
-			start++
-		}
-		commentBody := statement[start:end]
-		if strings.Contains(commentBody, "/*!") || strings.Contains(strings.ToUpper(commentBody), "AUTOCOMMIT") ||
-			sqlStatementsContainTransactionControl(commentBody, database.MySQL, backslashEscapes) {
-			return true
-		}
-		position = end + 2
-	}
-}
-
 func ensureHistory(ctx context.Context, db interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }, dbms database.DBMS) error {
@@ -752,12 +606,6 @@ func ensureHistory(ctx context.Context, db interface {
 	}
 	_, err := db.ExecContext(ctx, statement)
 	return err
-}
-
-func (s *Service) markFailed(ctx context.Context, conn *sql.Conn, dbms database.DBMS, version int64) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	_, _ = conn.ExecContext(ctx, `UPDATE platform_migrations SET status='failed',finished_at=CURRENT_TIMESTAMP WHERE version=`+placeholder(dbms, 1)+` AND status='running'`, version)
 }
 
 func historyColumns(dbms database.DBMS) string {
@@ -772,64 +620,4 @@ func placeholder(dbms database.DBMS, position int) string {
 		return "?"
 	}
 	return fmt.Sprintf("$%d", position)
-}
-
-func acquireLock(ctx context.Context, conn *sql.Conn, id string, dbms database.DBMS) (unlock func(), activityErr error) {
-	parent := ctx
-	ctx, activity := telemetry.StartActivity(ctx, "migration_lock_acquire", slog.String("database_id", id))
-	defer activity.End(&activityErr)
-
-	if dbms == database.MySQL {
-		var acquired sql.NullInt64
-		if err := conn.QueryRowContext(ctx, `SELECT GET_LOCK(?, 5)`, "if3110_migration_"+id).Scan(&acquired); err != nil {
-			return nil, err
-		}
-		if !acquired.Valid || acquired.Int64 != 1 {
-			return nil, errors.New("could not acquire migration lock")
-		}
-		return func() { releaseLock(context.WithoutCancel(parent), conn, id, dbms) }, nil
-	}
-	if dbms != database.PostgreSQL {
-		return nil, database.ErrInvalidInput
-	}
-	lock := targetMigrationLockKey
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, lock); err != nil {
-		return nil, err
-	}
-	return func() { releaseLock(context.WithoutCancel(parent), conn, id, dbms) }, nil
-}
-
-// Cleanup mempertahankan korelasi meskipun request yang memegang lock dibatalkan.
-func releaseLock(ctx context.Context, conn *sql.Conn, id string, dbms database.DBMS) {
-	ctx, activity := telemetry.StartActivity(ctx, "migration_lock_release", slog.String("database_id", id))
-	var releaseErr error
-	defer activity.End(&releaseErr)
-	if dbms == database.MySQL {
-		_, releaseErr = conn.ExecContext(ctx, `SELECT RELEASE_LOCK(?)`, "if3110_migration_"+id)
-	} else {
-		_, releaseErr = conn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, targetMigrationLockKey)
-	}
-}
-
-func insertRunning(ctx context.Context, conn *sql.Conn, dbms database.DBMS, name, statement, userID string) (Record, error) {
-	var row Record
-	if dbms == database.PostgreSQL {
-		err := conn.QueryRowContext(ctx, `INSERT INTO platform_migrations(name,sql,status,executed_by) VALUES($1,$2,'running',$3) RETURNING version,name,sql,status,executed_by::text,started_at`, name, statement, userID).
-			Scan(&row.Version, &row.Name, &row.SQL, &row.Status, &row.ExecutedBy, &row.StartedAt)
-		return row, err
-	}
-	if dbms != database.MySQL {
-		return row, database.ErrInvalidInput
-	}
-	result, err := conn.ExecContext(ctx, "INSERT INTO platform_migrations(name,`sql`,status,executed_by) VALUES(?,?,'running',?)", name, statement, userID)
-	if err != nil {
-		return row, err
-	}
-	row.Version, err = result.LastInsertId()
-	if err != nil {
-		return row, err
-	}
-	err = conn.QueryRowContext(ctx, `SELECT `+historyColumns(dbms)+` FROM platform_migrations WHERE version=?`, row.Version).
-		Scan(&row.Version, &row.Name, &row.SQL, &row.Status, &row.ExecutedBy, &row.StartedAt, &row.FinishedAt)
-	return row, err
 }

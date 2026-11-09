@@ -45,7 +45,6 @@ const quotedTable = `Order"Items`
 type fixture struct {
 	admin, platform, target *sql.DB
 	registry                *database.Repository
-	legacyMigrations        *migration.Service
 	openTarget              migration.TargetOpener
 	pools                   *targetdb.Manager
 	inspector               *drivers.Inspector
@@ -126,7 +125,6 @@ func newFixture(t *testing.T) *fixture {
 		return db, connection.DBMS, err
 	}
 	migrations := migration.NewService(f.openTarget)
-	f.legacyMigrations = migrations
 	auth := access.NewHTTPHandler(authService, false)
 	f.server = httptest.NewServer(telemetry.HTTPHandler(app.RoutesWithModulesAndFrontend(auth,
 		databasehttp.NewHandler(f.registry, f.pools, auth),
@@ -568,4 +566,62 @@ func (f *migrationFixture) executionHistory(t *testing.T, hideRollback bool) mig
 	var result migration.ExecutionHistory
 	decode(t, f.reader.do(t, "GET", f.migrationPath()+"/history?hide_rollback="+fmt.Sprint(hideRollback), nil, 200), &result)
 	return result
+}
+
+// seedLegacyMigration membuat data kompatibilitas Milestone 1 pada database uji.
+// SQL fixture bersifat tetap. Eksekusi aplikasi memakai kontrak queue/worker.
+func (f *fixture) seedLegacyMigration(ctx context.Context, databaseID, actorID, name, statement string) (migration.Record, error) {
+	db, system, err := f.openTarget(ctx, databaseID)
+	if err != nil {
+		return migration.Record{}, err
+	}
+	defer db.Close()
+	schema := `CREATE TABLE IF NOT EXISTS platform_migrations (version BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name TEXT NOT NULL, sql TEXT NOT NULL, status TEXT NOT NULL, executed_by UUID NOT NULL, started_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ)`
+	insert := `INSERT INTO platform_migrations(name,sql,status,executed_by) VALUES($1,$2,'running',$3) RETURNING version,started_at`
+	update := `UPDATE platform_migrations SET status=$1,finished_at=$2 WHERE version=$3`
+	if system == database.MySQL {
+		schema = "CREATE TABLE IF NOT EXISTS platform_migrations (version BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(160) NOT NULL, `sql` LONGTEXT NOT NULL, status VARCHAR(16) NOT NULL, executed_by CHAR(36) NOT NULL, started_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), finished_at DATETIME(6)) ENGINE=InnoDB"
+		insert = "INSERT INTO platform_migrations(name,`sql`,status,executed_by) VALUES(?,?,'running',?)"
+		update = `UPDATE platform_migrations SET status=?,finished_at=? WHERE version=?`
+	}
+	if _, err := db.ExecContext(ctx, schema); err != nil {
+		return migration.Record{}, err
+	}
+	record := migration.Record{Name: name, SQL: statement, Status: migration.Running, ExecutedBy: actorID}
+	if system == database.MySQL {
+		result, err := db.ExecContext(ctx, insert, name, statement, actorID)
+		if err != nil {
+			return record, err
+		}
+		record.Version, err = result.LastInsertId()
+		if err != nil {
+			return record, err
+		}
+		if err := db.QueryRowContext(ctx, `SELECT started_at FROM platform_migrations WHERE version=?`, record.Version).Scan(&record.StartedAt); err != nil {
+			return record, err
+		}
+	} else if err := db.QueryRowContext(ctx, insert, name, statement, actorID).Scan(&record.Version, &record.StartedAt); err != nil {
+		return record, err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return record, err
+	}
+	defer tx.Rollback()
+	_, executionErr := tx.ExecContext(ctx, statement)
+	finished := time.Now().UTC()
+	record.FinishedAt = &finished
+	if executionErr != nil {
+		_ = tx.Rollback()
+		record.Status = migration.Failed
+		if _, err := db.ExecContext(ctx, update, record.Status, finished, record.Version); err != nil {
+			return record, err
+		}
+		return record, executionErr
+	}
+	record.Status = migration.Success
+	if _, err := tx.ExecContext(ctx, update, record.Status, finished, record.Version); err != nil {
+		return record, err
+	}
+	return record, tx.Commit()
 }

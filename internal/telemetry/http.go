@@ -92,7 +92,8 @@ func HTTPHandler(next http.Handler) http.Handler {
 			attrs = append(attrs, slog.String("status", status))
 			slog.LogAttrs(ctx, level, "http_request_completed", attrs...)
 			if recovered != nil {
-				panic(recovered)
+				// net/http menutup koneksi tanpa mencatat nilai panic asli.
+				panic(http.ErrAbortHandler)
 			}
 		}()
 		next.ServeHTTP(response.wrap(w), r)

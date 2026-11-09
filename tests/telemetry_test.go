@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
@@ -275,4 +276,25 @@ func TestTelemetryQueueIntegration(t *testing.T) {
 		t.Fatal("span lock, retry, atau bukti commit tidak tercatat")
 	}
 	assertTelemetryPrivacy(t, capture, "fixture-private-literal", definition.Name, rejected.Plan.SQL)
+}
+
+func TestTelemetryHTTPPanicPrivacyIntegration(t *testing.T) {
+	capture := newTelemetryFixture(t)
+	secret := "fixture-private-session-panic"
+	server := httptest.NewServer(telemetry.HTTPHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic(secret) })))
+	t.Cleanup(server.Close)
+	response, err := server.Client().Get(server.URL)
+	if response != nil {
+		response.Body.Close()
+	}
+	server.Close()
+	capture.flush(t)
+	if err == nil {
+		t.Fatal("panic tidak menghentikan respons HTTP")
+	}
+	assertTelemetryPrivacy(t, capture, secret)
+	records := telemetryRecords(t, capture.logs.snapshot())
+	if len(records) != 1 || records[0]["error_type"] != "panic" || records[0]["status"] != "failed" {
+		t.Fatal("kegagalan HTTP tidak tercatat aman")
+	}
 }

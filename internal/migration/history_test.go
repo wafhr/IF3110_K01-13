@@ -59,19 +59,15 @@ func testHistoryRepository(t *testing.T, steps ...repositoryStep) *migration.His
 	return repository
 }
 
-func testHistoryTransaction(t *testing.T, steps ...repositoryStep) (*migration.HistoryRepository, *sql.Tx) {
+func testHistoryTransaction(t *testing.T, steps ...repositoryStep) *sql.Tx {
 	t.Helper()
 	db := testMigrationDatabase(t, steps...)
-	repository, err := migration.NewHistoryRepository(db)
-	if err != nil {
-		t.Fatal(err)
-	}
 	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = tx.Rollback() })
-	return repository, tx
+	return tx
 }
 
 func TestHistoryRepositoryRequiresDatabase(t *testing.T) {
@@ -129,14 +125,14 @@ func TestHistoryAppendUsesCallerTransaction(t *testing.T) {
 		check: repositoryArguments(execution.ID, execution.DatabaseID, execution.MigrationID, execution.Revision,
 			execution.Name, string(execution.Action), execution.SQL, execution.ExecutedBy, execution.StartedAt, *execution.FinishedAt, ""),
 	}
-	repository, tx := testHistoryTransaction(t, repositoryStep{operation: "begin"},
+	tx := testHistoryTransaction(t, repositoryStep{operation: "begin"},
 		repositoryStep{operation: "exec", statement: execution.SQL}, insert, repositoryStep{operation: "rollback"})
 	if _, err := tx.ExecContext(context.Background(), execution.SQL); err != nil {
 		t.Fatal(err)
 	}
 	input := execution
 	input.Sequence, input.Name = 999, " ubah pelanggan "
-	stored, err := repository.Append(context.Background(), tx, input)
+	stored, err := migration.AppendExecution(context.Background(), tx, input)
 	if err != nil || !reflect.DeepEqual(stored, execution) {
 		t.Fatalf("Append() = %+v, %v", stored, err)
 	}
@@ -166,17 +162,17 @@ func TestHistoryAppendRejectsInvalidExecutions(t *testing.T) {
 		{"self rollback", func(e *migration.Execution) { e.Action, e.RevertsExecutionID = migration.Rollback, e.ID }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			repository, tx := testHistoryTransaction(t, repositoryStep{operation: "begin"}, repositoryStep{operation: "rollback"})
+			tx := testHistoryTransaction(t, repositoryStep{operation: "begin"}, repositoryStep{operation: "rollback"})
 			execution := committedExecution(1, migration.Apply)
 			tc.change(&execution)
-			stored, err := repository.Append(context.Background(), tx, execution)
+			stored, err := migration.AppendExecution(context.Background(), tx, execution)
 			if !errors.Is(err, migration.ErrInvalidMigration) || !reflect.DeepEqual(stored, migration.Execution{}) {
 				t.Fatalf("Append() = %+v, %v; diharapkan input tidak valid", stored, err)
 			}
 		})
 	}
 	t.Run("nil transaction", func(t *testing.T) {
-		_, err := testHistoryRepository(t).Append(context.Background(), nil, committedExecution(1, migration.Apply))
+		_, err := migration.AppendExecution(context.Background(), nil, committedExecution(1, migration.Apply))
 		if !errors.Is(err, migration.ErrInvalidMigration) {
 			t.Fatal(err)
 		}
@@ -199,9 +195,9 @@ func TestHistoryAppendMapsStorageErrors(t *testing.T) {
 		{"other", errors.New("private SQL detail"), migration.ErrStorage},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			repository, tx := testHistoryTransaction(t, repositoryStep{operation: "begin"},
+			tx := testHistoryTransaction(t, repositoryStep{operation: "begin"},
 				repositoryStep{operation: "query", err: tc.err}, repositoryStep{operation: "rollback"})
-			stored, err := repository.Append(context.Background(), tx, committedExecution(1, migration.Apply))
+			stored, err := migration.AppendExecution(context.Background(), tx, committedExecution(1, migration.Apply))
 			if !errors.Is(err, tc.want) || !reflect.DeepEqual(stored, migration.Execution{}) || strings.Contains(err.Error(), "private SQL detail") {
 				t.Fatalf("Append() = %+v, %v; diharapkan %v", stored, err, tc.want)
 			}

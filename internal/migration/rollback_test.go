@@ -174,7 +174,7 @@ func TestBuildMigrationStateRejectsInconsistentHistory(t *testing.T) {
 		name   string
 		change func([]migration.Execution) []migration.Execution
 	}{
-		{"wrong database", func(h []migration.Execution) []migration.Execution { h[0].DatabaseID = executionID(99); return h }},
+		{"invalid database", func(h []migration.Execution) []migration.Execution { h[0].DatabaseID = "bad"; return h }},
 		{"invalid execution ID", func(h []migration.Execution) []migration.Execution { h[0].ID = "bad"; return h }},
 		{"duplicate execution ID", func(h []migration.Execution) []migration.Execution { h[1].ID = h[0].ID; return h }},
 		{"duplicate sequence", func(h []migration.Execution) []migration.Execution { h[1].Sequence = h[0].Sequence; return h }},
@@ -256,5 +256,21 @@ func TestMigrationStateRequiresUnfilteredHistory(t *testing.T) {
 	history := append(rolledBackTimeline(), timelineExecution(6, 2, migration.Forward))
 	if _, err := migration.BuildMigrationState(repositoryDatabaseID, migration.HideRollback(history)); !errors.Is(err, migration.ErrInvalidHistory) {
 		t.Fatal("history yang sudah difilter dipakai untuk menentukan posisi:", err)
+	}
+}
+
+func TestMigrationStateDeduplicatesLegacyImportsAcrossAliases(t *testing.T) {
+	version := int64(1)
+	first := timelineExecution(1, 1, migration.Apply)
+	first.MigrationID, first.Revision, first.LegacyVersion = "", 0, &version
+	duplicate := first
+	duplicate.ID, duplicate.Sequence, duplicate.DatabaseID = executionID(2), 2, executionID(99)
+	state, err := migration.BuildMigrationState(repositoryDatabaseID, []migration.Execution{first, duplicate})
+	if err != nil || len(state.Active) != 1 || state.BaseExecutionID != first.ID {
+		t.Fatalf("impor legacy dihitung berulang: %+v, %v", state, err)
+	}
+	duplicate.SQL = "SELECT 999"
+	if _, err := migration.BuildMigrationState(repositoryDatabaseID, []migration.Execution{first, duplicate}); !errors.Is(err, migration.ErrInvalidHistory) {
+		t.Fatal("salinan legacy berbeda diterima", err)
 	}
 }

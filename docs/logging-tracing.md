@@ -54,7 +54,7 @@ also covers operations invoked by browser forms.
 | Administration | `user_create`, `user_update`, `group_create`, `group_membership_set`, `database_permission_set` |
 | Registry and viewer | `database_register`, `database_update`, `database_connection_check`, `schemas_list`, `tables_list`, `table_inspect`, `table_data_read` |
 | Migration | `migration_define`, `migration_revise`, `migration_submit`, `migration_enqueue`, `migration_execution_prepare`, `migration_history_stage` |
-| Attempt and lock | `worker_attempt`, `migration_lock_acquire`, `migration_lock_release` |
+| Attempt and lock | `worker_attempt`, plus lock activities supplied by the executor |
 
 `HTTPHandler` creates a server span, extracts W3C trace context, and returns
 `X-Trace-ID` when the span context is valid. `http_request_completed` includes
@@ -68,8 +68,10 @@ cancellation, and panic produce ERROR records and error span status. Access
 checks emit `access_denied` with a fixed reason such as
 `database_permission_required`, `invalid_session`, or `invalid_csrf`.
 
-Activity and HTTP instrumentation record generic panic categories and propagate
-the panic through the caller's existing handling.
+Activity instrumentation records a generic panic category and preserves the
+original panic for its caller. The outer HTTP middleware records that category
+and propagates `http.ErrAbortHandler`. This sentinel preserves the server
+connection-abort behavior and keeps the original panic value inside the handler.
 
 ## SQL observations
 
@@ -81,10 +83,13 @@ Each operation has separate started and completed events, such as
 
 SQL records include `database_role` (`platform` or `target`), `db_system`,
 `operation`, `query_template`, `parameters`, `parameter_count`, and duration as
-applicable. The template retains SQL structure with literals and identifiers
-replaced by `?`. Comments are removed. Unrecognized tokens cause full query
-redaction. Each SQL record stores `[REDACTED]` in `parameters` and the number
-of supplied values in `parameter_count`.
+applicable. The template is derived from the SQL actually passed to the driver
+for each attempt. It preserves table/column identifiers and SQL structure while
+replacing literals and parameter placeholders with `?`. Comments are removed.
+Account, role, ownership, and grant statements are fully redacted to protect
+account identifiers. Unrecognized tokens also cause full query redaction. Each
+SQL record stores `[REDACTED]` in `parameters` and the number of supplied values
+in `parameter_count`.
 
 Successful Exec operations include `rows_affected` when supported. Query
 operations include `rows_read` and `rows_complete`. The query span lasts until
@@ -157,8 +162,11 @@ and bootstrap password. URL passwords are also recognized in decoded form.
   connection-string, body, and raw SQL/parameter fields are masked.
 - Free text containing credential assignments, credential URLs, or authorization
   patterns is fully redacted.
-- SQL templates mask all literals and identifiers, and SQL parameters are fully
-  redacted. Result row values are excluded from telemetry.
+- SQL templates preserve operational object identifiers and mask literals.
+  Account/role/ownership/grant statements and SQL parameters are fully redacted.
+  Result row values are excluded from telemetry. Object names containing
+  sensitive information require registration as known secrets or a stricter
+  call-site redaction policy.
 - Driver error messages use safe categories and SQLSTATE. Activity error and
   panic messages use safe categories.
 - Trace names, attributes, events, links, status descriptions, resource
@@ -174,7 +182,7 @@ The following illustrative records use fictional IDs and selected fields from
 JSON log and console span output.
 
 ```json
-{"time":"2026-11-09T05:00:00Z","level":"INFO","event":"sql_exec_completed","service":"worker","database":"app","database_role":"target","operation":"exec","query_template":"UPDATE ? SET ? = ? WHERE ? = ?","parameters":"[REDACTED]","parameter_count":2,"rows_affected":1,"status":"success","actor":"00000000-0000-4000-8000-000000000001","execution_id":"00000000-0000-4000-8000-000000000002","job_id":"00000000-0000-4000-8000-000000000003","attempt":1,"batch":1,"trace_id":"11111111111111111111111111111111","span_id":"2222222222222222"}
+{"time":"2026-11-09T05:00:00Z","level":"INFO","event":"sql_exec_completed","service":"worker","database":"app","database_role":"target","operation":"exec","query_template":"UPDATE customers SET active = ? WHERE id = ?","parameters":"[REDACTED]","parameter_count":2,"rows_affected":1,"status":"success","actor":"00000000-0000-4000-8000-000000000001","execution_id":"00000000-0000-4000-8000-000000000002","job_id":"00000000-0000-4000-8000-000000000003","attempt":1,"batch":1,"trace_id":"11111111111111111111111111111111","span_id":"2222222222222222"}
 ```
 
 ```json
@@ -189,7 +197,7 @@ JSON log and console span output.
   },
   "Attributes": [
     {"Key":"db.operation.name","Value":{"Type":"STRING","Value":"exec"}},
-    {"Key":"db.query.summary","Value":{"Type":"STRING","Value":"UPDATE ? SET ? = ? WHERE ? = ?"}}
+    {"Key":"db.query.summary","Value":{"Type":"STRING","Value":"UPDATE customers SET active = ? WHERE id = ?"}}
   ]
 }
 ```
@@ -215,8 +223,8 @@ docker compose -f compose.test.yaml stop postgres-test
 `tests/telemetry_test.go` verifies HTTP/domain/platform SQL correlation,
 read-only queries, access denial, privacy, JSONB propagation across server and
 worker provider identities, SQLSTATE, rollback, commit, lock spans, retry scopes,
-and duplicate commit evidence. Tests restore process-wide logging/tracing state
-and use synchronized capture buffers. The fixture follows the server's HTTP and
+duplicate commit evidence, and HTTP panic privacy through a real server. Tests
+restore process-wide logging/tracing state and use synchronized capture buffers. The fixture follows the server's HTTP and
 platform SQL instrumentation entry points.
 
 The complete PostgreSQL/MySQL integration instructions are in the database
