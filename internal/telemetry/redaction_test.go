@@ -117,3 +117,34 @@ func TestLoggerResolvesLogValuerBeforeRedaction(t *testing.T) {
 		t.Fatal("LogValuer melewati redaction")
 	}
 }
+
+func TestSanitizeSQLHidesLiteralsIdentifiersAndComments(t *testing.T) {
+	for _, test := range []struct {
+		system, query string
+		hidden        []string
+	}{
+		{"postgresql", "SELECT private_field FROM private_table WHERE private_field = 'fixture-secret' AND private_id = $1 /* fixture-comment */", []string{"private_field", "private_table", "private_id", "fixture-secret", "fixture-comment"}},
+		{"postgresql", `DO $body$ BEGIN RAISE NOTICE 'fixture-dollar-secret'; END $body$`, []string{"fixture-dollar-secret", "RAISE"}},
+		{"postgresql", `CREATE ROLE private_user PASSWORD 'fixture-password'`, []string{"private_user", "fixture-password"}},
+		{"postgresql", `SELECT E'fixture-escape-secret\\value', 12345, \"private_identifier\"`, []string{"fixture-escape-secret", "12345", "private_identifier"}},
+		{"mysql", "SELECT `private_field` FROM `private_table` WHERE id = \"fixture-double-secret\" # fixture-comment", []string{"private_field", "private_table", "fixture-double-secret", "fixture-comment"}},
+		{"mysql", "SELECT 'fixture-unterminated", []string{"fixture-unterminated"}},
+		{"mysql", "CREATE USER private_user IDENTIFIED BY 'fixture-password'", []string{"private_user", "fixture-password"}},
+		{"mysql", "SELECT /* comment */ 0xDEADBEEF; /*! fixture-executable-comment */", []string{"DEADBEEF", "fixture-executable-comment"}},
+	} {
+		t.Run(test.system+test.query, func(t *testing.T) {
+			got := telemetry.SanitizeSQL(test.query, test.system)
+			for _, hidden := range test.hidden {
+				if strings.Contains(strings.ToLower(got), strings.ToLower(hidden)) {
+					t.Fatalf("SQL sensitif masih muncul: %q", got)
+				}
+			}
+			if got == "" {
+				t.Fatal("template SQL hilang")
+			}
+		})
+	}
+	if got := telemetry.SanitizeSQL("SELECT name FROM users WHERE id = $1", "postgresql"); got != "SELECT ? FROM ? WHERE ? = ?" {
+		t.Fatalf("template = %q", got)
+	}
+}

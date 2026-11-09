@@ -3,10 +3,12 @@ module github.com/wafhr/IF3110_K01-13
 go 1.25.0
 
 require (
+	github.com/DataDog/go-sqllexer v0.2.6
 	github.com/felixge/httpsnoop v1.1.0
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/joho/godotenv v1.5.1
+	github.com/ngrok/sqlmw v0.0.0-20220520173518-97c9c04efc79
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.46.0
 	go.opentelemetry.io/otel/sdk v1.46.0

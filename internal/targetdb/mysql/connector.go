@@ -11,6 +11,7 @@ import (
 
 	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 type Connector struct{}
@@ -35,7 +36,7 @@ func (c *Connector) Open(ctx context.Context, settings database.ConnectionConfig
 	if err != nil {
 		return nil, database.ErrInvalidInput
 	}
-	db := sql.OpenDB(connector)
+	db := sql.OpenDB(telemetry.SQLConnector(connector, "mysql", "target", settings.DatabaseName))
 	db.SetMaxOpenConns(5)
 	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(30 * time.Minute)

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	sqllexer "github.com/DataDog/go-sqllexer"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -190,5 +191,28 @@ func (r *Redactor) traceValue(value attribute.Value) attribute.Value {
 		return attribute.StringValue(Redacted)
 	default:
 		return value
+	}
+}
+
+// SanitizeSQL mempertahankan struktur SQL dan menyamarkan literal serta identifier.
+// Komentar dihapus. Token yang tidak dikenali menyebabkan seluruh query disamarkan.
+func SanitizeSQL(query, system string) string {
+	lexer := sqllexer.New(query, sqllexer.WithDBMS(sqllexer.DBMSType(system)))
+	var tokens []string
+	for {
+		token := lexer.Scan()
+		switch token.Type {
+		case sqllexer.EOF:
+			return strings.Join(tokens, " ")
+		case sqllexer.ERROR, sqllexer.UNKNOWN:
+			return Redacted
+		case sqllexer.SPACE, sqllexer.COMMENT, sqllexer.MULTILINE_COMMENT:
+			continue
+		case sqllexer.COMMAND, sqllexer.KEYWORD, sqllexer.OPERATOR, sqllexer.WILDCARD,
+			sqllexer.PUNCTUATION, sqllexer.JSON_OP, sqllexer.PROC_INDICATOR, sqllexer.CTE_INDICATOR, sqllexer.ALIAS_INDICATOR:
+			tokens = append(tokens, strings.ToUpper(token.Value))
+		default:
+			tokens = append(tokens, "?")
+		}
 	}
 }
