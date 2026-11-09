@@ -116,7 +116,7 @@ func run() (runErr error) {
 	migrationHandler := migration.NewHTTPHandler(migrationService, accessHandler, schemaInspector)
 	server := &http.Server{
 		Addr:              cfg.Address(),
-		Handler:           app.RoutesWithModulesAndFrontend(accessHandler, databaseHandler, viewerHandler, migrationHandler, web.NewHandler(accessService, accessHandler)),
+		Handler:           telemetry.HTTPHandler(app.RoutesWithModulesAndFrontend(accessHandler, databaseHandler, viewerHandler, migrationHandler, web.NewHandler(accessService, accessHandler))),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
