@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -31,6 +32,7 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb/drivers"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 	"github.com/wafhr/IF3110_K01-13/web"
 )
 
@@ -84,7 +86,8 @@ func newFixture(t *testing.T) *fixture {
 	}
 	platformConfig, targetConfig := config.Copy(), config.Copy()
 	platformConfig.Database, targetConfig.Database = f.createdDatabases[0], f.createdDatabases[1]
-	f.platform, f.target = stdlib.OpenDB(*platformConfig), stdlib.OpenDB(*targetConfig)
+	f.platform = sql.OpenDB(telemetry.SQLConnector(stdlib.GetConnector(*platformConfig), "postgresql", "platform", platformConfig.Database))
+	f.target = stdlib.OpenDB(*targetConfig)
 	role := prefix + "_reader"
 	execFixture(t, f.admin, "CREATE ROLE "+pgx.Identifier{role}.Sanitize()+" LOGIN PASSWORD '"+targetPassword+"'")
 	f.createdRole = role
@@ -125,10 +128,10 @@ func newFixture(t *testing.T) *fixture {
 	migrations := migration.NewService(f.openTarget)
 	f.legacyMigrations = migrations
 	auth := access.NewHTTPHandler(authService, false)
-	f.server = httptest.NewServer(app.RoutesWithModulesAndFrontend(auth,
+	f.server = httptest.NewServer(telemetry.HTTPHandler(app.RoutesWithModulesAndFrontend(auth,
 		databasehttp.NewHandler(f.registry, f.pools, auth),
 		databasehttp.NewViewerHandler(f.registry, f.inspector, auth),
-		migration.NewHTTPHandler(migrations, auth), web.NewHandler(authService, auth)))
+		migration.NewHTTPHandler(migrations, auth), web.NewHandler(authService, auth))))
 	f.settings = database.ConnectionConfig{Host: config.Host, Port: int(config.Port), DatabaseName: targetConfig.Database,
 		DBMS: database.PostgreSQL, Username: role, Password: targetPassword, SSLMode: "disable"}
 	return f
@@ -409,10 +412,10 @@ func newMigrationFixture(t *testing.T) *migrationFixture {
 	})
 	auth := access.NewHTTPHandler(authService, false)
 	f.server.Close()
-	f.server = httptest.NewServer(app.RoutesWithModulesAndFrontend(auth,
+	f.server = httptest.NewServer(telemetry.HTTPHandler(app.RoutesWithModulesAndFrontend(auth,
 		databasehttp.NewHandler(f.registry, f.pools, auth),
 		databasehttp.NewViewerHandler(f.registry, f.inspector, auth),
-		migration.NewHTTPHandler(migrations, auth), nil))
+		migration.NewHTTPHandler(migrations, auth), nil)))
 	result := &migrationFixture{fixture: f, definitions: definitions, migrations: migrations, approvals: approvals}
 	result.platformAdmin = f.login(t, "admin", adminPassword)
 	var registered struct {
@@ -457,7 +460,7 @@ func (f *migrationFixture) createMigration(t *testing.T, name, up, down string) 
 	return result.Migration
 }
 
-func (f *migrationFixture) queueAction(t *testing.T, definition migration.Migration, action migration.Action) migration.ExecutionRequest {
+func (f *migrationFixture) queueAction(t *testing.T, definition migration.Migration, action migration.Action, modify ...func(*http.Request)) migration.ExecutionRequest {
 	t.Helper()
 	plan, err := f.migrations.PrepareAction(context.Background(), f.databaseID, definition.ID, action)
 	if err != nil {
@@ -471,7 +474,7 @@ func (f *migrationFixture) queueAction(t *testing.T, definition migration.Migrat
 	var receipt migration.QueuedAction
 	decode(t, f.editor.do(t, "POST", f.migrationPath()+"/definitions/"+definition.ID+"/actions", map[string]any{
 		"action": action, "approval_id": approvalID,
-	}, 202), &receipt)
+	}, 202, modify...), &receipt)
 	if receipt.JobID == "" || receipt.ExecutionID == "" {
 		t.Fatal("pengajuan tidak menghasilkan identitas job dan execution")
 	}
@@ -492,6 +495,11 @@ func (f *migrationFixture) queueAction(t *testing.T, definition migration.Migrat
 func (f *migrationFixture) executeJob(request migration.ExecutionRequest) (migration.Execution, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	return f.executeJobContext(ctx, request)
+}
+
+// executeJobContext menghubungkan hook transaksi dengan context attempt pengujian.
+func (f *migrationFixture) executeJobContext(ctx context.Context, request migration.ExecutionRequest) (migration.Execution, error) {
 	db, _, err := f.openTarget(ctx, request.Plan.DatabaseID)
 	if err != nil {
 		return migration.Execution{}, err
@@ -506,11 +514,17 @@ func (f *migrationFixture) executeJob(request migration.ExecutionRequest) (migra
 	if err != nil {
 		return migration.Execution{}, err
 	}
-	if _, err := connection.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, key); err != nil {
+	acquire := func() (lockErr error) {
+		lockCtx, activity := telemetry.StartActivity(ctx, "migration_lock_acquire", slog.String("database_id", request.Plan.DatabaseID))
+		defer activity.End(&lockErr)
+		_, lockErr = connection.ExecContext(lockCtx, `SELECT pg_advisory_lock($1)`, key)
+		return lockErr
+	}
+	if err := acquire(); err != nil {
 		return migration.Execution{}, err
 	}
 	defer func() {
-		cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer stop()
 		_, _ = connection.ExecContext(cleanup, `SELECT pg_advisory_unlock($1)`, key)
 	}()

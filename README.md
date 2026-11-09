@@ -16,6 +16,8 @@ migration yang tercatat. PostgreSQL tetap menyimpan data platform.
   approval, queue/worker, serta integrasi SPA sedang dikembangkan.
 - Schema diff dari definisi JSON dan kandidat SQL untuk tabel/kolom yang belum
   ada; hasilnya dapat ditinjau dan diedit di editor sebelum dijalankan.
+- Structured log JSON, audit aktivitas, tracing HTTP/SQL, serta propagasi trace
+  pada payload pengajuan migration.
 - Preview execution plan melalui `EXPLAIN` dan `EXPLAIN ANALYZE` di editor
   migration PostgreSQL dan MySQL 8.4.
 
@@ -63,6 +65,8 @@ database target. Hak `view_only` dan `view_edit` diberikan kepada group.
 
 Detail konfigurasi ada di [Panduan database management](docs/database-management.md),
 [Access control](docs/access-control.md), dan [Migration](docs/migrations.md).
+Panduan atribut, redaction, contoh output, pengujian, dan status integrasi worker
+tersedia pada [Logging dan tracing](docs/logging-tracing.md).
 API definisi/revisi dan history Milestone 2 dapat digunakan setelah server
 berjalan. Pengajuan tindakan saat ini menghasilkan `503` sampai provider
 approval dan antrean dipasang. Editor frontend sedang disesuaikan dengan alur
