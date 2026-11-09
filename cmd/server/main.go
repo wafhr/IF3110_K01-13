@@ -12,6 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+
 	"github.com/wafhr/IF3110_K01-13/internal/access"
 	"github.com/wafhr/IF3110_K01-13/internal/app"
 	"github.com/wafhr/IF3110_K01-13/internal/config"
@@ -34,7 +37,7 @@ func main() {
 	slog.Info("server_stopped", "actor", "system", "status", "success")
 }
 
-func run() error {
+func run() (runErr error) {
 	if err := config.LoadDotEnv(); err != nil {
 		return err
 	}
@@ -44,6 +47,24 @@ func run() error {
 	}
 	slog.SetDefault(telemetry.NewLogger(os.Stdout, "server",
 		cfg.PlatformDatabaseURL, cfg.DatabaseEncryptionKey, cfg.BootstrapAdminPassword))
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		slog.Error("telemetry_failed", "actor", "system", "status", "failed", "error", err)
+	}))
+	tracerProvider, err := telemetry.NewTracerProvider(os.Stderr, "server",
+		cfg.PlatformDatabaseURL, cfg.DatabaseEncryptionKey, cfg.BootstrapAdminPassword)
+	if err != nil {
+		return err
+	}
+	otel.SetTracerProvider(tracerProvider)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	defer func() {
+		// Context shutdown terpisah agar pembatalan request tidak membatalkan flush.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		if err := tracerProvider.Shutdown(shutdownCtx); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("shutdown tracing: %w", err))
+		}
+	}()
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancelStartup()
 	db, err := platformdb.Open(startupCtx, cfg.PlatformDatabaseURL)

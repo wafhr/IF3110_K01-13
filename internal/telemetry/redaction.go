@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const Redacted = "[REDACTED]"
@@ -148,6 +150,44 @@ func (r *Redactor) redactJSON(value any) any {
 		return value
 	case string:
 		return r.String(value)
+	default:
+		return value
+	}
+}
+
+func (r *Redactor) traceAttributes(attrs []attribute.KeyValue) []attribute.KeyValue {
+	sanitized := append([]attribute.KeyValue(nil), attrs...)
+	for index, attr := range sanitized {
+		if sensitiveKey(string(attr.Key)) {
+			sanitized[index].Value = attribute.StringValue(Redacted)
+		} else {
+			sanitized[index].Value = r.traceValue(attr.Value)
+		}
+	}
+	return sanitized
+}
+
+func (r *Redactor) traceValue(value attribute.Value) attribute.Value {
+	switch value.Type() {
+	case attribute.STRING:
+		return attribute.StringValue(r.String(value.AsString()))
+	case attribute.STRINGSLICE:
+		values := value.AsStringSlice()
+		for index := range values {
+			values[index] = r.String(values[index])
+		}
+		return attribute.StringSliceValue(values)
+	case attribute.SLICE:
+		values := value.AsSlice()
+		for index := range values {
+			values[index] = r.traceValue(values[index])
+		}
+		return attribute.SliceValue(values...)
+	case attribute.MAP:
+		return attribute.MapValue(r.traceAttributes(value.AsMap())...)
+	case attribute.BYTESLICE:
+		// Data biner disamarkan karena isinya tidak memiliki label field.
+		return attribute.StringValue(Redacted)
 	default:
 		return value
 	}

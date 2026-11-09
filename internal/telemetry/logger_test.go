@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
@@ -129,5 +131,35 @@ func TestLoggerHandlerPreservesWriterErrors(t *testing.T) {
 	record := slog.NewRecord(time.Now(), slog.LevelInfo, "write_failed", 0)
 	if err := logger.Handler().Handle(context.Background(), record); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("error writer = %v", err)
+	}
+}
+
+func TestLoggerCorrelatesContextAfterWithAndWithGroup(t *testing.T) {
+	span := trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{1}, SpanID: trace.SpanID{2}})
+	ctx, cancel := context.WithCancel(trace.ContextWithSpanContext(context.Background(), span))
+	cancel()
+	var output bytes.Buffer
+	telemetry.NewLogger(&output, "server").With("actor", "user-1").WithGroup("request").With("database", "db-1").InfoContext(ctx, "query_completed")
+	record := decodeLog(t, output.Bytes())
+	request := record["request"].(map[string]any)
+	if record["actor"] != "user-1" || request["database"] != "db-1" || request["trace_id"] != span.TraceID().String() || request["span_id"] != span.SpanID().String() {
+		t.Fatal("logger turunan kehilangan atribut atau korelasi context yang dibatalkan")
+	}
+}
+
+func TestLoggerOmitsIDsWithoutValidSpan(t *testing.T) {
+	for _, ctx := range []context.Context{
+		context.Background(),
+		trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{1}})),
+	} {
+		var output bytes.Buffer
+		telemetry.NewLogger(&output, "server").InfoContext(ctx, "system_event")
+		record := decodeLog(t, output.Bytes())
+		if _, exists := record["trace_id"]; exists {
+			t.Fatal("trace_id palsu ditambahkan tanpa span valid")
+		}
+		if _, exists := record["span_id"]; exists {
+			t.Fatal("span_id palsu ditambahkan tanpa span valid")
+		}
 	}
 }
