@@ -5,12 +5,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
 	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 var errInvalidPlanQuery = errors.New("invalid or unsupported SQL for query plan preview")
@@ -22,14 +24,17 @@ type QueryPlan struct {
 	RolledBack bool            `json:"rolled_back"`
 }
 
-func (s *Service) Explain(ctx context.Context, databaseID, statement string, analyze bool) (QueryPlan, error) {
+func (s *Service) Explain(ctx context.Context, databaseID, statement string, analyze bool) (result QueryPlan, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "query_plan_preview", slog.String("database_id", databaseID), slog.Bool("analyze", analyze))
+	defer activity.End(&activityErr)
+
 	statement = strings.TrimSpace(statement)
 	if statement == "" || len(statement) > 1<<20 || strings.ContainsRune(statement, '\x00') {
 		return QueryPlan{}, errInvalidPlanQuery
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	db, dbms, err := s.target(ctx, databaseID)
+	db, dbms, err := s.openTarget(ctx, databaseID)
 	if err != nil {
 		return QueryPlan{}, planError(ctx, err, dbms)
 	}

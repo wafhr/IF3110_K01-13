@@ -10,9 +10,14 @@ migration yang tercatat. PostgreSQL tetap menyimpan data platform.
 - Pengelolaan user, group, dan grant database oleh Platform Admin.
 - Koneksi target PostgreSQL dan MySQL terenkripsi di platform registry.
 - Viewer untuk schema, table, column, constraint, index, dan data.
-- Editor SQL dan riwayat migration per database target.
+- Definisi dan revisi SQL up/down, perencanaan rollback/forward linear, dan
+  history commit PostgreSQL melalui API Milestone 2.
+- Kontrak pengajuan berapproval dan eksekusi melalui antrean. Provider produksi
+  approval, queue/worker, serta integrasi SPA sedang dikembangkan.
 - Schema diff dari definisi JSON dan kandidat SQL untuk tabel/kolom yang belum
   ada; hasilnya dapat ditinjau dan diedit di editor sebelum dijalankan.
+- Structured log JSON, audit aktivitas, tracing HTTP/SQL, serta propagasi trace
+  pada payload pengajuan migration.
 - Preview execution plan melalui `EXPLAIN` dan `EXPLAIN ANALYZE` di editor
   migration PostgreSQL dan MySQL 8.4.
 
@@ -60,8 +65,18 @@ database target. Hak `view_only` dan `view_edit` diberikan kepada group.
 
 Detail konfigurasi ada di [Panduan database management](docs/database-management.md),
 [Access control](docs/access-control.md), dan [Migration](docs/migrations.md).
+Panduan atribut, redaction, contoh output, pengujian, dan status integrasi worker
+tersedia pada [Logging dan tracing](docs/logging-tracing.md).
+API definisi/revisi dan history Milestone 2 dapat digunakan setelah server
+berjalan. Pengajuan tindakan saat ini menghasilkan `503` sampai provider
+approval dan antrean dipasang. Editor frontend sedang disesuaikan dengan alur
+baru. Detail endpoint, payload, kontrak worker, dan status integrasi tersedia
+pada panduan migration.
 
 ## Test
+
+Unit test (`*_test.go`) berada satu folder dengan package yang diuji.
+Folder `tests/` hanya berisi integration test.
 
 Jalankan unit dan test tanpa database:
 
@@ -76,13 +91,20 @@ test dan test (perintah environment berikut untuk PowerShell):
 docker compose -f compose.test.yaml up -d --wait
 $env:TEST_DATABASE_URL = 'postgres://if3110_test_admin:if3110-integration-password@localhost:55432/postgres?sslmode=disable'
 $env:TEST_MYSQL_DSN = 'if3110_test_admin:if3110-mysql-test-password@tcp(127.0.0.1:53306)/if3110_mysql_test?tls=false'
-go test -tags=integration ./tests/database_management/integration
+go test -tags=integration ./tests
 docker compose -f compose.test.yaml down -v
 ```
 
 Integration test membuat dan menghapus database serta role dengan prefix
 `if3110_it_` pada server tersebut. Gunakan hanya service test disposable, bukan
 server atau database yang menyimpan data penting. Lihat [panduan test integrasi](docs/database-management.md#integration-test).
+
+Untuk menjalankan integration test rollback/forward dan history PostgreSQL
+secara khusus setelah `TEST_DATABASE_URL` tersedia, gunakan perintah berikut.
+
+```powershell
+go test -tags=integration -count=1 ./tests -run '^TestMigration.*Integration$'
+```
 
 ## Struktur repo
 
@@ -95,29 +117,26 @@ internal/config/            konfigurasi environment
 internal/database/          registry target dan metadata domain
   schema.sql                tabel registry koneksi target
 internal/database/http/     API registry dan viewer
-internal/migration/         eksekusi migration; history dibuat pada tiap target
+internal/migration/         definisi/revisi, rollback/forward, history, dan kontrak eksekusi
 internal/platformdb/        koneksi database platform
 internal/targetdb/          pengelolaan koneksi target
 internal/targetdb/drivers/ komposisi dan pemilihan driver target
 internal/targetdb/mysql/    implementasi MySQL
 internal/targetdb/postgres/ implementasi PostgreSQL
 web/                        halaman, template, dan aset browser
-tests/access/                test access control
-tests/app/                   test routing aplikasi
-tests/config/                test konfigurasi
-tests/database_management/   unit dan integration test fitur database management
-tests/web/                   test handler dan aset frontend
+tests/                      integration test database management dan migration
 docs/                       panduan konfigurasi dan fitur
 ```
 
 Schema platform berada di dekat paket yang memilikinya dan di-embed oleh
-paket tersebut. Kedua `schema.sql` memiliki tabel dan siklus inisialisasi
-berbeda, jadi bukan salinan satu sama lain. Tabel `platform_migrations` berada
-di setiap database target dan dibuat oleh modul migration saat diperlukan.
+paket tersebut. Modul migration menyimpan `migration_definitions` dan
+`migration_revisions` pada platform. History commit PostgreSQL menggunakan
+`platform_migration_executions` pada target, sedangkan history Milestone 1
+menggunakan `platform_migrations`. Metadata target disiapkan saat diperlukan.
 
 Bonus DBMS tambahan yang didukung dan diuji adalah MySQL 8.4. Preview execution
 plan memakai format native tiap DBMS; MySQL ANALYZE hanya berlaku untuk
 statement yang didukung MySQL. Mode ANALYZE menjalankan SQL dan me-rollback
 perubahan transaksional; sequence/auto-increment dan efek eksternal dapat tetap
-berubah. Schema diff/generation belum diimplementasikan. Lihat
-[panduan preview plan](docs/migrations.md#query-plan-preview-explain).
+berubah. Lihat [panduan schema diff](docs/migrations.md#schema-diff-and-sql-generation)
+dan [preview plan](docs/migrations.md#query-plan-preview-explain).

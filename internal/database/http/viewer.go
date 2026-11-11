@@ -49,7 +49,7 @@ func (h *ViewerHandler) listAccessible(w http.ResponseWriter, r *http.Request) {
 	}
 	databases, err := h.registry.ListAccessible(r.Context(), user.ID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	if databases == nil {
@@ -61,7 +61,7 @@ func (h *ViewerHandler) listAccessible(w http.ResponseWriter, r *http.Request) {
 func (h *ViewerHandler) listSchemas(w http.ResponseWriter, r *http.Request) {
 	schemas, err := h.schemas.Schemas(r.Context(), r.PathValue("databaseID"))
 	if err != nil {
-		writeViewerError(w, err)
+		writeViewerError(w, r.Context(), err)
 		return
 	}
 	if schemas == nil {
@@ -73,7 +73,7 @@ func (h *ViewerHandler) listSchemas(w http.ResponseWriter, r *http.Request) {
 func (h *ViewerHandler) listTables(w http.ResponseWriter, r *http.Request) {
 	tables, err := h.schemas.Tables(r.Context(), r.PathValue("databaseID"), r.PathValue("schema"))
 	if err != nil {
-		writeViewerError(w, err)
+		writeViewerError(w, r.Context(), err)
 		return
 	}
 	if tables == nil {
@@ -85,13 +85,13 @@ func (h *ViewerHandler) listTables(w http.ResponseWriter, r *http.Request) {
 func (h *ViewerHandler) tableDetails(w http.ResponseWriter, r *http.Request) {
 	table, err := h.schemas.Table(r.Context(), r.PathValue("databaseID"), r.PathValue("schema"), r.PathValue("table"))
 	if err != nil {
-		writeViewerError(w, err)
+		writeViewerError(w, r.Context(), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"table": table})
 }
 
-func writeViewerError(w http.ResponseWriter, err error) {
+func writeViewerError(w http.ResponseWriter, ctx context.Context, err error) {
 	if errors.Is(err, targetdb.ErrPermissionDenied) {
 		writeError(w, http.StatusForbidden, "target database access denied")
 		return
@@ -100,5 +100,5 @@ func writeViewerError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "invalid schema or table name")
 		return
 	}
-	writeServiceError(w, err)
+	writeServiceError(w, ctx, err)
 }

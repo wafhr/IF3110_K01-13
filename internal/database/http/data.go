@@ -16,7 +16,7 @@ func (h *ViewerHandler) tableData(w http.ResponseWriter, r *http.Request) {
 	}
 	page, err := h.schemas.Data(r.Context(), r.PathValue("databaseID"), r.PathValue("schema"), r.PathValue("table"), options)
 	if err != nil {
-		writeViewerError(w, err)
+		writeViewerError(w, r.Context(), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": page})

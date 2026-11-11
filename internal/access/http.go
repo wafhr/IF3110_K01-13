@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 type HTTPHandler struct {
@@ -60,17 +62,18 @@ func (h *HTTPHandler) routes() {
 func (h *HTTPHandler) RequireDatabaseAccess(minimum Permission, next http.Handler) http.Handler {
 	return h.protected(false, true, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if minimum != ViewOnly && minimum != ViewEdit {
-			writeServiceError(w, ErrInvalidInput)
+			writeServiceError(w, r.Context(), ErrInvalidInput)
 			return
 		}
 		user := currentUser(r.Context())
 		permission, err := h.service.EffectivePermission(r.Context(), user.ID, r.PathValue("databaseID"))
 		if err != nil {
-			writeServiceError(w, err)
+			writeServiceError(w, r.Context(), err)
 			return
 		}
 		if permission == "" || (minimum == ViewEdit && permission != ViewEdit) {
-			writeServiceError(w, ErrForbidden)
+			slog.WarnContext(r.Context(), "access_denied", "reason", "database_permission_required", "required_permission", string(minimum), "status", "failed")
+			writeServiceError(w, r.Context(), ErrForbidden)
 			return
 		}
 		ctx := context.WithValue(r.Context(), databasePermissionKey{}, permission)
@@ -113,8 +116,10 @@ func (h *HTTPHandler) RequireBrowserPage(admin, csrfRequired bool, next http.Han
 
 func (h *HTTPHandler) protectedWithRedirect(admin, csrfRequired bool, next http.Handler, redirectToLogin bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(telemetry.WithLogAttrs(r.Context(), slog.String("database_id", r.PathValue("databaseID"))))
 		cookie, err := r.Cookie(sessionCookieName)
 		if err != nil {
+			slog.WarnContext(r.Context(), "access_denied", "reason", "session_required", "status", "failed")
 			if redirectToLogin {
 				http.Redirect(w, r, "/login", http.StatusSeeOther)
 				return
@@ -124,6 +129,7 @@ func (h *HTTPHandler) protectedWithRedirect(admin, csrfRequired bool, next http.
 		}
 		session, err := h.service.Authenticate(r.Context(), cookie.Value)
 		if errors.Is(err, ErrUnauthenticated) {
+			slog.WarnContext(r.Context(), "access_denied", "reason", "invalid_session", "status", "failed")
 			h.clearCookie(w, r)
 			if redirectToLogin {
 				http.Redirect(w, r, "/login", http.StatusSeeOther)
@@ -133,14 +139,16 @@ func (h *HTTPHandler) protectedWithRedirect(admin, csrfRequired bool, next http.
 			return
 		}
 		if err != nil {
-			slog.Error("access session lookup failed")
+			slog.ErrorContext(r.Context(), "session_lookup_failed", "status", "failed")
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
+		r = r.WithContext(telemetry.WithActor(r.Context(), session.User.ID))
 		if session.RotatedToken != "" {
 			h.setCookie(w, r, session.RotatedToken, session.AbsoluteExpiry)
 		}
 		if admin && !session.User.PlatformAdmin {
+			slog.WarnContext(r.Context(), "access_denied", "reason", "platform_admin_required", "status", "failed")
 			if redirectToLogin {
 				http.Redirect(w, r, "/", http.StatusSeeOther)
 				return
@@ -150,12 +158,14 @@ func (h *HTTPHandler) protectedWithRedirect(admin, csrfRequired bool, next http.
 		}
 		stateChanging := r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions
 		if csrfRequired && stateChanging && !h.validRequestOrigin(r) {
+			slog.WarnContext(r.Context(), "access_denied", "reason", "invalid_origin", "status", "failed")
 			writeError(w, http.StatusForbidden, "request origin rejected")
 			return
 		}
 		if csrfRequired && stateChanging {
 			r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 			if !validCSRF(requestCSRF(r), session.CSRFToken) {
+				slog.WarnContext(r.Context(), "access_denied", "reason", "invalid_csrf", "status", "failed")
 				writeError(w, http.StatusForbidden, "csrf token required")
 				return
 			}
@@ -174,6 +184,7 @@ const sessionCookieName = "platform_session"
 
 func (h *HTTPHandler) login(w http.ResponseWriter, r *http.Request) {
 	if !h.validRequestOrigin(r) {
+		slog.WarnContext(r.Context(), "auth_login_rejected", "reason", "invalid_origin", "status", "failed")
 		if isHTMLRequest(r) {
 			http.Redirect(w, r, "/login?notice=login-error", http.StatusSeeOther)
 			return
@@ -188,14 +199,17 @@ func (h *HTTPHandler) login(w http.ResponseWriter, r *http.Request) {
 	if isFormRequest(r) {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if r.ParseForm() != nil {
+			slog.WarnContext(r.Context(), "auth_login_rejected", "reason", "invalid_request", "status", "failed")
 			http.Redirect(w, r, "/login?notice=login-error", http.StatusSeeOther)
 			return
 		}
 		input.Username, input.Password = r.PostForm.Get("username"), r.PostForm.Get("password")
 	} else if !decodeJSON(w, r, &input) {
+		slog.WarnContext(r.Context(), "auth_login_rejected", "reason", "invalid_request", "status", "failed")
 		return
 	}
 	if input.Username == "" || input.Password == "" {
+		slog.WarnContext(r.Context(), "auth_login_rejected", "reason", "invalid_request", "status", "failed")
 		if isHTMLRequest(r) {
 			http.Redirect(w, r, "/login?notice=login-error", http.StatusSeeOther)
 			return
@@ -217,7 +231,7 @@ func (h *HTTPHandler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		slog.Error("access login failed")
+		slog.ErrorContext(r.Context(), "auth_login_failed", "status", "failed")
 		if isHTMLRequest(r) {
 			http.Error(w, "The page could not be loaded.", http.StatusInternalServerError)
 			return
@@ -227,7 +241,7 @@ func (h *HTTPHandler) login(w http.ResponseWriter, r *http.Request) {
 	}
 	if oldToken != "" {
 		if err := h.service.Logout(r.Context(), oldToken); err != nil {
-			slog.Error("revoke previous login session failed")
+			slog.ErrorContext(r.Context(), "previous_session_revoke_failed", "status", "failed")
 			if isHTMLRequest(r) {
 				http.Error(w, "The page could not be loaded.", http.StatusInternalServerError)
 				return
@@ -256,7 +270,7 @@ func (h *HTTPHandler) csrf(w http.ResponseWriter, r *http.Request) {
 func (h *HTTPHandler) logout(w http.ResponseWriter, r *http.Request) {
 	token, _ := r.Context().Value(sessionTokenContextKey{}).(string)
 	if err := h.service.Logout(r.Context(), token); err != nil {
-		slog.Error("access logout failed")
+		slog.ErrorContext(r.Context(), "auth_logout_failed", "status", "failed")
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -290,7 +304,7 @@ func requestCSRF(r *http.Request) string {
 func (h *HTTPHandler) listUsers(w http.ResponseWriter, r *http.Request) {
 	users, err := h.service.ListUsers(r.Context())
 	if err != nil {
-		internalError(w, "list users")
+		internalError(w, r.Context(), "list users")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": users})
@@ -335,7 +349,7 @@ func (h *HTTPHandler) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.service.UpdateUser(r.Context(), r.PathValue("userID"), *input.Active, *input.PlatformAdmin); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -344,7 +358,7 @@ func (h *HTTPHandler) updateUser(w http.ResponseWriter, r *http.Request) {
 func (h *HTTPHandler) listGroups(w http.ResponseWriter, r *http.Request) {
 	groups, err := h.service.ListGroups(r.Context())
 	if err != nil {
-		internalError(w, "list groups")
+		internalError(w, r.Context(), "list groups")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"groups": groups})
@@ -371,7 +385,7 @@ func (h *HTTPHandler) createGroup(w http.ResponseWriter, r *http.Request) {
 
 func (h *HTTPHandler) deleteGroup(w http.ResponseWriter, r *http.Request) {
 	if err := h.service.DeleteGroup(r.Context(), r.PathValue("groupID")); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -380,7 +394,7 @@ func (h *HTTPHandler) deleteGroup(w http.ResponseWriter, r *http.Request) {
 func (h *HTTPHandler) listGroupMembers(w http.ResponseWriter, r *http.Request) {
 	members, err := h.service.ListGroupMembers(r.Context(), r.PathValue("groupID"))
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"members": members})
@@ -389,7 +403,7 @@ func (h *HTTPHandler) listGroupMembers(w http.ResponseWriter, r *http.Request) {
 func (h *HTTPHandler) listDatabaseGrants(w http.ResponseWriter, r *http.Request) {
 	grants, err := h.service.ListDatabaseGrants(r.Context(), r.PathValue("groupID"))
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"databases": grants})
@@ -397,7 +411,7 @@ func (h *HTTPHandler) listDatabaseGrants(w http.ResponseWriter, r *http.Request)
 
 func (h *HTTPHandler) addMember(w http.ResponseWriter, r *http.Request) {
 	if err := h.service.SetMembership(r.Context(), r.PathValue("groupID"), r.PathValue("userID"), true); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -405,7 +419,7 @@ func (h *HTTPHandler) addMember(w http.ResponseWriter, r *http.Request) {
 
 func (h *HTTPHandler) removeMember(w http.ResponseWriter, r *http.Request) {
 	if err := h.service.SetMembership(r.Context(), r.PathValue("groupID"), r.PathValue("userID"), false); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -419,7 +433,7 @@ func (h *HTTPHandler) setPermission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.service.SetDatabasePermission(r.Context(), r.PathValue("groupID"), r.PathValue("databaseID"), input.Permission); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -427,7 +441,7 @@ func (h *HTTPHandler) setPermission(w http.ResponseWriter, r *http.Request) {
 
 func (h *HTTPHandler) deletePermission(w http.ResponseWriter, r *http.Request) {
 	if err := h.service.DeleteDatabasePermission(r.Context(), r.PathValue("groupID"), r.PathValue("databaseID")); err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -437,7 +451,7 @@ func (h *HTTPHandler) databaseAccess(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
 	permission, err := h.service.EffectivePermission(r.Context(), user.ID, r.PathValue("databaseID"))
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	if permission == "" {
@@ -538,12 +552,12 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-func internalError(w http.ResponseWriter, operation string) {
-	slog.Error("access operation failed", "operation", operation)
+func internalError(w http.ResponseWriter, ctx context.Context, operation string) {
+	slog.ErrorContext(ctx, "access_operation_failed", "operation", operation, "status", "failed")
 	writeError(w, http.StatusInternalServerError, "internal error")
 }
 
-func writeServiceError(w http.ResponseWriter, err error) {
+func writeServiceError(w http.ResponseWriter, ctx context.Context, err error) {
 	switch {
 	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
@@ -554,7 +568,7 @@ func writeServiceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrInvalidInput):
 		writeError(w, http.StatusBadRequest, "invalid request")
 	default:
-		slog.Error("access operation failed")
+		slog.ErrorContext(ctx, "access_operation_failed", "status", "failed")
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}
 }

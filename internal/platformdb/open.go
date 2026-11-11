@@ -6,17 +6,20 @@ import (
 	"errors"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 func Open(ctx context.Context, connectionURL string) (*sql.DB, error) {
 	if connectionURL == "" {
 		return nil, errors.New("PLATFORM_DATABASE_URL is required")
 	}
-	db, err := sql.Open("pgx", connectionURL)
+	config, err := pgx.ParseConfig(connectionURL)
 	if err != nil {
 		return nil, errors.New("configure platform database connection")
 	}
+	db := sql.OpenDB(telemetry.SQLConnector(stdlib.GetConnector(*config), "postgresql", "platform", config.Database))
 	db.SetMaxOpenConns(20)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(30 * time.Minute)

@@ -9,8 +9,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 //go:embed schema.sql
@@ -119,7 +122,10 @@ func (s *Service) Initialize(ctx context.Context, bootstrapUsername, bootstrapPa
 	return tx.Commit()
 }
 
-func (s *Service) Login(ctx context.Context, username, password string) (Session, error) {
+func (s *Service) Login(ctx context.Context, username, password string) (loginSession Session, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "auth_login", slog.String("actor", "anonymous"))
+	defer activity.End(&activityErr)
+
 	username, err := normalizeUsername(username)
 	if err != nil || password == "" {
 		// Keep the work factor similar for malformed and unknown accounts.
@@ -141,6 +147,8 @@ func (s *Service) Login(ctx context.Context, username, password string) (Session
 	if !verifyPassword(encoded, password) || !user.Active {
 		return Session{}, ErrUnauthenticated
 	}
+	ctx = telemetry.WithActor(ctx, user.ID)
+	activity.SetAttributes(slog.String("actor", user.ID))
 	now := s.now().UTC()
 	if _, err := s.db.ExecContext(ctx, `UPDATE access_sessions SET current_token_during_grace = NULL, current_token_grace_expires_at = NULL WHERE current_token_grace_expires_at <= $1`, now); err != nil {
 		return Session{}, fmt.Errorf("clean expired rotation tokens: %w", err)
@@ -162,7 +170,10 @@ func (s *Service) Login(ctx context.Context, username, password string) (Session
 	return Session{User: user, CSRFToken: csrf, RotatedToken: token, AbsoluteExpiry: now.Add(absoluteLifetime)}, nil
 }
 
-func (s *Service) Authenticate(ctx context.Context, token string) (Session, error) {
+func (s *Service) Authenticate(ctx context.Context, token string) (validatedSession Session, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "session_validate", slog.String("actor", "anonymous"))
+	defer activity.End(&activityErr)
+
 	if token == "" {
 		return Session{}, ErrUnauthenticated
 	}
@@ -203,6 +214,8 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Session, erro
 		}
 		return Session{}, ErrUnauthenticated
 	}
+	ctx = telemetry.WithActor(ctx, session.User.ID)
+	activity.SetAttributes(slog.String("actor", session.User.ID))
 	if isCurrent && !now.Before(rotatedAt.Add(rotationInterval)) {
 		next, err := randomToken()
 		if err != nil {
@@ -228,7 +241,10 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Session, erro
 	return session, nil
 }
 
-func (s *Service) Logout(ctx context.Context, token string) error {
+func (s *Service) Logout(ctx context.Context, token string) (activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "auth_logout")
+	defer activity.End(&activityErr)
+
 	if token == "" {
 		return nil
 	}
@@ -238,7 +254,10 @@ func (s *Service) Logout(ctx context.Context, token string) error {
 	return nil
 }
 
-func (s *Service) CreateUser(ctx context.Context, username, password string, platformAdmin bool) (User, error) {
+func (s *Service) CreateUser(ctx context.Context, username, password string, platformAdmin bool) (createdUser User, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "user_create", slog.Bool("platform_admin", platformAdmin))
+	defer activity.End(&activityErr)
+
 	username, err := normalizeUsername(username)
 	if err != nil {
 		return User{}, err
@@ -259,10 +278,14 @@ func (s *Service) CreateUser(ctx context.Context, username, password string, pla
 		}
 		return User{}, fmt.Errorf("create user: %w", err)
 	}
+	activity.SetAttributes(slog.String("user_id", user.ID))
 	return user, nil
 }
 
-func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
+func (s *Service) ListUsers(ctx context.Context) (result []User, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "users_list")
+	defer activity.End(&activityErr)
+
 	rows, err := s.db.QueryContext(ctx, `SELECT id::text, username, is_platform_admin, is_active, created_at FROM access_users ORDER BY username`)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
@@ -279,7 +302,10 @@ func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
 	return users, rows.Err()
 }
 
-func (s *Service) UpdateUser(ctx context.Context, id string, active, platformAdmin bool) error {
+func (s *Service) UpdateUser(ctx context.Context, id string, active, platformAdmin bool) (activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "user_update", slog.String("user_id", id), slog.Bool("active", active), slog.Bool("platform_admin", platformAdmin))
+	defer activity.End(&activityErr)
+
 	if !validUUID(id) {
 		return ErrNotFound
 	}
@@ -325,7 +351,10 @@ func (s *Service) UpdateUser(ctx context.Context, id string, active, platformAdm
 	return tx.Commit()
 }
 
-func (s *Service) CreateGroup(ctx context.Context, name string) (Group, error) {
+func (s *Service) CreateGroup(ctx context.Context, name string) (createdGroup Group, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "group_create")
+	defer activity.End(&activityErr)
+
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 100 {
 		return Group{}, errors.New("group name must contain 1 to 100 characters")
@@ -338,10 +367,14 @@ func (s *Service) CreateGroup(ctx context.Context, name string) (Group, error) {
 		}
 		return Group{}, fmt.Errorf("create group: %w", err)
 	}
+	activity.SetAttributes(slog.String("group_id", group.ID))
 	return group, nil
 }
 
-func (s *Service) ListGroups(ctx context.Context) ([]Group, error) {
+func (s *Service) ListGroups(ctx context.Context) (result []Group, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "groups_list")
+	defer activity.End(&activityErr)
+
 	rows, err := s.db.QueryContext(ctx, `SELECT id::text, name, created_at FROM access_groups ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list groups: %w", err)
@@ -358,7 +391,10 @@ func (s *Service) ListGroups(ctx context.Context) ([]Group, error) {
 	return groups, rows.Err()
 }
 
-func (s *Service) ListGroupMembers(ctx context.Context, groupID string) ([]GroupMember, error) {
+func (s *Service) ListGroupMembers(ctx context.Context, groupID string) (result []GroupMember, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "group_members_list", slog.String("group_id", groupID))
+	defer activity.End(&activityErr)
+
 	if !validUUID(groupID) {
 		return nil, ErrNotFound
 	}
@@ -388,7 +424,10 @@ func (s *Service) ListGroupMembers(ctx context.Context, groupID string) ([]Group
 	return members, nil
 }
 
-func (s *Service) ListDatabaseGrants(ctx context.Context, groupID string) ([]DatabaseGrant, error) {
+func (s *Service) ListDatabaseGrants(ctx context.Context, groupID string) (result []DatabaseGrant, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "database_permissions_list", slog.String("group_id", groupID))
+	defer activity.End(&activityErr)
+
 	if !validUUID(groupID) {
 		return nil, ErrNotFound
 	}
@@ -418,7 +457,10 @@ func (s *Service) ListDatabaseGrants(ctx context.Context, groupID string) ([]Dat
 	return grants, nil
 }
 
-func (s *Service) DeleteGroup(ctx context.Context, groupID string) error {
+func (s *Service) DeleteGroup(ctx context.Context, groupID string) (activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "group_delete", slog.String("group_id", groupID))
+	defer activity.End(&activityErr)
+
 	if !validUUID(groupID) {
 		return ErrNotFound
 	}
@@ -444,7 +486,10 @@ func (s *Service) DeleteGroup(ctx context.Context, groupID string) error {
 	return tx.Commit()
 }
 
-func (s *Service) SetMembership(ctx context.Context, groupID, userID string, member bool) error {
+func (s *Service) SetMembership(ctx context.Context, groupID, userID string, member bool) (activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "group_membership_set", slog.String("group_id", groupID), slog.String("user_id", userID), slog.Bool("member", member))
+	defer activity.End(&activityErr)
+
 	if !validUUID(groupID) || !validUUID(userID) {
 		return ErrNotFound
 	}
@@ -478,10 +523,14 @@ func (s *Service) SetMembership(ctx context.Context, groupID, userID string, mem
 	return tx.Commit()
 }
 
-func (s *Service) SetDatabasePermission(ctx context.Context, groupID, databaseID string, permission Permission) error {
+func (s *Service) SetDatabasePermission(ctx context.Context, groupID, databaseID string, permission Permission) (activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "database_permission_set", slog.String("group_id", groupID), slog.String("database_id", databaseID))
+	defer activity.End(&activityErr)
+
 	if !validUUID(groupID) || !validUUID(databaseID) || (permission != ViewOnly && permission != ViewEdit) {
 		return ErrInvalidInput
 	}
+	activity.SetAttributes(slog.String("permission", string(permission)))
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -519,7 +568,10 @@ func (s *Service) SetDatabasePermission(ctx context.Context, groupID, databaseID
 	return tx.Commit()
 }
 
-func (s *Service) DeleteDatabasePermission(ctx context.Context, groupID, databaseID string) error {
+func (s *Service) DeleteDatabasePermission(ctx context.Context, groupID, databaseID string) (activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "database_permission_delete", slog.String("group_id", groupID), slog.String("database_id", databaseID))
+	defer activity.End(&activityErr)
+
 	if !validUUID(groupID) || !validUUID(databaseID) {
 		return ErrNotFound
 	}
@@ -579,6 +631,7 @@ func (s *Service) EffectivePermission(ctx context.Context, userID, databaseID st
 	err := s.db.QueryRowContext(ctx, `
 		SELECT CASE WHEN bool_or(p.permission = 'view_edit') THEN 'view_edit' ELSE 'view_only' END
 		FROM access_group_members m
+		JOIN access_users u ON u.id = m.user_id AND u.is_active
 		JOIN access_group_database_permissions p ON p.group_id = m.group_id
 		WHERE m.user_id = $1 AND p.database_id = $2
 		HAVING count(*) > 0`, userID, databaseID).Scan(&permission)
@@ -596,7 +649,10 @@ func (s *Service) EffectivePermission(ctx context.Context, userID, databaseID st
 
 // AuthorizeDatabase applies group-derived permissions to an individual action.
 // Platform-admin status intentionally does not grant database access.
-func (s *Service) AuthorizeDatabase(ctx context.Context, userID, databaseID string, minimum Permission) error {
+func (s *Service) AuthorizeDatabase(ctx context.Context, userID, databaseID string, minimum Permission) (activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "database_authorize", slog.String("actor", userID), slog.String("database_id", databaseID))
+	defer activity.End(&activityErr)
+
 	if minimum != ViewOnly && minimum != ViewEdit {
 		return ErrInvalidInput
 	}

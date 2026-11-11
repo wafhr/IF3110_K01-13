@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 type Options struct {
@@ -54,7 +55,9 @@ func NewConnector(options Options) (*Connector, error) {
 	if options.MaxIdleConns > options.MaxOpenConns {
 		return nil, errors.New("target idle connections must not exceed maximum open connections")
 	}
-	return &Connector{options: options, openDB: func(config pgx.ConnConfig) *sql.DB { return stdlib.OpenDB(config) }}, nil
+	return &Connector{options: options, openDB: func(config pgx.ConnConfig) *sql.DB {
+		return sql.OpenDB(telemetry.SQLConnector(stdlib.GetConnector(config), "postgresql", "target", config.Database))
+	}}, nil
 }
 
 func (c *Connector) Open(ctx context.Context, settings database.ConnectionConfig) (*sql.DB, error) {
