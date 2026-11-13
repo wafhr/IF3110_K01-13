@@ -5,6 +5,20 @@ sessions in the PostgreSQL platform database. A database grant refers to the
 UUID used by the database-management module; this module does not store target
 database connection details.
 
+## Code layout
+
+Principal identification and permission rules live in separate files of
+`internal/access`:
+
+| File | Responsibility |
+|---|---|
+| `session.go` | Login, session validation, idle and absolute expiry, rotation, logout, and session revocation scopes |
+| `authorization.go` | Permission levels, group database grants, effective permission, and `AuthorizeDatabase` |
+| `service.go` | Users, groups, memberships, and the bootstrap Platform Admin |
+| `password.go` | PBKDF2 password hashing and verification |
+| `validate.go` | Input normalization and validation errors |
+| `http.go` | JSON API, authentication middleware, CSRF and origin checks |
+
 ## Configuration and bootstrap
 
 Set `PLATFORM_DATABASE_URL` to the platform database connection string. On an
@@ -33,9 +47,17 @@ cookie with the Secure attribute.
   the updated cookie. It is no longer accepted after 30 seconds and is cleared
   on the next authenticated request for that session or during a later login's
   cleanup.
-- Login and privilege increases rotate the identifier. The previous identifier
-  works for the grace window. Logout, user disablement, and access reductions
-  revoke affected sessions immediately.
+- Login creates a new identifier and revokes the identifier sent with the login
+  request.
+- Privilege increases (new grant, View Only to View + Edit, group membership,
+  activation, or Platform Admin promotion) mark the affected sessions. The next
+  authenticated request of each session rotates its identifier before the
+  handler runs and returns the new value through `Set-Cookie`. Rotation happens
+  on that request rather than inside the admin request because only the
+  affected browser can receive the new cookie; rotating immediately would leave
+  idle users with an identifier that expires after the grace window.
+- Logout, user disablement, permission downgrades, grant removal, membership
+  removal, and group deletion revoke the affected sessions immediately.
 - An admin cannot disable or demote the current account or the last active
   Platform Admin.
 - Passwords use PBKDF2-HMAC-SHA256 with a per-password random salt and 600,000
@@ -46,6 +68,12 @@ cookie with the Secure attribute.
 JSON request and response bodies are used. Login accepts credentials in the
 request body; it never returns the session identifier in JSON. The browser gets
 it only through `Set-Cookie`.
+
+Errors use `{"error":"..."}`. Validation failures return `400` with the rule
+that was violated, unknown or invalid IDs return `404`, duplicates and admin
+safeguards return `409`, and storage failures return `500` with
+`internal error` only. Removing a membership or grant that does not exist
+returns `404` and leaves sessions untouched.
 
 | Method and path | Purpose |
 |---|---|
@@ -71,6 +99,12 @@ After login, clients fetch `/auth/csrf` and send the returned token in
 `X-CSRF-Token` on every state-changing authenticated request. Browser requests
 with a cross-site Fetch Metadata value or mismatched `Origin` are rejected.
 
+The frontend must reach the API from the same origin as the backend. In
+production the Go server serves the built SPA. During development a dev-server
+proxy must forward the browser's `Host` unchanged (for Vite, keep
+`changeOrigin` disabled) so the `Origin` check still matches. Cross-origin API
+access and CORS are intentionally not enabled.
+
 `View + Edit` wins when several groups grant different levels for the same
 database. Platform Admin status controls platform-management endpoints only;
 it does not itself grant access to target database contents.
@@ -92,3 +126,20 @@ migration page at `/workspace/databases/{databaseID}/migrations`.
 Browser forms send a session-bound CSRF token. The browser interface and JSON
 API use the same backend authorization checks. Page handlers, templates, and
 static assets live in `web/`.
+
+## Tests
+
+Unit tests in `internal/access` use a fake SQL driver and a fixed clock to cover
+password hashing, validation, session expiry and rotation, permission
+resolution, session effects of admin changes, and HTTP guards.
+
+`tests/access_control_test.go` runs against PostgreSQL and the real HTTP stack.
+It covers login, hashed storage, logout, idle timeout, absolute expiration,
+periodic rotation with its grace period, rotation after privilege increases,
+CSRF and origin rejection, effective access across groups, and revocation after
+access reductions.
+
+```sh
+go test ./internal/access
+go test -tags=integration -count=1 ./tests -run '^TestAccessControl'
+```
