@@ -56,8 +56,8 @@ func (c stubConn) QueryContext(_ context.Context, query string, args []driver.Na
 		}
 		now := time.Now().UTC()
 		return &stubRows{
-			columns: []string{"token_hash", "is_current", "grace_token", "grace_expiry", "csrf_token", "last_seen", "rotated_at", "absolute_expiry", "user_id", "username", "is_admin", "is_active", "created_at"},
-			values:  [][]driver.Value{{providedHash, true, nil, nil, "test-csrf", now, now, now.Add(time.Hour), testUserID, "reader", c.config.platformAdmin, true, now}},
+			columns: []string{"token_hash", "is_current", "grace_token", "grace_expiry", "csrf_token", "last_seen", "rotated_at", "rotation_required", "absolute_expiry", "user_id", "username", "is_admin", "is_active", "created_at"},
+			values:  [][]driver.Value{{providedHash, true, nil, nil, "test-csrf", now, now, false, now.Add(time.Hour), testUserID, "reader", c.config.platformAdmin, true, now}},
 		}, nil
 	case strings.Contains(query, "bool_or(p.permission = 'view_edit')"):
 		rows := &stubRows{columns: []string{"permission"}}

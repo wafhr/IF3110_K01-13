@@ -37,11 +37,13 @@ CREATE TABLE IF NOT EXISTS access_sessions (
     created_at TIMESTAMPTZ NOT NULL,
     last_seen_at TIMESTAMPTZ NOT NULL,
     rotated_at TIMESTAMPTZ NOT NULL,
+    rotation_required BOOLEAN NOT NULL DEFAULT FALSE,
     absolute_expires_at TIMESTAMPTZ NOT NULL
 );
 
 ALTER TABLE access_sessions ADD COLUMN IF NOT EXISTS current_token_during_grace TEXT;
 ALTER TABLE access_sessions ADD COLUMN IF NOT EXISTS current_token_grace_expires_at TIMESTAMPTZ;
+ALTER TABLE access_sessions ADD COLUMN IF NOT EXISTS rotation_required BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS access_sessions_user_id_idx ON access_sessions(user_id);
 CREATE INDEX IF NOT EXISTS access_group_members_user_id_idx ON access_group_members(user_id);
