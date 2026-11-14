@@ -52,7 +52,8 @@ func NewExecutor(openTarget migration.TargetOpener, preparer Preparer) (*Executo
 
 // Run returns the committed execution. When the target already holds commit
 // evidence for the execution ID, it returns that record without running SQL.
-func (e *Executor) Run(ctx context.Context, request migration.ExecutionRequest) (migration.Execution, error) {
+// Batch migrations report their committed progress through report.
+func (e *Executor) Run(ctx context.Context, request migration.ExecutionRequest, report ProgressFunc) (migration.Execution, error) {
 	db, dbms, err := e.openTarget(ctx, request.Plan.DatabaseID)
 	if err != nil {
 		return migration.Execution{}, err
@@ -71,6 +72,9 @@ func (e *Executor) Run(ctx context.Context, request migration.ExecutionRequest) 
 		return migration.Execution{}, err
 	}
 	defer unlock()
+	if request.Plan.Batch.Enabled() {
+		return e.runBatches(ctx, conn, request, report)
+	}
 	return e.execute(ctx, conn, request)
 }
 

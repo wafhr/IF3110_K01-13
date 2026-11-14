@@ -26,15 +26,19 @@ var (
 	ErrNoJob      = errors.New("no job available")
 	ErrLeaseLost  = errors.New("job lease lost")
 	ErrConflict   = errors.New("job conflicts with the stored execution")
+	ErrNotPartial = errors.New("only partial jobs can be resumed")
 	ErrInvalidJob = errors.New("invalid job")
 )
 
 // Terminal reports whether the queue will never hand the job out again.
 func (s Status) Terminal() bool { return s == Succeeded || s == Failed }
 
+// Progress counts the batches and rows already committed by a batch migration
+// out of the TotalRows fixed when its scope was determined.
 type Progress struct {
 	CommittedBatches int64 `json:"committed_batches"`
 	CommittedRows    int64 `json:"committed_rows"`
+	TotalRows        int64 `json:"total_rows"`
 }
 
 // Job is one queued execution. Request holds the reviewed snapshot that the

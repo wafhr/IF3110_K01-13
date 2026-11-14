@@ -129,8 +129,13 @@ func (f *migrationFixture) workerExecutor(t *testing.T, outages *atomic.Int32) *
 	return executor
 }
 
-// processJob runs a worker until the job of request reaches a final status.
+// processJob runs a worker until the job of request is final or partial.
 func (f *migrationFixture) processJob(t *testing.T, runner worker.Runner, request migration.ExecutionRequest) job.Job {
+	t.Helper()
+	return f.processJobWithin(t, runner, request, 15*time.Second)
+}
+
+func (f *migrationFixture) processJobWithin(t *testing.T, runner worker.Runner, request migration.ExecutionRequest, limit time.Duration) job.Job {
 	t.Helper()
 	consumer, err := worker.New(f.jobs, runner, worker.Config{
 		ID: "integration-worker", Concurrency: 2, PollInterval: 20 * time.Millisecond, Lease: 3 * time.Second,
@@ -149,13 +154,13 @@ func (f *migrationFixture) processJob(t *testing.T, runner worker.Runner, reques
 		}
 	}()
 	queued := f.jobFor(t, request.ExecutionID)
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(limit)
 	for time.Now().Before(deadline) {
 		current, err := f.jobs.Get(context.Background(), queued.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if current.Status.Terminal() {
+		if current.Status.Terminal() || current.Status == job.Partial {
 			return current
 		}
 		time.Sleep(20 * time.Millisecond)

@@ -31,7 +31,7 @@ func jobRow(t *testing.T, request migration.ExecutionRequest, status Status, att
 	if attempts > 0 {
 		startedAt = testCreatedAt.Add(time.Second)
 	}
-	return []driver.Value{testJobID, payload, string(status), attempts, int64(0), int64(0), "", testCreatedAt, testCreatedAt, startedAt, nil}
+	return []driver.Value{testJobID, payload, string(status), attempts, int64(0), int64(0), int64(0), "", testCreatedAt, testCreatedAt, startedAt, nil}
 }
 
 func TestNewRepositoryRequiresDatabase(t *testing.T) {
@@ -145,6 +145,12 @@ func TestLeasedTransitions(t *testing.T) {
 		"retry": func(r *Repository, id string) error {
 			return r.Retry(context.Background(), id, testWorkerID, "connection reset", 2*time.Second)
 		},
+		"progress": func(r *Repository, id string) error {
+			return r.UpdateProgress(context.Background(), id, testWorkerID, Progress{CommittedBatches: 2, CommittedRows: 2000, TotalRows: 5000})
+		},
+		"partial": func(r *Repository, id string) error {
+			return r.MarkPartial(context.Background(), id, testWorkerID, "SQLSTATE 22012: division by zero")
+		},
 	}
 	for name, transition := range transitions {
 		t.Run(name, func(t *testing.T) {
@@ -231,5 +237,44 @@ func TestListByDatabase(t *testing.T) {
 		if _, err := repository.ListByDatabase(context.Background(), testDatabaseID, limit); !errors.Is(err, ErrInvalidJob) {
 			t.Fatalf("limit %d returned %v", limit, err)
 		}
+	}
+}
+
+func TestProgressAndPartialArguments(t *testing.T) {
+	database := &stubDatabase{}
+	repository := database.repository(t)
+	if err := repository.UpdateProgress(context.Background(), testJobID, testWorkerID, Progress{CommittedBatches: 2, CommittedRows: 2000, TotalRows: 5000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.MarkPartial(context.Background(), testJobID, testWorkerID, "division by zero"); err != nil {
+		t.Fatal(err)
+	}
+	updates := database.executed("UPDATE migration_jobs")
+	if args := updates[0].args; args[2] != int64(2) || args[3] != int64(2000) || args[4] != int64(5000) {
+		t.Fatalf("progress arguments = %v", args)
+	}
+	if !strings.Contains(updates[1].query, "status = 'partial'") || updates[1].args[2] != "division by zero" {
+		t.Fatalf("partial update = %+v", updates[1])
+	}
+}
+
+func TestResume(t *testing.T) {
+	resumed := &stubDatabase{}
+	if err := resumed.repository(t).Resume(context.Background(), testJobID); err != nil {
+		t.Fatal(err)
+	}
+	if update := resumed.executed("WHERE id = $1 AND status = 'partial'"); len(update) != 1 || !strings.Contains(update[0].query, "attempts = 0") {
+		t.Fatalf("resume statements = %+v", update)
+	}
+	running := (&stubDatabase{}).onExec("status = 'partial'", 0).onQuery(jobByID, jobRow(t, testRequest(), Running, 1))
+	if err := running.repository(t).Resume(context.Background(), testJobID); !errors.Is(err, ErrNotPartial) {
+		t.Fatalf("resuming a running job returned %v", err)
+	}
+	missing := (&stubDatabase{}).onExec("status = 'partial'", 0).onQuery(jobByID)
+	if err := missing.repository(t).Resume(context.Background(), testJobID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("resuming a missing job returned %v", err)
+	}
+	if err := (&stubDatabase{}).repository(t).Resume(context.Background(), "job"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("resuming a malformed ID returned %v", err)
 	}
 }

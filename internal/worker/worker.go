@@ -36,14 +36,16 @@ var errWorkerStopping = errors.New("worker stopped before the attempt finished")
 type Queue interface {
 	Claim(ctx context.Context, workerID string, lease time.Duration) (job.Job, error)
 	Heartbeat(ctx context.Context, jobID, workerID string, lease time.Duration) error
+	UpdateProgress(ctx context.Context, jobID, workerID string, progress job.Progress) error
 	Complete(ctx context.Context, jobID, workerID string) error
 	Fail(ctx context.Context, jobID, workerID, reason string) error
+	MarkPartial(ctx context.Context, jobID, workerID, reason string) error
 	Retry(ctx context.Context, jobID, workerID, reason string, delay time.Duration) error
 	Release(ctx context.Context, jobID, workerID string) error
 }
 
 type Runner interface {
-	Run(context.Context, migration.ExecutionRequest) (migration.Execution, error)
+	Run(context.Context, migration.ExecutionRequest, ProgressFunc) (migration.Execution, error)
 }
 
 type Config struct {
@@ -122,14 +124,24 @@ func (w *Worker) process(ctx context.Context, claimed job.Job) {
 	attemptCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	heartbeat := w.keepLease(attemptCtx, claimed.ID, cancel)
+	progress := claimed.Progress
+	report := func(latest job.Progress) {
+		progress = latest
+		if err := w.queue.UpdateProgress(attemptCtx, claimed.ID, w.config.ID, latest); errors.Is(err, job.ErrLeaseLost) {
+			cancel(job.ErrLeaseLost)
+		} else if err != nil {
+			slog.WarnContext(attemptCtx, "job_progress_update_failed", "job_id", claimed.ID, "status", "failed", "error", err)
+		}
+	}
 	var execution migration.Execution
 	runErr := TraceAttempt(attemptCtx, claimed.Request, claimed.ID, claimed.Attempts, func(ctx context.Context) (err error) {
-		execution, err = w.runner.Run(ctx, claimed.Request)
+		execution, err = w.runner.Run(ctx, claimed.Request, report)
 		return err
 	})
 	interruption := context.Cause(attemptCtx)
 	cancel(nil)
 	heartbeat.Wait()
+	claimed.Progress = progress
 	w.settle(ctx, claimed, execution, runErr, interruption)
 }
 
@@ -177,6 +189,10 @@ func (w *Worker) settle(ctx context.Context, claimed job.Job, execution migratio
 		if decision.Retry {
 			err = w.queue.Retry(ctx, claimed.ID, w.config.ID, decision.Reason, decision.Delay)
 			slog.WarnContext(ctx, "job_retry_scheduled", "status", "failed", "reason", decision.Reason, "retry_delay_ms", decision.Delay.Milliseconds())
+		} else if claimed.Progress.CommittedBatches > 0 {
+			err = w.queue.MarkPartial(ctx, claimed.ID, w.config.ID, decision.Reason)
+			slog.ErrorContext(ctx, "job_partial", "status", "failed", "reason", decision.Reason,
+				"committed_batches", claimed.Progress.CommittedBatches, "committed_rows", claimed.Progress.CommittedRows)
 		} else {
 			err = w.queue.Fail(ctx, claimed.ID, w.config.ID, decision.Reason)
 			slog.ErrorContext(ctx, "job_failed", "status", "failed", "reason", decision.Reason)

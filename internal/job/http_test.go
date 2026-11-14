@@ -19,10 +19,16 @@ func (g guardFunc) RequireDatabaseAccess(minimum access.Permission, next http.Ha
 
 func allowGuard(t *testing.T) DatabaseGuard {
 	return guardFunc(func(minimum access.Permission, next http.Handler) http.Handler {
-		if minimum != access.ViewOnly {
-			t.Errorf("job route requires %q, want view_only", minimum)
-		}
-		return next
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			want := access.ViewOnly
+			if r.Method == http.MethodPost {
+				want = access.ViewEdit
+			}
+			if minimum != want {
+				t.Errorf("%s %s requires %q, want %q", r.Method, r.URL.Path, minimum, want)
+			}
+			next.ServeHTTP(w, r)
+		})
 	})
 }
 
@@ -35,9 +41,13 @@ func denyGuard() DatabaseGuard {
 }
 
 func serve(t *testing.T, store Store, guard DatabaseGuard, path string) *httptest.ResponseRecorder {
+	return serveMethod(t, store, guard, http.MethodGet, path)
+}
+
+func serveMethod(t *testing.T, store Store, guard DatabaseGuard, method, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	response := httptest.NewRecorder()
-	NewHTTPHandler(newTestService(t, store), guard).ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+	NewHTTPHandler(newTestService(t, store), guard).ServeHTTP(response, httptest.NewRequest(method, path, nil))
 	return response
 }
 
@@ -123,5 +133,31 @@ func TestListJobs(t *testing.T) {
 				t.Fatalf("jobs = %+v, %v; limit %d", body.Jobs, err, store.listedLimit)
 			}
 		})
+	}
+}
+
+func TestResumeJob(t *testing.T) {
+	path := "/databases/" + testDatabaseID + "/jobs/" + testJobID + "/resume"
+	tests := []struct {
+		name       string
+		job        Job
+		wantStatus int
+	}{
+		{name: "partial job is queued again", job: partialJob(), wantStatus: http.StatusAccepted},
+		{name: "running job cannot be resumed", job: queuedJob(), wantStatus: http.StatusConflict},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := serveMethod(t, newFakeStore(test.job), allowGuard(t), http.MethodPost, path)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body %s", response.Code, test.wantStatus, response.Body.String())
+			}
+			if test.wantStatus == http.StatusAccepted && !strings.Contains(response.Body.String(), `"status":"pending"`) {
+				t.Fatalf("resume response = %s", response.Body.String())
+			}
+		})
+	}
+	if response := serveMethod(t, newFakeStore(partialJob()), denyGuard(), http.MethodPost, path); response.Code != http.StatusForbidden {
+		t.Fatalf("resume without edit access = %d", response.Code)
 	}
 }

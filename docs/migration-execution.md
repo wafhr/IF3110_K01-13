@@ -18,7 +18,7 @@ database, so jobs survive server and worker restarts.
 | `payload` | Complete `migration.ExecutionRequest`, including the reviewed plan, SQL, and W3C trace context |
 | `status` | `pending`, `running`, `partial`, `succeeded`, or `failed` |
 | `attempts`, `last_error`, `available_at` | Attempt count, last failure reason, and next retry time |
-| `committed_batches`, `committed_rows` | Committed progress of batch migrations |
+| `committed_batches`, `committed_rows`, `total_rows` | Committed progress of batch migrations |
 | `lease_owner`, `lease_expires_at` | Worker currently holding a running job |
 
 Queue rules:
@@ -108,15 +108,115 @@ so a migration whose result is not yet certain blocks the next one.
   within `SHUTDOWN_TIMEOUT`, and returns unfinished jobs to the queue without
   counting the interrupted attempt against `WORKER_MAX_ATTEMPTS`.
 
+## Batch migrations
+
+A migration revision with a `batch` setting runs per key range. The SQL must be
+a single statement designed for batching: it receives the first and last key
+of a batch as `$1` and `$2`, and both are inclusive.
+
+```json
+{
+  "name": "raise balances",
+  "sql_up": "UPDATE public.accounts SET balance_cents = balance_cents + 100 WHERE id BETWEEN $1 AND $2",
+  "sql_down": "UPDATE public.accounts SET balance_cents = balance_cents - 100 WHERE id BETWEEN $1 AND $2",
+  "batch": {"table": "public.accounts", "key_column": "id", "size": 10000}
+}
+```
+
+- `table` is `table` or `schema.table`; `key_column` must be unique and never
+  change, typically the primary key. Rows whose key is NULL are never
+  processed. `size` is 1 to 100,000 rows.
+- The batch settings belong to the immutable revision, so they are reviewed
+  and approved together with the SQL.
+
+### Execution
+
+The worker holds the database advisory lock for the whole job, so no other
+migration of the database runs between batch commits.
+
+1. On the first attempt the scope is fixed: the current highest key and the
+   row count. Rows inserted later above that key are never processed.
+2. Each batch runs in its own transaction: `PrepareExecution` revalidates
+   permission, approval, and the plan; the next range is read with
+   `key > last_key AND key <= scope_end ORDER BY key LIMIT size`; the SQL runs
+   for that range; the checkpoint row is inserted; then the transaction commits.
+3. Only key boundaries are read, never whole rows, so memory use does not grow
+   with the table.
+4. When no range is left, a final transaction writes the execution history and
+   marks the scope completed. History therefore contains the migration once,
+   only after every batch committed.
+
+### Checkpoints
+
+The worker creates two tables next to `platform_migration_executions` on the
+target the first time a batch migration runs there; later attempts only read
+and write them:
+
+| Table | Content |
+|---|---|
+| `platform_migration_batch_scopes` | Execution, migration, revision, batch settings, `scope_end`, `total_rows`, `status` (`running`/`completed`) |
+| `platform_migration_batches` | One row per committed batch: number, `first_key`, `last_key`, `row_count`, commit time |
+
+A batch row is written in the transaction of the batch it describes, so it is
+the commit evidence of that batch. A new attempt continues after the last
+batch row: committed batches never run twice, even after a worker crash, a
+lost commit response, or a duplicate job delivery. The stored ranges are the
+row scope that batch compensation uses.
+
+### Progress, partial status, and resume
+
+- After every batch commit the job's `progress` shows `committed_batches`,
+  `committed_rows`, and `total_rows`.
+- A transient failure is retried from the checkpoint. If a batch fails
+  permanently, or retries run out, after at least one batch committed, the job
+  becomes `partial`: committed batches stay, the failed batch is rolled back,
+  and `last_error` describes the failure.
+- A `partial` job holds every later job of the same database.
+- `POST /databases/{databaseID}/jobs/{jobID}/resume` (View + Edit) queues a
+  partial job again with a fresh attempt budget. The worker continues after
+  the last committed batch and revalidates permission and approval for every
+  batch. A job that is not `partial` returns `409`.
+- Rolling back a batch migration is batch compensation and fails with
+  `rollback of batch migrations runs as batch compensation` until
+  compensation is available.
+
+### Test dataset
+
+`scripts/seed-batch-data.sql` creates `batch_benchmark_accounts` with 500,000
+rows. `TestMigrationBatchBenchmarkIntegration` loads that file, times one
+full-table `UPDATE` in a single transaction, then runs the same change as a
+batch migration through the queue and worker.
+
+```powershell
+docker compose -f compose.test.yaml up -d --wait postgres-test
+$env:TEST_DATABASE_URL = 'postgres://if3110_test_admin:if3110-integration-password@localhost:55432/postgres?sslmode=disable'
+$env:BATCH_BENCHMARK = '1'
+go test -tags=integration -count=1 -timeout 15m -v ./tests -run '^TestMigrationBatchBenchmarkIntegration$'
+```
+
+Results on 14 November 2026, PostgreSQL 18 in Docker Desktop (8 CPUs, 2.8 GiB
+memory) on Windows 11:
+
+| Run | Rows | Duration |
+|---|---|---|
+| One `UPDATE ... SET balance_cents = balance_cents + 100, updated_at = now()` | 500,000 | 7.2 s |
+| Same change as a batch migration, 50 batches of 10,000 | 500,000 | 12.8 s |
+
+The batch run takes longer in total because every batch revalidates the job
+and commits separately, but each transaction locks only 10,000 rows and keeps
+its progress if a later batch fails.
+
 ## Job status API
 
-Both endpoints require a signed-in user with at least View Only access to the
-database. A job is only readable through the database it was queued for.
+Reading jobs requires at least View Only access to the database; resuming a
+partial job requires View + Edit. A job is only reachable through the database
+it was queued for.
 
 | Method and path | Response |
 |---|---|
 | `GET /databases/{databaseID}/jobs?limit=50` | `{"jobs":[...]}`, newest first; `limit` is 1 to 100 |
 | `GET /databases/{databaseID}/jobs/{jobID}` | `{"job":{...}}` |
+| `POST /databases/{databaseID}/jobs/{jobID}/resume` | `202` with `{"job":{...}}`; requires View + Edit and the CSRF token |
 
 ```json
 {
@@ -131,7 +231,7 @@ database. A job is only readable through the database it was queued for.
     "revision": 1,
     "status": "pending",
     "attempts": 0,
-    "progress": {"committed_batches": 0, "committed_rows": 0},
+    "progress": {"committed_batches": 0, "committed_rows": 0, "total_rows": 0},
     "available_at": "2026-11-14T09:00:00Z",
     "created_at": "2026-11-14T09:00:00Z"
   }
@@ -141,11 +241,12 @@ database. A job is only readable through the database it was queued for.
 `last_error`, `started_at`, and `finished_at` appear once set. The queued SQL
 and trace context are not returned. Errors use `{"error":"..."}` with `400`
 for an invalid `limit`, `401`/`403` from access control, `404` for unknown
-jobs, and `500` for storage failures.
+jobs, `409` when resuming a job that is not partial, and `500` for storage
+failures.
 
 ## Tests
 
 ```sh
 go test ./internal/job ./internal/worker
-go test -tags=integration -count=1 ./tests -run '^(TestJob|TestMigrationWorker)'
+go test -tags=integration -count=1 ./tests -run '^(TestJob|TestMigrationWorker|TestMigrationBatch)'
 ```

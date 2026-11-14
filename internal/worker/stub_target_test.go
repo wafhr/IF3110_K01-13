@@ -5,24 +5,43 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"testing"
 )
 
-// stubTarget is a target database that records statements and transaction
-// outcomes, with injectable failures.
+type stubCall struct {
+	query string
+	args  []driver.Value
+}
+
+type stubQuery struct {
+	fragment string
+	rows     [][]driver.Value
+}
+
+// stubTarget is a target database that records statements, arguments, and
+// transaction outcomes, answers queries by statement fragment, and injects
+// failures.
 type stubTarget struct {
 	mu         sync.Mutex
-	statements []string
+	calls      []stubCall
+	queries    []stubQuery
 	isolation  driver.IsolationLevel
 	execErrors map[string]error
 	commitErr  error
-	committed  bool
-	rolledBack bool
+	commits    int
+	rollbacks  int
 }
 
 func newStubTarget() *stubTarget { return &stubTarget{execErrors: map[string]error{}} }
+
+func (s *stubTarget) onQuery(fragment string, rows ...[]driver.Value) *stubTarget {
+	s.queries = append(s.queries, stubQuery{fragment: fragment, rows: rows})
+	return s
+}
 
 func (s *stubTarget) open(t *testing.T) *sql.DB {
 	t.Helper()
@@ -31,27 +50,44 @@ func (s *stubTarget) open(t *testing.T) *sql.DB {
 	return db
 }
 
-func (s *stubTarget) ran(fragment string) bool {
+func (s *stubTarget) ran(fragment string) bool { return len(s.executed(fragment)) > 0 }
+
+func (s *stubTarget) executed(fragment string) []stubCall {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, statement := range s.statements {
-		if strings.Contains(statement, fragment) {
-			return true
+	var matches []stubCall
+	for _, call := range s.calls {
+		if strings.Contains(call.query, fragment) {
+			matches = append(matches, call)
 		}
 	}
-	return false
+	return matches
 }
 
 func (s *stubTarget) order() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]string(nil), s.statements...)
+	statements := make([]string, len(s.calls))
+	for i, call := range s.calls {
+		statements[i] = call.query
+	}
+	return statements
 }
 
-func (s *stubTarget) exec(query string) error {
+func (s *stubTarget) record(query string, args []driver.NamedValue) {
+	values := make([]driver.Value, len(args))
+	for i, arg := range args {
+		values[i] = arg.Value
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.statements = append(s.statements, query)
+	s.calls = append(s.calls, stubCall{query: query, args: values})
+}
+
+func (s *stubTarget) exec(query string, args []driver.NamedValue) error {
+	s.record(query, args)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for fragment, err := range s.execErrors {
 		if strings.Contains(query, fragment) {
 			return err
@@ -60,15 +96,30 @@ func (s *stubTarget) exec(query string) error {
 	return nil
 }
 
-func (s *stubTarget) finish(statement string, commit bool) error {
+func (s *stubTarget) query(query string, args []driver.NamedValue) (driver.Rows, error) {
+	s.record(query, args)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.statements = append(s.statements, statement)
-	if commit {
-		s.committed = s.commitErr == nil
+	for _, rule := range s.queries {
+		if strings.Contains(query, rule.fragment) {
+			return &stubTargetRows{rows: rule.rows}, nil
+		}
+	}
+	return nil, fmt.Errorf("unexpected query: %s", query)
+}
+
+func (s *stubTarget) finish(statement string, commit bool) error {
+	s.record(statement, nil)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !commit {
+		s.rollbacks++
+		return nil
+	}
+	if s.commitErr != nil {
 		return s.commitErr
 	}
-	s.rolledBack = true
+	s.commits++
 	return nil
 }
 
@@ -94,19 +145,48 @@ func (stubTargetConn) Begin() (driver.Tx, error) { return nil, errors.New("use B
 func (c stubTargetConn) BeginTx(_ context.Context, options driver.TxOptions) (driver.Tx, error) {
 	c.target.mu.Lock()
 	c.target.isolation = options.Isolation
-	c.target.statements = append(c.target.statements, "BEGIN")
 	c.target.mu.Unlock()
+	c.target.record("BEGIN", nil)
 	return stubTargetTx(c), nil
 }
 
-func (c stubTargetConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
-	if err := c.target.exec(query); err != nil {
+func (c stubTargetConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if err := c.target.exec(query, args); err != nil {
 		return nil, err
 	}
 	return driver.RowsAffected(1), nil
+}
+
+func (c stubTargetConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	return c.target.query(query, args)
 }
 
 type stubTargetTx struct{ target *stubTarget }
 
 func (t stubTargetTx) Commit() error   { return t.target.finish("COMMIT", true) }
 func (t stubTargetTx) Rollback() error { return t.target.finish("ROLLBACK", false) }
+
+type stubTargetRows struct {
+	rows  [][]driver.Value
+	index int
+}
+
+func (r *stubTargetRows) Columns() []string {
+	if len(r.rows) == 0 {
+		return []string{"value"}
+	}
+	columns := make([]string, len(r.rows[0]))
+	for i := range columns {
+		columns[i] = fmt.Sprintf("column%d", i)
+	}
+	return columns
+}
+func (r *stubTargetRows) Close() error { return nil }
+func (r *stubTargetRows) Next(destination []driver.Value) error {
+	if r.index >= len(r.rows) {
+		return io.EOF
+	}
+	copy(destination, r.rows[r.index])
+	r.index++
+	return nil
+}

@@ -18,6 +18,8 @@ import (
 const (
 	MaxMigrationNameBytes = 160
 	MaxSQLBytes           = 1 << 20
+	MaxBatchSize          = 100000
+	maxIdentifierBytes    = 63
 )
 
 var (
@@ -71,8 +73,52 @@ type Revision struct {
 	SQLDown            string    `json:"sql_down"`
 	Irreversible       bool      `json:"irreversible"`
 	IrreversibleReason string    `json:"irreversible_reason"`
+	Batch              BatchSpec `json:"batch,omitzero"`
 	CreatedBy          string    `json:"created_by"`
 	CreatedAt          time.Time `json:"created_at"`
+}
+
+// BatchSpec runs a migration over key ranges of Table ordered by KeyColumn,
+// committing each range separately. The SQL receives the first and last key of
+// a batch as $1 and $2. Table is either "table" or "schema.table".
+type BatchSpec struct {
+	Table     string `json:"table"`
+	KeyColumn string `json:"key_column"`
+	Size      int    `json:"size"`
+}
+
+func (b BatchSpec) Enabled() bool { return b != BatchSpec{} }
+
+// TableIdentifier splits Table into its optional schema and its name.
+func (b BatchSpec) TableIdentifier() []string { return strings.Split(b.Table, ".") }
+
+func (b BatchSpec) normalized(sqlUp, sqlDown string) (BatchSpec, error) {
+	b.Table, b.KeyColumn = strings.TrimSpace(b.Table), strings.TrimSpace(b.KeyColumn)
+	if !b.Enabled() {
+		return b, nil
+	}
+	parts := b.TableIdentifier()
+	if len(parts) > 2 || !validIdentifiers(append(parts, b.KeyColumn)...) {
+		return BatchSpec{}, fmt.Errorf("%w: batch table and key_column must be identifiers of 1 to %d bytes", ErrInvalidMigration, maxIdentifierBytes)
+	}
+	if b.Size < 1 || b.Size > MaxBatchSize {
+		return BatchSpec{}, fmt.Errorf("%w: batch size must be between 1 and %d", ErrInvalidMigration, MaxBatchSize)
+	}
+	for _, statement := range []string{sqlUp, sqlDown} {
+		if statement != "" && (!strings.Contains(statement, "$1") || !strings.Contains(statement, "$2")) {
+			return BatchSpec{}, fmt.Errorf("%w: batch SQL must use $1 and $2 as the first and last key of each batch", ErrInvalidMigration)
+		}
+	}
+	return b, nil
+}
+
+func validIdentifiers(identifiers ...string) bool {
+	for _, identifier := range identifiers {
+		if identifier == "" || len(identifier) > maxIdentifierBytes || !utf8.ValidString(identifier) || strings.ContainsRune(identifier, '\x00') {
+			return false
+		}
+	}
+	return true
 }
 
 // Execution mencatat satu percobaan eksekusi beserta salinan SQL yang dijalankan.
@@ -104,14 +150,15 @@ type ExecutionHistory struct {
 // ActionPlan mengikat tindakan pada revisi asli dan posisi history saat rencana
 // disusun. Executor memvalidasi ulang rencana setelah memperoleh lock database.
 type ActionPlan struct {
-	DatabaseID         string `json:"database_id"`
-	MigrationID        string `json:"migration_id"`
-	Revision           int64  `json:"revision"`
-	Name               string `json:"name"`
-	Action             Action `json:"action"`
-	SQL                string `json:"sql"`
-	RevertsExecutionID string `json:"reverts_execution_id,omitempty"`
-	BaseExecutionID    string `json:"base_execution_id,omitempty"`
+	DatabaseID         string    `json:"database_id"`
+	MigrationID        string    `json:"migration_id"`
+	Revision           int64     `json:"revision"`
+	Name               string    `json:"name"`
+	Action             Action    `json:"action"`
+	SQL                string    `json:"sql"`
+	RevertsExecutionID string    `json:"reverts_execution_id,omitempty"`
+	BaseExecutionID    string    `json:"base_execution_id,omitempty"`
+	Batch              BatchSpec `json:"batch,omitzero"`
 }
 
 // ExecutionRequest mengikat job pada aktor, approval, revisi, SQL, dan posisi
@@ -188,14 +235,19 @@ func NormalizeRevision(revision Revision) (Revision, error) {
 		if revision.IrreversibleReason == "" || revision.SQLDown != "" {
 			return Revision{}, fmt.Errorf("%w: irreversible migrations require a reason and an empty sql_down", ErrInvalidMigration)
 		}
-		return revision, nil
+	} else {
+		if revision.IrreversibleReason != "" {
+			return Revision{}, fmt.Errorf("%w: irreversible_reason requires an irreversible migration", ErrInvalidMigration)
+		}
+		if err := validateSQL("sql_down", revision.SQLDown); err != nil {
+			return Revision{}, err
+		}
 	}
-	if revision.IrreversibleReason != "" {
-		return Revision{}, fmt.Errorf("%w: irreversible_reason requires an irreversible migration", ErrInvalidMigration)
-	}
-	if err := validateSQL("sql_down", revision.SQLDown); err != nil {
+	batch, err := revision.Batch.normalized(revision.SQLUp, revision.SQLDown)
+	if err != nil {
 		return Revision{}, err
 	}
+	revision.Batch = batch
 	return revision, nil
 }
 

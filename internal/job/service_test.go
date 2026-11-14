@@ -17,6 +17,7 @@ type fakeStore struct {
 	enqueued    []migration.ExecutionRequest
 	listedFor   string
 	listedLimit int
+	resumed     []string
 }
 
 func newFakeStore(jobs ...Job) *fakeStore {
@@ -58,6 +59,30 @@ func (s *fakeStore) ListByDatabase(_ context.Context, databaseID string, limit i
 		}
 	}
 	return jobs, nil
+}
+
+func (s *fakeStore) Resume(_ context.Context, jobID string) error {
+	if s.err != nil {
+		return s.err
+	}
+	job, ok := s.jobs[jobID]
+	if !ok {
+		return ErrNotFound
+	}
+	if job.Status != Partial {
+		return ErrNotPartial
+	}
+	job.Status, job.Attempts = Pending, 0
+	s.jobs[jobID] = job
+	s.resumed = append(s.resumed, jobID)
+	return nil
+}
+
+func partialJob() Job {
+	job := queuedJob()
+	job.Status, job.Attempts = Partial, 3
+	job.Progress = Progress{CommittedBatches: 2, CommittedRows: 2000, TotalRows: 5000}
+	return job
 }
 
 func queuedJob() Job {
@@ -115,5 +140,20 @@ func TestServiceJobsListsTheRequestedDatabase(t *testing.T) {
 	jobs, err := newTestService(t, store).Jobs(context.Background(), testDatabaseID, 10)
 	if err != nil || len(jobs) != 1 || store.listedFor != testDatabaseID || store.listedLimit != 10 {
 		t.Fatalf("jobs = %+v, %v; listed %q/%d", jobs, err, store.listedFor, store.listedLimit)
+	}
+}
+
+func TestServiceResume(t *testing.T) {
+	store := newFakeStore(partialJob())
+	service := newTestService(t, store)
+	if _, err := service.Resume(context.Background(), otherDatabaseID, testJobID); !errors.Is(err, ErrNotFound) || len(store.resumed) != 0 {
+		t.Fatalf("resume through another database returned %v", err)
+	}
+	job, err := service.Resume(context.Background(), testDatabaseID, testJobID)
+	if err != nil || job.Status != Pending || job.Progress.CommittedBatches != 2 {
+		t.Fatalf("resumed job = %+v, %v", job, err)
+	}
+	if _, err := service.Resume(context.Background(), testDatabaseID, testJobID); !errors.Is(err, ErrNotPartial) {
+		t.Fatalf("resuming a pending job returned %v", err)
 	}
 }

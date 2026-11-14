@@ -113,7 +113,7 @@ func (s *stubDatabase) exec(query string, args []driver.NamedValue) (driver.Resu
 
 var jobColumnNames = []string{
 	"id", "payload", "status", "attempts", "committed_batches", "committed_rows",
-	"last_error", "available_at", "created_at", "started_at", "finished_at",
+	"total_rows", "last_error", "available_at", "created_at", "started_at", "finished_at",
 }
 
 type stubConnector struct{ database *stubDatabase }

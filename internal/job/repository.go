@@ -17,7 +17,7 @@ import (
 var schema string
 
 const jobColumns = `j.id::text, j.payload, j.status, j.attempts, j.committed_batches, j.committed_rows,
-	j.last_error, j.available_at, j.created_at, j.started_at, j.finished_at`
+	j.total_rows, j.last_error, j.available_at, j.created_at, j.started_at, j.finished_at`
 
 const MaxListLimit = 100
 
@@ -120,6 +120,42 @@ func (r *Repository) Heartbeat(ctx context.Context, jobID, workerID string, leas
 		return errors.New("heartbeat requires a lease of at least one millisecond")
 	}
 	return r.updateLeased(ctx, jobID, workerID, `lease_expires_at = now() + $3 * interval '1 millisecond'`, lease.Milliseconds())
+}
+
+// UpdateProgress records the committed progress reported by the lease holder.
+func (r *Repository) UpdateProgress(ctx context.Context, jobID, workerID string, progress Progress) error {
+	return r.updateLeased(ctx, jobID, workerID, `committed_batches = $3, committed_rows = $4, total_rows = $5`,
+		progress.CommittedBatches, progress.CommittedRows, progress.TotalRows)
+}
+
+// MarkPartial stops a batch migration that committed some batches. The job
+// holds later jobs of its database until it is resumed.
+func (r *Repository) MarkPartial(ctx context.Context, jobID, workerID, reason string) error {
+	return r.updateLeased(ctx, jobID, workerID, `status = 'partial', last_error = $3, `+unleased, reason)
+}
+
+// Resume queues a partial job again with a fresh attempt budget. The worker
+// continues from the checkpoint on the target database.
+func (r *Repository) Resume(ctx context.Context, jobID string) error {
+	if !validUUID(jobID) {
+		return ErrNotFound
+	}
+	result, err := r.db.ExecContext(ctx, `UPDATE migration_jobs SET status = 'pending', attempts = 0, available_at = now(), updated_at = now()
+		WHERE id = $1 AND status = 'partial'`, jobID)
+	if err != nil {
+		return fmt.Errorf("resume job %s: %w", jobID, err)
+	}
+	resumed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("resume job %s: %w", jobID, err)
+	}
+	if resumed == 0 {
+		if _, err := r.Get(ctx, jobID); err != nil {
+			return err
+		}
+		return ErrNotPartial
+	}
+	return nil
 }
 
 func (r *Repository) Complete(ctx context.Context, jobID, workerID string) error {
@@ -226,7 +262,8 @@ func scanJob(row rowScanner) (Job, error) {
 	var payload []byte
 	var startedAt, finishedAt sql.NullTime
 	err := row.Scan(&job.ID, &payload, &job.Status, &job.Attempts, &job.Progress.CommittedBatches,
-		&job.Progress.CommittedRows, &job.LastError, &job.AvailableAt, &job.CreatedAt, &startedAt, &finishedAt)
+		&job.Progress.CommittedRows, &job.Progress.TotalRows, &job.LastError, &job.AvailableAt, &job.CreatedAt,
+		&startedAt, &finishedAt)
 	if err != nil {
 		return Job{}, err
 	}

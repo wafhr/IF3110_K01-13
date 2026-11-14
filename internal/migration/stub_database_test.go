@@ -176,6 +176,6 @@ func revisionStep(statement string, number int64) repositoryStep {
 		operation: "query",
 		statement: statement,
 		rows: [][]driver.Value{{repositoryMigrationID, number, revision.SQLUp, revision.SQLDown,
-			false, "", repositoryActorID, repositoryTime}},
+			false, "", "", "", int64(0), repositoryActorID, repositoryTime}},
 	}
 }

@@ -133,6 +133,7 @@ func TestJobRoutesBelongToTheJobModule(t *testing.T) {
 	for _, tc := range []struct{ path, want string }{
 		{"/databases/id/jobs", "job"},
 		{"/databases/id/jobs/job-id", "job"},
+		{"/databases/id/jobs/job-id/resume", "job"},
 		{"/databases/id/migrations", "migration"},
 		{"/databases/id/schemas/jobs/tables", "viewer"},
 		{"/jobs", "frontend"},

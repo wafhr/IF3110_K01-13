@@ -26,6 +26,22 @@ CREATE TABLE IF NOT EXISTS migration_revisions (
     )
 );
 
+ALTER TABLE migration_revisions ADD COLUMN IF NOT EXISTS batch_table TEXT NOT NULL DEFAULT '';
+ALTER TABLE migration_revisions ADD COLUMN IF NOT EXISTS batch_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE migration_revisions ADD COLUMN IF NOT EXISTS batch_size INTEGER NOT NULL DEFAULT 0;
+
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'migration_revisions'::regclass AND conname = 'migration_revisions_batch_check'
+    ) THEN
+        ALTER TABLE migration_revisions ADD CONSTRAINT migration_revisions_batch_check CHECK (
+            (batch_size = 0 AND batch_table = '' AND batch_key = '') OR
+            (batch_size > 0 AND batch_table <> '' AND batch_key <> '')
+        );
+    END IF;
+END $$;
+
 -- Revisi pertama dan pembaruan penunjuk revisi terkini di-commit dalam satu transaksi.
 DO $$ BEGIN
     IF NOT EXISTS (

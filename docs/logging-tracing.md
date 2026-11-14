@@ -145,7 +145,8 @@ The job queue, polling loop, retry scheduler, and `cmd/worker` bootstrap are in
 place: the worker initializes the logger and tracer provider with
 `service.name=worker`, runs every attempt inside `TraceAttempt`, passes the
 attempt context to lock, SQL, history, and commit/rollback, and shuts the
-provider down on exit. Batch execution is pending.
+provider down on exit. Each batch runs inside a `migration_batch` activity and
+adds its `batch` number to the SQL logs of that batch.
 
 The integration suite exercises the diagram using real PostgreSQL transactions,
 the production job queue, a fixture approval adapter, and `TraceAttempt` callbacks. The

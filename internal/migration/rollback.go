@@ -181,5 +181,6 @@ func (state MigrationState) planAction(definition Migration, revision Revision, 
 	return ActionPlan{
 		DatabaseID: state.DatabaseID, MigrationID: definition.ID, Revision: number, Name: definition.Name,
 		Action: action, SQL: statement, RevertsExecutionID: revertsID, BaseExecutionID: state.BaseExecutionID,
+		Batch: revision.Batch,
 	}, nil
 }

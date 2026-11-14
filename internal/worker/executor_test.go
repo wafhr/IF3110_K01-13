@@ -93,15 +93,15 @@ func TestNewExecutorRequiresDependencies(t *testing.T) {
 func TestExecutorCommitsSQLAndHistoryTogether(t *testing.T) {
 	target := newStubTarget()
 	prepared := &fakePrepared{plan: testRequest().Plan}
-	execution, err := newTestExecutor(t, target, database.PostgreSQL, &fakePreparer{prepared: prepared}).Run(context.Background(), testRequest())
+	execution, err := newTestExecutor(t, target, database.PostgreSQL, &fakePreparer{prepared: prepared}).Run(context.Background(), testRequest(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if execution.ID != testExecutionID || prepared.recordedAt == nil || !prepared.recordedAt.Equal(testStart) {
 		t.Fatalf("execution = %+v, recorded at %v", execution, prepared.recordedAt)
 	}
-	if target.isolation != driver.IsolationLevel(sql.LevelReadCommitted) || !target.committed {
-		t.Fatalf("isolation = %d, committed = %t", target.isolation, target.committed)
+	if target.isolation != driver.IsolationLevel(sql.LevelReadCommitted) || target.commits == 0 {
+		t.Fatalf("isolation = %d, commits = %d", target.isolation, target.commits)
 	}
 	want := []string{"SELECT pg_advisory_lock($1)", "BEGIN", migrationSQL, "COMMIT", "SELECT pg_advisory_unlock($1)"}
 	if got := target.order(); !slices.Equal(got, want) {
@@ -113,11 +113,11 @@ func TestExecutorReturnsCommitEvidenceWithoutRunningSQL(t *testing.T) {
 	target := newStubTarget()
 	evidence := migration.Execution{ID: testExecutionID, Status: migration.Success}
 	prepared := &fakePrepared{plan: testRequest().Plan, evidence: &evidence}
-	execution, err := newTestExecutor(t, target, database.PostgreSQL, &fakePreparer{prepared: prepared}).Run(context.Background(), testRequest())
+	execution, err := newTestExecutor(t, target, database.PostgreSQL, &fakePreparer{prepared: prepared}).Run(context.Background(), testRequest(), nil)
 	if err != nil || execution != evidence {
 		t.Fatalf("execution = %+v, %v", execution, err)
 	}
-	if target.ran(migrationSQL) || prepared.recordedAt != nil || target.committed {
+	if target.ran(migrationSQL) || prepared.recordedAt != nil || target.commits > 0 {
 		t.Fatal("a committed execution ran again")
 	}
 	if !target.ran("pg_advisory_unlock") {
@@ -147,12 +147,12 @@ func TestExecutorRollsBackFailedAttempts(t *testing.T) {
 				target.execErrors[migrationSQL] = test.sqlErr
 			}
 			prepared := &fakePrepared{plan: testRequest().Plan, recordErr: test.recordErr}
-			_, err := newTestExecutor(t, target, database.PostgreSQL, &fakePreparer{prepared: prepared, err: test.prepareErr}).Run(context.Background(), testRequest())
+			_, err := newTestExecutor(t, target, database.PostgreSQL, &fakePreparer{prepared: prepared, err: test.prepareErr}).Run(context.Background(), testRequest(), nil)
 			if !errors.Is(err, test.wantErr) {
 				t.Fatalf("error = %v, want %v", err, test.wantErr)
 			}
-			if target.committed || !target.rolledBack || !target.ran("pg_advisory_unlock") {
-				t.Fatalf("committed = %t, rolled back = %t", target.committed, target.rolledBack)
+			if target.commits > 0 || target.rollbacks == 0 || !target.ran("pg_advisory_unlock") {
+				t.Fatalf("commits = %d, rollbacks = %d", target.commits, target.rollbacks)
 			}
 			if target.ran(migrationSQL) != test.wantSQLRuns || (prepared.recordedAt != nil) != test.wantRecord {
 				t.Fatal("attempt continued after a failed step")
@@ -174,7 +174,7 @@ func TestExecutorClassifiesCommitFailures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			target := newStubTarget()
 			target.commitErr = test.commitErr
-			_, err := newTestExecutor(t, target, database.PostgreSQL, &fakePreparer{prepared: &fakePrepared{plan: testRequest().Plan}}).Run(context.Background(), testRequest())
+			_, err := newTestExecutor(t, target, database.PostgreSQL, &fakePreparer{prepared: &fakePrepared{plan: testRequest().Plan}}).Run(context.Background(), testRequest(), nil)
 			if err == nil || errors.Is(err, ErrCommitUncertain) != test.wantUncertain {
 				t.Fatalf("commit error = %v, want uncertain %t", err, test.wantUncertain)
 			}
@@ -184,7 +184,7 @@ func TestExecutorClassifiesCommitFailures(t *testing.T) {
 
 func TestExecutorRejectsUnsupportedOrUnreachableTargets(t *testing.T) {
 	target := newStubTarget()
-	_, err := newTestExecutor(t, target, database.MySQL, &fakePreparer{}).Run(context.Background(), testRequest())
+	_, err := newTestExecutor(t, target, database.MySQL, &fakePreparer{}).Run(context.Background(), testRequest(), nil)
 	if !errors.Is(err, ErrUnsupportedTarget) || target.ran("pg_advisory_lock") {
 		t.Fatalf("MySQL target returned %v", err)
 	}
@@ -194,7 +194,7 @@ func TestExecutorRejectsUnsupportedOrUnreachableTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := unreachable.Run(context.Background(), testRequest()); !errors.Is(err, targetdb.ErrConnection) {
+	if _, err := unreachable.Run(context.Background(), testRequest(), nil); !errors.Is(err, targetdb.ErrConnection) {
 		t.Fatalf("unreachable target returned %v", err)
 	}
 }

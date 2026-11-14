@@ -57,7 +57,7 @@ func RoutesWith(modules Modules) http.Handler {
 	}
 	if modules.Job != nil {
 		mux.Handle("/databases/{databaseID}/jobs", modules.Job)
-		mux.Handle("/databases/{databaseID}/jobs/{jobID}", modules.Job)
+		mux.Handle("/databases/{databaseID}/jobs/", modules.Job)
 	}
 	if modules.Frontend != nil {
 		mux.Handle("/", modules.Frontend)

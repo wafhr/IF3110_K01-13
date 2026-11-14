@@ -247,6 +247,7 @@ type fakeQueue struct {
 	pending   []job.Job
 	claimErrs []error
 	heartbeat error
+	progress  []job.Progress
 	settled   chan settlement
 }
 
@@ -276,6 +277,18 @@ func (q *fakeQueue) Heartbeat(context.Context, string, string, time.Duration) er
 	return q.heartbeat
 }
 
+func (q *fakeQueue) UpdateProgress(_ context.Context, _, _ string, progress job.Progress) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.progress = append(q.progress, progress)
+	return nil
+}
+
+func (q *fakeQueue) MarkPartial(_ context.Context, jobID, _, reason string) error {
+	q.settled <- settlement{jobID: jobID, kind: "partial", reason: reason}
+	return nil
+}
+
 func (q *fakeQueue) Complete(_ context.Context, jobID, _ string) error {
 	q.settled <- settlement{jobID: jobID, kind: "complete"}
 	return nil
@@ -298,8 +311,14 @@ func (q *fakeQueue) Retry(_ context.Context, jobID, _, reason string, delay time
 
 type runnerFunc func(context.Context, migration.ExecutionRequest) (migration.Execution, error)
 
-func (f runnerFunc) Run(ctx context.Context, request migration.ExecutionRequest) (migration.Execution, error) {
+func (f runnerFunc) Run(ctx context.Context, request migration.ExecutionRequest, _ worker.ProgressFunc) (migration.Execution, error) {
 	return f(ctx, request)
+}
+
+type batchRunnerFunc func(context.Context, worker.ProgressFunc) (migration.Execution, error)
+
+func (f batchRunnerFunc) Run(ctx context.Context, _ migration.ExecutionRequest, report worker.ProgressFunc) (migration.Execution, error) {
+	return f(ctx, report)
 }
 
 func claimedJob(id string, attempts int) job.Job {
@@ -497,5 +516,41 @@ func TestWorkerAbandonsAttemptAfterLosingLease(t *testing.T) {
 	case settled := <-queue.settled:
 		t.Fatalf("worker changed a job it no longer owns: %+v", settled)
 	default:
+	}
+}
+
+func TestWorkerRecordsBatchProgress(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		committed int64
+		wantKind  string
+	}{
+		{name: "finished batch migration completes", committed: 3, wantKind: "complete"},
+		{name: "failure after committed batches leaves the job partial", err: errors.New("division by zero"), committed: 2, wantKind: "retry"},
+		{name: "permanent failure after committed batches is partial", err: migration.ErrConflict, committed: 2, wantKind: "partial"},
+		{name: "permanent failure before any batch fails", err: migration.ErrConflict, wantKind: "fail"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			queue := newFakeQueue(claimedJob("a", 1))
+			startWorker(t, queue, batchRunnerFunc(func(_ context.Context, report worker.ProgressFunc) (migration.Execution, error) {
+				for batch := int64(1); batch <= test.committed; batch++ {
+					report(job.Progress{CommittedBatches: batch, CommittedRows: batch * 100, TotalRows: 500})
+				}
+				return migration.Execution{}, test.err
+			}), testConfig())
+			if settled := nextSettlement(t, queue); settled.kind != test.wantKind {
+				t.Fatalf("settlement = %+v, want %s", settled, test.wantKind)
+			}
+			queue.mu.Lock()
+			defer queue.mu.Unlock()
+			if int64(len(queue.progress)) != test.committed {
+				t.Fatalf("progress updates = %+v", queue.progress)
+			}
+			if test.committed > 0 && queue.progress[len(queue.progress)-1].CommittedRows != test.committed*100 {
+				t.Fatalf("last progress = %+v", queue.progress[len(queue.progress)-1])
+			}
+		})
 	}
 }

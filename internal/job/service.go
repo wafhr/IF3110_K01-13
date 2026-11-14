@@ -12,6 +12,7 @@ type Store interface {
 	Enqueue(context.Context, migration.ExecutionRequest) (Job, error)
 	Get(context.Context, string) (Job, error)
 	ListByDatabase(context.Context, string, int) ([]Job, error)
+	Resume(context.Context, string) error
 }
 
 // Service is the queue used by migration submissions and the read model of the
@@ -48,6 +49,18 @@ func (s *Service) Job(ctx context.Context, databaseID, jobID string) (Job, error
 		return Job{}, ErrNotFound
 	}
 	return job, nil
+}
+
+// Resume continues a partial batch migration of the given database. The worker
+// revalidates permission and approval before every batch it runs.
+func (s *Service) Resume(ctx context.Context, databaseID, jobID string) (Job, error) {
+	if _, err := s.Job(ctx, databaseID, jobID); err != nil {
+		return Job{}, err
+	}
+	if err := s.store.Resume(ctx, jobID); err != nil {
+		return Job{}, err
+	}
+	return s.Job(ctx, databaseID, jobID)
 }
 
 func (s *Service) Jobs(ctx context.Context, databaseID string, limit int) ([]Job, error) {

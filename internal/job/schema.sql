@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS migration_jobs (
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     committed_batches BIGINT NOT NULL DEFAULT 0 CHECK (committed_batches >= 0),
     committed_rows BIGINT NOT NULL DEFAULT 0 CHECK (committed_rows >= 0),
+    total_rows BIGINT NOT NULL DEFAULT 0 CHECK (total_rows >= 0),
     last_error TEXT NOT NULL DEFAULT '',
     available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     lease_owner TEXT,

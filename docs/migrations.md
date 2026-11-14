@@ -124,6 +124,20 @@ The following irreversible definition includes a reason for review.
 }
 ```
 
+A definition with `batch` runs per key range instead of in one transaction.
+Its SQL receives the first and last key of each batch as `$1` and `$2`, and
+`table`, `key_column`, and `size` are part of the immutable revision. See
+[Migration execution](migration-execution.md#batch-migrations).
+
+```json
+{
+  "name": "raise balances",
+  "sql_up": "UPDATE public.accounts SET balance_cents = balance_cents + 100 WHERE id BETWEEN $1 AND $2",
+  "sql_down": "UPDATE public.accounts SET balance_cents = balance_cents - 100 WHERE id BETWEEN $1 AND $2",
+  "batch": {"table": "public.accounts", "key_column": "id", "size": 10000}
+}
+```
+
 ### Submit apply, rollback, or forward
 
 The workflow reviews a snapshot from `Service.PrepareAction` and provides
