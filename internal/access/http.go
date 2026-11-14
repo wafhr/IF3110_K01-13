@@ -61,7 +61,7 @@ func (h *HTTPHandler) routes() {
 // The handler route must include a {databaseID} path value.
 func (h *HTTPHandler) RequireDatabaseAccess(minimum Permission, next http.Handler) http.Handler {
 	return h.protected(false, true, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if minimum != ViewOnly && minimum != ViewEdit {
+		if !minimum.valid() {
 			writeServiceError(w, r.Context(), ErrInvalidInput)
 			return
 		}
@@ -71,7 +71,7 @@ func (h *HTTPHandler) RequireDatabaseAccess(minimum Permission, next http.Handle
 			writeServiceError(w, r.Context(), err)
 			return
 		}
-		if permission == "" || (minimum == ViewEdit && permission != ViewEdit) {
+		if !permission.satisfies(minimum) {
 			slog.WarnContext(r.Context(), "access_denied", "reason", "database_permission_required", "required_permission", string(minimum), "status", "failed")
 			writeServiceError(w, r.Context(), ErrForbidden)
 			return
@@ -325,7 +325,7 @@ func (h *HTTPHandler) createUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"user": user})
@@ -377,7 +377,7 @@ func (h *HTTPHandler) createGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"group": group})
@@ -558,7 +558,10 @@ func internalError(w http.ResponseWriter, ctx context.Context, operation string)
 }
 
 func writeServiceError(w http.ResponseWriter, ctx context.Context, err error) {
+	var input *inputError
 	switch {
+	case errors.As(err, &input):
+		writeError(w, http.StatusBadRequest, input.reason)
 	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, ErrConflict):
