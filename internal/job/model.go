@@ -44,6 +44,7 @@ type Job struct {
 	ExecutionID string                     `json:"execution_id"`
 	DatabaseID  string                     `json:"database_id"`
 	MigrationID string                     `json:"migration_id"`
+	Name        string                     `json:"name"`
 	ActorID     string                     `json:"actor_id"`
 	Action      migration.Action           `json:"action"`
 	Revision    int64                      `json:"revision"`
@@ -62,6 +63,7 @@ func (j *Job) describe() {
 	j.ExecutionID = j.Request.ExecutionID
 	j.DatabaseID = j.Request.Plan.DatabaseID
 	j.MigrationID = j.Request.Plan.MigrationID
+	j.Name = j.Request.Plan.Name
 	j.ActorID = j.Request.ActorID
 	j.Action = j.Request.Plan.Action
 	j.Revision = j.Request.Plan.Revision

@@ -68,8 +68,9 @@ Detail konfigurasi ada di [Panduan database management](docs/database-management
 Panduan atribut, redaction, contoh output, pengujian, dan status integrasi worker
 tersedia pada [Logging dan tracing](docs/logging-tracing.md).
 API definisi/revisi dan history Milestone 2 dapat digunakan setelah server
-berjalan. Pengajuan tindakan saat ini menghasilkan `503` sampai provider
-approval dan antrean dipasang. Editor frontend sedang disesuaikan dengan alur
+berjalan. Antrean job persisten dan API status job sudah terpasang (lihat
+[Migration execution](docs/migration-execution.md)). Pengajuan tindakan saat ini
+menghasilkan `503` sampai provider approval dipasang. Editor frontend sedang disesuaikan dengan alur
 baru. Detail endpoint, payload, kontrak worker, dan status integrasi tersedia
 pada panduan migration.
 

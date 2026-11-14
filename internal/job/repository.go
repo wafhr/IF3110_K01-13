@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
@@ -17,6 +18,8 @@ var schema string
 
 const jobColumns = `j.id::text, j.payload, j.status, j.attempts, j.committed_batches, j.committed_rows,
 	j.last_error, j.available_at, j.created_at, j.started_at, j.finished_at`
+
+const MaxListLimit = 100
 
 const leaseHolder = `j.id = $1 AND j.status = 'running' AND j.lease_owner = $2`
 
@@ -146,6 +149,34 @@ func (r *Repository) Get(ctx context.Context, jobID string) (Job, error) {
 		return Job{}, ErrNotFound
 	}
 	return job, err
+}
+
+// listColumns leaves the SQL out of the payload: listings never return it and
+// it can reach a megabyte per job.
+var listColumns = strings.Replace(jobColumns, "j.payload", `j.payload #- '{plan,sql}'`, 1)
+
+// ListByDatabase returns the most recent jobs of a database registration first.
+func (r *Repository) ListByDatabase(ctx context.Context, databaseID string, limit int) ([]Job, error) {
+	if !validUUID(databaseID) {
+		return nil, ErrNotFound
+	}
+	if limit < 1 || limit > MaxListLimit {
+		return nil, invalid("limit")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT `+listColumns+` FROM migration_jobs j WHERE j.database_id = $1 ORDER BY j.queue_position DESC LIMIT $2`, databaseID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list jobs: %w", err)
+	}
+	defer rows.Close()
+	jobs := make([]Job, 0)
+	for rows.Next() {
+		job, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, rows.Err()
 }
 
 func (r *Repository) byExecution(ctx context.Context, executionID string) (Job, error) {

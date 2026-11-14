@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -203,5 +204,29 @@ func TestGet(t *testing.T) {
 	failing := (&stubDatabase{}).failQuery(jobByID, errors.New("connection refused"))
 	if _, err := failing.repository(t).Get(context.Background(), testJobID); err == nil || errors.Is(err, ErrNotFound) {
 		t.Fatalf("storage failure returned %v", err)
+	}
+}
+
+func TestListByDatabase(t *testing.T) {
+	database := (&stubDatabase{}).onQuery("WHERE j.database_id = $1", jobRow(t, testRequest(), Pending, 0))
+	jobs, err := database.repository(t).ListByDatabase(context.Background(), testDatabaseID, 20)
+	if err != nil || len(jobs) != 1 || jobs[0].DatabaseID != testDatabaseID {
+		t.Fatalf("jobs = %+v, %v", jobs, err)
+	}
+	list := database.executed("ORDER BY j.queue_position DESC")[0]
+	if list.args[0] != testDatabaseID || list.args[1] != int64(20) {
+		t.Fatalf("list arguments = %v", list.args)
+	}
+	if !strings.Contains(list.query, "j.payload #- '{plan,sql}'") {
+		t.Fatalf("listing loads the queued SQL: %s", list.query)
+	}
+	repository := (&stubDatabase{}).repository(t)
+	if _, err := repository.ListByDatabase(context.Background(), "db", 20); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("malformed database ID returned %v", err)
+	}
+	for _, limit := range []int{0, MaxListLimit + 1} {
+		if _, err := repository.ListByDatabase(context.Background(), testDatabaseID, limit); !errors.Is(err, ErrInvalidJob) {
+			t.Fatalf("limit %d returned %v", limit, err)
+		}
 	}
 }

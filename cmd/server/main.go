@@ -20,6 +20,7 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/config"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
 	databasehttp "github.com/wafhr/IF3110_K01-13/internal/database/http"
+	"github.com/wafhr/IF3110_K01-13/internal/job"
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/platformdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
@@ -99,6 +100,17 @@ func run() (runErr error) {
 	if err := migrationRepository.Initialize(startupCtx); err != nil {
 		return err
 	}
+	jobRepository, err := job.NewRepository(db)
+	if err != nil {
+		return err
+	}
+	if err := jobRepository.Initialize(startupCtx); err != nil {
+		return err
+	}
+	jobService, err := job.NewService(jobRepository)
+	if err != nil {
+		return err
+	}
 	migrationService := migration.NewServiceWithExecution(func(ctx context.Context, id string) (*sql.DB, database.DBMS, error) {
 		connection, err := databaseRegistry.GetConnectionConfig(ctx, id)
 		if err != nil {
@@ -106,7 +118,7 @@ func run() (runErr error) {
 		}
 		db, err := targetConnector.Open(ctx, connection)
 		return db, connection.DBMS, err
-	}, migrationRepository, migration.ExecutionDependencies{Authorizer: accessService})
+	}, migrationRepository, migration.ExecutionDependencies{Authorizer: accessService, Queue: jobService})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	accessHandler := access.NewHTTPHandler(accessService, cfg.SecureCookie)
@@ -114,9 +126,13 @@ func run() (runErr error) {
 	viewerHandler := databasehttp.NewViewerHandler(databaseRegistry, drivers.NewInspector(databaseRegistry, targetConnections), accessHandler)
 	schemaInspector := drivers.NewInspector(databaseRegistry, targetConnections)
 	migrationHandler := migration.NewHTTPHandler(migrationService, accessHandler, schemaInspector)
+	routes := app.RoutesWith(app.Modules{
+		Access: accessHandler, Database: databaseHandler, Viewer: viewerHandler, Migration: migrationHandler,
+		Job: job.NewHTTPHandler(jobService, accessHandler), Frontend: web.NewHandler(accessService, accessHandler),
+	})
 	server := &http.Server{
 		Addr:              cfg.Address(),
-		Handler:           telemetry.HTTPHandler(app.RoutesWithModulesAndFrontend(accessHandler, databaseHandler, viewerHandler, migrationHandler, web.NewHandler(accessService, accessHandler))),
+		Handler:           telemetry.HTTPHandler(routes),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

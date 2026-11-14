@@ -2,17 +2,28 @@ package app
 
 import "net/http"
 
+// Modules holds the HTTP handler of each backend module. A nil handler leaves
+// its routes unmounted.
+type Modules struct {
+	Access    http.Handler
+	Database  http.Handler
+	Viewer    http.Handler
+	Migration http.Handler
+	Job       http.Handler
+	Frontend  http.Handler
+}
+
 func Routes() http.Handler {
-	return routes(nil, nil, nil, nil, nil)
+	return RoutesWith(Modules{})
 }
 
 // RoutesWithModulesAndFrontend wires every API module and the browser UI.
-// The frontend is mounted last; Go's ServeMux selects more-specific API routes.
 func RoutesWithModulesAndFrontend(accessHandler, databaseHandler, viewerHandler, migrationHandler, frontendHandler http.Handler) http.Handler {
-	return routes(accessHandler, databaseHandler, viewerHandler, migrationHandler, frontendHandler)
+	return RoutesWith(Modules{Access: accessHandler, Database: databaseHandler, Viewer: viewerHandler, Migration: migrationHandler, Frontend: frontendHandler})
 }
 
-func routes(accessHandler, databaseHandler, viewerHandler, migrationHandler, frontendHandler http.Handler) http.Handler {
+// RoutesWith mounts the frontend last; Go's ServeMux selects more-specific API routes.
+func RoutesWith(modules Modules) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -20,32 +31,36 @@ func routes(accessHandler, databaseHandler, viewerHandler, migrationHandler, fro
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("{\"status\":\"ok\"}\n"))
 	})
-	if databaseHandler != nil {
-		mux.Handle("/admin/databases", databaseHandler)
-		mux.Handle("/admin/databases/", databaseHandler)
+	if modules.Database != nil {
+		mux.Handle("/admin/databases", modules.Database)
+		mux.Handle("/admin/databases/", modules.Database)
 	}
-	if accessHandler != nil {
-		mux.Handle("/auth/", accessHandler)
-		mux.Handle("/admin/", accessHandler)
-		if viewerHandler == nil {
-			mux.Handle("/databases/", accessHandler)
+	if modules.Access != nil {
+		mux.Handle("/auth/", modules.Access)
+		mux.Handle("/admin/", modules.Access)
+		if modules.Viewer == nil {
+			mux.Handle("/databases/", modules.Access)
 		} else {
-			mux.Handle("GET /databases/{databaseID}/access", accessHandler)
+			mux.Handle("GET /databases/{databaseID}/access", modules.Access)
 		}
 	}
-	if viewerHandler != nil {
-		mux.Handle("/databases", viewerHandler)
-		mux.Handle("/databases/", viewerHandler)
+	if modules.Viewer != nil {
+		mux.Handle("/databases", modules.Viewer)
+		mux.Handle("/databases/", modules.Viewer)
 	}
-	if migrationHandler != nil {
-		mux.Handle("/databases/{databaseID}/migrations", migrationHandler)
-		mux.Handle("/databases/{databaseID}/migrations/", migrationHandler)
-		mux.Handle("/databases/{databaseID}/migrations/explain", migrationHandler)
-		mux.Handle("/databases/{databaseID}/migrations/schema-diff", migrationHandler)
-		mux.Handle("/databases/{databaseID}/migrations/{version}", migrationHandler)
+	if modules.Migration != nil {
+		mux.Handle("/databases/{databaseID}/migrations", modules.Migration)
+		mux.Handle("/databases/{databaseID}/migrations/", modules.Migration)
+		mux.Handle("/databases/{databaseID}/migrations/explain", modules.Migration)
+		mux.Handle("/databases/{databaseID}/migrations/schema-diff", modules.Migration)
+		mux.Handle("/databases/{databaseID}/migrations/{version}", modules.Migration)
 	}
-	if frontendHandler != nil {
-		mux.Handle("/", frontendHandler)
+	if modules.Job != nil {
+		mux.Handle("/databases/{databaseID}/jobs", modules.Job)
+		mux.Handle("/databases/{databaseID}/jobs/{jobID}", modules.Job)
+	}
+	if modules.Frontend != nil {
+		mux.Handle("/", modules.Frontend)
 	}
 	return mux
 }
