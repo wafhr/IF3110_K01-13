@@ -96,7 +96,7 @@ func migrationAuthorizationSteps(permission access.Permission, admin bool) []rep
 	return []repositoryStep{
 		{operation: "begin"},
 		{operation: "query", statement: "FROM access_sessions s JOIN access_users u", rows: [][]driver.Value{{
-			hash[:], true, nil, nil, migrationCSRFToken, now, now, now.Add(time.Hour), repositoryActorID, "editor", admin, true, now,
+			hash[:], true, nil, nil, migrationCSRFToken, now, now, false, now.Add(time.Hour), repositoryActorID, "editor", admin, true, now,
 		}}},
 		{operation: "exec", statement: "UPDATE access_sessions SET last_seen_at"},
 		{operation: "commit"},
