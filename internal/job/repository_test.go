@@ -139,6 +139,9 @@ func TestLeasedTransitions(t *testing.T) {
 		"fail": func(r *Repository, id string) error {
 			return r.Fail(context.Background(), id, testWorkerID, "syntax error")
 		},
+		"release": func(r *Repository, id string) error {
+			return r.Release(context.Background(), id, testWorkerID)
+		},
 		"retry": func(r *Repository, id string) error {
 			return r.Retry(context.Background(), id, testWorkerID, "connection reset", 2*time.Second)
 		},

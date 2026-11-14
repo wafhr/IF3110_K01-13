@@ -37,6 +37,77 @@ Queue rules:
 - Lease and retry times use the database clock, so worker hosts do not need
   synchronized clocks.
 
+## Worker
+
+`cmd/worker` runs `internal/worker`. Start it next to the server with the same
+`.env`; several worker processes can run at once. The server must have started
+once so the access-control schema exists.
+
+The server and the worker build the migration service with
+`app.NewMigrationService`, so a submission and its execution are validated by
+the same permission and approval providers. The approval provider of the
+workflow module is added there once, for both processes.
+
+```sh
+go run ./cmd/worker
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `WORKER_ID` | host name and process ID | Lease owner recorded on running jobs |
+| `WORKER_CONCURRENCY` | `4` | Jobs processed in parallel by one process |
+| `WORKER_POLL_INTERVAL` | `1s` | Wait between claims when the queue is empty |
+| `WORKER_LEASE` | `30s` | Job lease, renewed every third of its length; at least `3s` |
+| `WORKER_MAX_ATTEMPTS` | `5` | Attempts before a transient failure becomes final |
+| `SHUTDOWN_TIMEOUT` | `10s` | Time running attempts get to finish after a stop signal |
+
+### Attempt
+
+Each claimed job runs as one attempt inside `worker.TraceAttempt`, so the
+attempt span continues the trace of the API request that queued it.
+
+1. Open the target through the registry. Only PostgreSQL targets are accepted.
+2. Take `pg_advisory_lock(MigrationLockKey(databaseID))` on a dedicated
+   connection. The lock serializes migrations on one physical database across
+   all workers and registration aliases.
+3. Begin a `READ COMMITTED` transaction and call `PrepareExecution`, which
+   revalidates the actor's permission, approval, plan snapshot, and history.
+4. If the target already holds commit evidence for the execution ID, complete
+   the job without running SQL again. Duplicate deliveries never commit twice.
+5. Otherwise run the SQL, record history in the same transaction, and commit.
+6. Release the lock, then mark the job `succeeded`, schedule a retry, or mark
+   it `failed`.
+
+### Failures and retries
+
+| Failure | Outcome |
+|---|---|
+| Rejected revalidation (permission, approval, outdated plan), SQL errors such as syntax or constraint violations, unsupported target | `failed` immediately |
+| Connection loss, serialization failure, deadlock, lock timeout, server shutdown, platform storage errors | Retried with exponential backoff (1s doubling up to 1m) until `WORKER_MAX_ATTEMPTS` |
+| Commit sent but no response received | Retried without an attempt limit; the next attempt finds the commit evidence or confirms nothing was committed |
+
+A failed attempt rolls back its transaction, so neither the SQL nor the history
+entry is kept and the active migration position does not change. The job
+keeps `last_error` with the SQLSTATE and primary message only; the error detail
+is written to the application log instead.
+
+While a job is pending a retry, later jobs of the same database stay queued,
+so a migration whose result is not yet certain blocks the next one.
+
+### Worker failure and lock recovery
+
+- The advisory lock is a PostgreSQL session lock. If a worker process dies,
+  PostgreSQL ends its sessions and releases the lock; no manual unlock is needed.
+- The job's lease is no longer renewed and expires after `WORKER_LEASE`.
+  Another worker then claims it with a new attempt number.
+- That attempt calls `PrepareExecution`. If the dead worker had committed, the
+  evidence completes the job; otherwise the SQL runs once.
+- A worker that loses its lease while still running stops its attempt and
+  leaves the job to the new owner; queue updates from the old owner are rejected.
+- On `SIGINT`/`SIGTERM` a worker stops claiming, lets running attempts finish
+  within `SHUTDOWN_TIMEOUT`, and returns unfinished jobs to the queue without
+  counting the interrupted attempt against `WORKER_MAX_ATTEMPTS`.
+
 ## Job status API
 
 Both endpoints require a signed-in user with at least View Only access to the
@@ -75,6 +146,6 @@ jobs, and `500` for storage failures.
 ## Tests
 
 ```sh
-go test ./internal/job
-go test -tags=integration -count=1 ./tests -run '^TestJob'
+go test ./internal/job ./internal/worker
+go test -tags=integration -count=1 ./tests -run '^(TestJob|TestMigrationWorker)'
 ```

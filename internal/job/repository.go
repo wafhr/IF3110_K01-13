@@ -140,6 +140,12 @@ func (r *Repository) Retry(ctx context.Context, jobID, workerID, reason string, 
 		available_at = now() + $4 * interval '1 millisecond', `+unleased, reason, delay.Milliseconds())
 }
 
+// Release returns a job whose attempt was interrupted by a stopping worker. The
+// attempt did not fail, so it is not counted against the retry budget.
+func (r *Repository) Release(ctx context.Context, jobID, workerID string) error {
+	return r.updateLeased(ctx, jobID, workerID, `status = 'pending', attempts = j.attempts - 1, available_at = now(), `+unleased)
+}
+
 func (r *Repository) Get(ctx context.Context, jobID string) (Job, error) {
 	if !validUUID(jobID) {
 		return Job{}, ErrNotFound

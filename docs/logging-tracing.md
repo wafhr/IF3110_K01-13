@@ -140,14 +140,15 @@ flowchart LR
 
 ### Current integration boundary
 
-The server's production approval and queue dependencies await their module
-implementations. The job repository, polling loop, batch execution, retry
-scheduler, and `cmd/worker` bootstrap are scaffolds in this checkout. Module 4
-owns their runtime wiring, including logger/provider initialization with
-`service.name=worker` and provider shutdown.
+The server's production approval provider awaits its module implementation.
+The job queue, polling loop, retry scheduler, and `cmd/worker` bootstrap are in
+place: the worker initializes the logger and tracer provider with
+`service.name=worker`, runs every attempt inside `TraceAttempt`, passes the
+attempt context to lock, SQL, history, and commit/rollback, and shuts the
+provider down on exit. Batch execution is pending.
 
 The integration suite exercises the diagram using real PostgreSQL transactions,
-a JSONB test queue, a fixture approval adapter, and `TraceAttempt` callbacks. The
+the production job queue, a fixture approval adapter, and `TraceAttempt` callbacks. The
 fixture callback assigns a batch scope around a transaction. Production batch
 selection and recovery belong to the executor implementation.
 

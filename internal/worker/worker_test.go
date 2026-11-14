@@ -10,12 +10,15 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/wafhr/IF3110_K01-13/internal/job"
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 	"github.com/wafhr/IF3110_K01-13/internal/worker"
@@ -231,5 +234,268 @@ func TestTraceAttemptReportsPanicAndInvalidInputs(t *testing.T) {
 	spans, _ := json.Marshal(tracetest.SpanStubsFromReadOnlySpans(recorder.Ended()))
 	if strings.Contains(logs.String(), "fixture-private-panic") || strings.Contains(string(spans), "fixture-private-panic") {
 		t.Fatal("nilai panic mentah muncul pada telemetry")
+	}
+}
+
+type settlement struct {
+	jobID, kind, reason string
+	delay               time.Duration
+}
+
+type fakeQueue struct {
+	mu        sync.Mutex
+	pending   []job.Job
+	claimErrs []error
+	heartbeat error
+	settled   chan settlement
+}
+
+func newFakeQueue(jobs ...job.Job) *fakeQueue {
+	return &fakeQueue{pending: jobs, settled: make(chan settlement, len(jobs)+1)}
+}
+
+func (q *fakeQueue) Claim(context.Context, string, time.Duration) (job.Job, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.claimErrs) > 0 {
+		err := q.claimErrs[0]
+		q.claimErrs = q.claimErrs[1:]
+		return job.Job{}, err
+	}
+	if len(q.pending) == 0 {
+		return job.Job{}, job.ErrNoJob
+	}
+	next := q.pending[0]
+	q.pending = q.pending[1:]
+	return next, nil
+}
+
+func (q *fakeQueue) Heartbeat(context.Context, string, string, time.Duration) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.heartbeat
+}
+
+func (q *fakeQueue) Complete(_ context.Context, jobID, _ string) error {
+	q.settled <- settlement{jobID: jobID, kind: "complete"}
+	return nil
+}
+
+func (q *fakeQueue) Fail(_ context.Context, jobID, _, reason string) error {
+	q.settled <- settlement{jobID: jobID, kind: "fail", reason: reason}
+	return nil
+}
+
+func (q *fakeQueue) Release(_ context.Context, jobID, _ string) error {
+	q.settled <- settlement{jobID: jobID, kind: "release"}
+	return nil
+}
+
+func (q *fakeQueue) Retry(_ context.Context, jobID, _, reason string, delay time.Duration) error {
+	q.settled <- settlement{jobID: jobID, kind: "retry", reason: reason, delay: delay}
+	return nil
+}
+
+type runnerFunc func(context.Context, migration.ExecutionRequest) (migration.Execution, error)
+
+func (f runnerFunc) Run(ctx context.Context, request migration.ExecutionRequest) (migration.Execution, error) {
+	return f(ctx, request)
+}
+
+func claimedJob(id string, attempts int) job.Job {
+	return job.Job{ID: id, Status: job.Running, Attempts: attempts, Request: migration.ExecutionRequest{
+		ExecutionID: "execution-" + id, Plan: migration.ActionPlan{DatabaseID: "database-" + id, Action: migration.Apply, SQL: "SELECT 1"},
+	}}
+}
+
+func testConfig() worker.Config {
+	return worker.Config{
+		ID: "worker-test", Concurrency: 1, PollInterval: 10 * time.Millisecond, Lease: 3 * time.Second,
+		DrainTimeout: time.Second, Retry: worker.RetryPolicy{MaxAttempts: 3, BaseDelay: time.Second, MaxDelay: 5 * time.Second},
+	}
+}
+
+func startWorker(t *testing.T, queue worker.Queue, runner worker.Runner, config worker.Config) (stop func()) {
+	t.Helper()
+	consumer, err := worker.New(queue, runner, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- consumer.Run(ctx) }()
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Error(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("worker did not stop")
+			}
+		})
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+func nextSettlement(t *testing.T, queue *fakeQueue) settlement {
+	t.Helper()
+	select {
+	case settled := <-queue.settled:
+		return settled
+	case <-time.After(5 * time.Second):
+		t.Fatal("job was not settled")
+		return settlement{}
+	}
+}
+
+func TestNewWorkerValidatesConfiguration(t *testing.T) {
+	runner := runnerFunc(func(context.Context, migration.ExecutionRequest) (migration.Execution, error) {
+		return migration.Execution{}, nil
+	})
+	for name, change := range map[string]func(*worker.Config){
+		"missing ID":           func(c *worker.Config) { c.ID = "" },
+		"no concurrency":       func(c *worker.Config) { c.Concurrency = 0 },
+		"no poll interval":     func(c *worker.Config) { c.PollInterval = 0 },
+		"short lease":          func(c *worker.Config) { c.Lease = time.Second },
+		"no drain timeout":     func(c *worker.Config) { c.DrainTimeout = 0 },
+		"invalid retry policy": func(c *worker.Config) { c.Retry.MaxAttempts = 0 },
+	} {
+		config := testConfig()
+		change(&config)
+		if _, err := worker.New(newFakeQueue(), runner, config); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	if _, err := worker.New(nil, runner, testConfig()); err == nil {
+		t.Error("nil queue accepted")
+	}
+}
+
+func TestWorkerCompletesSuccessfulAttempt(t *testing.T) {
+	queue := newFakeQueue(claimedJob("a", 1))
+	queue.claimErrs = []error{errors.New("platform database restarting")}
+	var received migration.ExecutionRequest
+	startWorker(t, queue, runnerFunc(func(_ context.Context, request migration.ExecutionRequest) (migration.Execution, error) {
+		received = request
+		return migration.Execution{ID: request.ExecutionID, Status: migration.Success}, nil
+	}), testConfig())
+	if settled := nextSettlement(t, queue); settled.kind != "complete" || settled.jobID != "a" || received.ExecutionID != "execution-a" {
+		t.Fatalf("settlement = %+v, request = %+v", settled, received)
+	}
+}
+
+func TestWorkerSettlesFailedAttempts(t *testing.T) {
+	tests := []struct {
+		name      string
+		attempts  int
+		err       error
+		wantKind  string
+		wantDelay time.Duration
+	}{
+		{name: "permanent failure", attempts: 1, err: migration.ErrApprovalRequired, wantKind: "fail"},
+		{name: "transient failure is retried", attempts: 1, err: errors.New("connection reset"), wantKind: "retry", wantDelay: time.Second},
+		{name: "transient failure at the attempt limit", attempts: 3, err: errors.New("connection reset"), wantKind: "fail"},
+		{name: "uncertain commit waits for evidence", attempts: 7, err: worker.ErrCommitUncertain, wantKind: "retry", wantDelay: 5 * time.Second},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			queue := newFakeQueue(claimedJob("a", test.attempts))
+			startWorker(t, queue, runnerFunc(func(context.Context, migration.ExecutionRequest) (migration.Execution, error) {
+				return migration.Execution{}, test.err
+			}), testConfig())
+			settled := nextSettlement(t, queue)
+			if settled.kind != test.wantKind || settled.delay != test.wantDelay || settled.reason == "" {
+				t.Fatalf("settlement = %+v", settled)
+			}
+		})
+	}
+}
+
+func TestWorkerRunsJobsConcurrently(t *testing.T) {
+	queue := newFakeQueue(claimedJob("a", 1), claimedJob("b", 1))
+	var arrived sync.WaitGroup
+	arrived.Add(2)
+	both := make(chan struct{})
+	go func() { arrived.Wait(); close(both) }()
+	config := testConfig()
+	config.Concurrency = 2
+	startWorker(t, queue, runnerFunc(func(ctx context.Context, _ migration.ExecutionRequest) (migration.Execution, error) {
+		arrived.Done()
+		select {
+		case <-both:
+			return migration.Execution{}, nil
+		case <-ctx.Done():
+			return migration.Execution{}, ctx.Err()
+		}
+	}), config)
+	for range 2 {
+		if settled := nextSettlement(t, queue); settled.kind != "complete" {
+			t.Fatalf("settlement = %+v", settled)
+		}
+	}
+}
+
+func TestWorkerShutdown(t *testing.T) {
+	t.Run("attempt finishing within the drain timeout completes", func(t *testing.T) {
+		queue := newFakeQueue(claimedJob("a", 1))
+		started, release := make(chan struct{}), make(chan struct{})
+		stop := startWorker(t, queue, runnerFunc(func(ctx context.Context, _ migration.ExecutionRequest) (migration.Execution, error) {
+			close(started)
+			<-release
+			return migration.Execution{}, ctx.Err()
+		}), testConfig())
+		<-started
+		go stop()
+		time.Sleep(50 * time.Millisecond)
+		close(release)
+		if settled := nextSettlement(t, queue); settled.kind != "complete" {
+			t.Fatalf("settlement = %+v", settled)
+		}
+	})
+	t.Run("attempt exceeding the drain timeout is released", func(t *testing.T) {
+		queue := newFakeQueue(claimedJob("a", 1))
+		started := make(chan struct{})
+		config := testConfig()
+		config.DrainTimeout = 50 * time.Millisecond
+		stop := startWorker(t, queue, runnerFunc(func(ctx context.Context, _ migration.ExecutionRequest) (migration.Execution, error) {
+			close(started)
+			<-ctx.Done()
+			return migration.Execution{}, ctx.Err()
+		}), config)
+		<-started
+		stop()
+		if settled := nextSettlement(t, queue); settled.kind != "release" {
+			t.Fatalf("settlement = %+v", settled)
+		}
+	})
+}
+
+func TestWorkerAbandonsAttemptAfterLosingLease(t *testing.T) {
+	queue := newFakeQueue(claimedJob("a", 1))
+	queue.heartbeat = job.ErrLeaseLost
+	interrupted := make(chan error, 1)
+	stop := startWorker(t, queue, runnerFunc(func(ctx context.Context, _ migration.ExecutionRequest) (migration.Execution, error) {
+		<-ctx.Done()
+		interrupted <- context.Cause(ctx)
+		return migration.Execution{}, ctx.Err()
+	}), testConfig())
+	select {
+	case cause := <-interrupted:
+		if !errors.Is(cause, job.ErrLeaseLost) {
+			t.Fatalf("attempt cancelled by %v", cause)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("attempt kept running after the lease was lost")
+	}
+	stop()
+	select {
+	case settled := <-queue.settled:
+		t.Fatalf("worker changed a job it no longer owns: %+v", settled)
+	default:
 	}
 }

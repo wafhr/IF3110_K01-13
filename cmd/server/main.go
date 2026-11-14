@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -111,14 +110,7 @@ func run() (runErr error) {
 	if err != nil {
 		return err
 	}
-	migrationService := migration.NewServiceWithExecution(func(ctx context.Context, id string) (*sql.DB, database.DBMS, error) {
-		connection, err := databaseRegistry.GetConnectionConfig(ctx, id)
-		if err != nil {
-			return nil, "", err
-		}
-		db, err := targetConnector.Open(ctx, connection)
-		return db, connection.DBMS, err
-	}, migrationRepository, migration.ExecutionDependencies{Authorizer: accessService, Queue: jobService})
+	migrationService, _ := app.NewMigrationService(db, databaseRegistry, targetConnector, migrationRepository, jobService)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	accessHandler := access.NewHTTPHandler(accessService, cfg.SecureCookie)

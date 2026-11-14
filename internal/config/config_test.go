@@ -106,3 +106,52 @@ func TestLoadDatabaseEncryptionKey(t *testing.T) {
 		t.Fatal("database encryption key was not loaded from the environment")
 	}
 }
+
+func TestLoadWorker(t *testing.T) {
+	keys := []string{"WORKER_ID", "WORKER_CONCURRENCY", "WORKER_MAX_ATTEMPTS", "WORKER_POLL_INTERVAL", "WORKER_LEASE"}
+	reset := func(t *testing.T) {
+		for _, key := range keys {
+			t.Setenv(key, "")
+		}
+	}
+	t.Run("defaults", func(t *testing.T) {
+		reset(t)
+		worker, err := config.LoadWorker()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if worker.ID == "" || worker.Concurrency != 4 || worker.MaxAttempts != 5 || worker.PollInterval != time.Second || worker.Lease != 30*time.Second {
+			t.Fatalf("defaults = %+v", worker)
+		}
+	})
+	t.Run("explicit settings", func(t *testing.T) {
+		reset(t)
+		t.Setenv("WORKER_ID", "worker-a")
+		t.Setenv("WORKER_CONCURRENCY", "2")
+		t.Setenv("WORKER_MAX_ATTEMPTS", "3")
+		t.Setenv("WORKER_POLL_INTERVAL", "250ms")
+		t.Setenv("WORKER_LEASE", "10s")
+		worker, err := config.LoadWorker()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if worker.ID != "worker-a" || worker.Concurrency != 2 || worker.MaxAttempts != 3 || worker.PollInterval != 250*time.Millisecond || worker.Lease != 10*time.Second {
+			t.Fatalf("settings = %+v", worker)
+		}
+	})
+	for _, tc := range []struct{ key, value string }{
+		{"WORKER_CONCURRENCY", "0"},
+		{"WORKER_MAX_ATTEMPTS", "many"},
+		{"WORKER_POLL_INTERVAL", "-1s"},
+		{"WORKER_LEASE", "2s"},
+		{"WORKER_LEASE", "soon"},
+	} {
+		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
+			reset(t)
+			t.Setenv(tc.key, tc.value)
+			if _, err := config.LoadWorker(); err == nil || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("error = %v, want one naming %s", err, tc.key)
+			}
+		})
+	}
+}

@@ -60,6 +60,12 @@ database target. Hak `view_only` dan `view_edit` diberikan kepada group.
    go run ./cmd/server
    ```
 
+   Jalankan worker migration pada terminal lain dengan `.env` yang sama:
+
+   ```sh
+   go run ./cmd/worker
+   ```
+
 5. Buka `http://localhost:8080/login`, login dengan akun bootstrap, lalu
    daftarkan database target dan berikan grant melalui group.
 
@@ -111,6 +117,7 @@ go test -tags=integration -count=1 ./tests -run '^TestMigration.*Integration$'
 
 ```text
 cmd/server/                 entry point dan wiring aplikasi
+cmd/worker/                 entry point worker eksekusi migration
 internal/access/            autentikasi, session, group, dan authorization
   schema.sql                tabel user, group, grant, dan session
 internal/app/               routing komposisi modul
@@ -118,6 +125,7 @@ internal/config/            konfigurasi environment
 internal/database/          registry target dan metadata domain
   schema.sql                tabel registry koneksi target
 internal/database/http/     API registry dan viewer
+internal/job/               antrean job persisten dan API status job
 internal/migration/         definisi/revisi, rollback/forward, history, dan kontrak eksekusi
 internal/platformdb/        koneksi database platform
 internal/targetdb/          pengelolaan koneksi target
