@@ -278,7 +278,19 @@ storage failures.
 
 ## Tests
 
+Unit tests in `internal/job` and `internal/worker` use fake SQL drivers and
+fakes for the queue and runner. Integration tests run against PostgreSQL:
+
+| File | Coverage |
+|---|---|
+| `tests/job_queue_test.go` | Redelivery, per-database order, concurrent claims, lease expiry and fencing, retry delay, partial and partially reverted holds, restart |
+| `tests/job_api_test.go` | Job status API, access control, database scoping, single job per execution |
+| `tests/migration_worker_test.go` | Apply, rollback, and forward through the worker, failed SQL, transient retry, duplicate delivery, crashed worker, revoked permission |
+| `tests/migration_batch_test.go` | Batch ranges and checkpoints, NULL keys, partial and resume, interrupted attempts, batch rollback and forward, cancellation, partially reverted resume, irreversible cancellation |
+| `tests/migration_recovery_test.go` | A worker that outlived its lease is fenced by the advisory lock and its commit is not repeated, a stopping worker releases its job without spending an attempt, an interrupted compensation continues with the batches still applied |
+| `tests/migration_batch_benchmark_test.go` | Dataset timing, run with `BATCH_BENCHMARK=1` |
+
 ```sh
 go test ./internal/job ./internal/worker
-go test -tags=integration -count=1 ./tests -run '^(TestJob|TestMigrationWorker|TestMigrationBatch)'
+go test -tags=integration -count=1 ./tests -run '^(TestJob|TestMigrationWorker|TestMigrationBatch|TestMigrationRecovery)'
 ```

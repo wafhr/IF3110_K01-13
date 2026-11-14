@@ -215,27 +215,35 @@ func TestMigrationBatchIntegration(t *testing.T) {
 	})
 }
 
-// interruptingRunner cancels the first attempt right after it reports the
-// given number of committed batches, like a worker stopping between batches.
+// interruptingRunner cancels the first attempt right after it commits the
+// given number of batches, like a worker stopping between batches. It
+// interrupts batch execution and compensation alike.
 type interruptingRunner struct {
-	runner *worker.Executor
-	after  int64
-	once   sync.Once
+	runner  *worker.Executor
+	after   int
+	commits int
+	once    sync.Once
 }
 
 func (r *interruptingRunner) Run(ctx context.Context, request migration.ExecutionRequest, report worker.ProgressFunc) (migration.Execution, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	return r.runner.Run(ctx, request, func(progress job.Progress) {
-		report(progress)
-		if progress.CommittedBatches >= r.after {
-			r.once.Do(cancel)
-		}
-	})
+	return r.interrupt(ctx, request, report, r.runner.Run)
 }
 
 func (r *interruptingRunner) Compensate(ctx context.Context, request migration.ExecutionRequest, report worker.ProgressFunc) (migration.Execution, error) {
-	return r.runner.Compensate(ctx, request, report)
+	return r.interrupt(ctx, request, report, r.runner.Compensate)
+}
+
+func (r *interruptingRunner) interrupt(ctx context.Context, request migration.ExecutionRequest, report worker.ProgressFunc,
+	run func(context.Context, migration.ExecutionRequest, worker.ProgressFunc) (migration.Execution, error)) (migration.Execution, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	return run(ctx, request, func(progress job.Progress) {
+		report(progress)
+		r.commits++
+		if r.commits >= r.after {
+			r.once.Do(cancel)
+		}
+	})
 }
 
 func (f *migrationFixture) seedBatchAccounts(t *testing.T) {
