@@ -16,7 +16,7 @@ import (
 //go:embed schema.sql
 var schema string
 
-const jobColumns = `j.id::text, j.payload, j.status, j.attempts, j.committed_batches, j.committed_rows,
+const jobColumns = `j.id::text, j.payload, j.status, j.operation, j.attempts, j.committed_batches, j.committed_rows,
 	j.total_rows, j.last_error, j.available_at, j.created_at, j.started_at, j.finished_at`
 
 const MaxListLimit = 100
@@ -97,7 +97,7 @@ func (r *Repository) Claim(ctx context.Context, workerID string, lease time.Dura
 			      SELECT 1 FROM migration_jobs earlier
 			      WHERE earlier.database_id = next.database_id
 			        AND earlier.queue_position < next.queue_position
-			        AND earlier.status IN ('pending', 'running', 'partial'))
+			        AND earlier.status IN ('pending', 'running', 'partial', 'partially_reverted'))
 			ORDER BY next.queue_position
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED)
@@ -122,48 +122,67 @@ func (r *Repository) Heartbeat(ctx context.Context, jobID, workerID string, leas
 	return r.updateLeased(ctx, jobID, workerID, `lease_expires_at = now() + $3 * interval '1 millisecond'`, lease.Milliseconds())
 }
 
-// UpdateProgress records the committed progress reported by the lease holder.
+// UpdateProgress records the progress reported after a commit by the lease
+// holder and marks the job as having changed the target database.
 func (r *Repository) UpdateProgress(ctx context.Context, jobID, workerID string, progress Progress) error {
-	return r.updateLeased(ctx, jobID, workerID, `committed_batches = $3, committed_rows = $4, total_rows = $5`,
+	return r.updateLeased(ctx, jobID, workerID, `committed_batches = $3, committed_rows = $4, total_rows = $5, touched = TRUE`,
 		progress.CommittedBatches, progress.CommittedRows, progress.TotalRows)
 }
 
-// MarkPartial stops a batch migration that committed some batches. The job
-// holds later jobs of its database until it is resumed.
-func (r *Repository) MarkPartial(ctx context.Context, jobID, workerID, reason string) error {
-	return r.updateLeased(ctx, jobID, workerID, `status = 'partial', last_error = $3, `+unleased, reason)
+// Resume queues a stopped job again with a fresh attempt budget. The worker
+// continues its operation from the checkpoint on the target database.
+func (r *Repository) Resume(ctx context.Context, jobID string) error {
+	return r.requeue(ctx, jobID, ``, `status IN ('partial', 'partially_reverted')`, ErrNotResumable)
 }
 
-// Resume queues a partial job again with a fresh attempt budget. The worker
-// continues from the checkpoint on the target database.
-func (r *Repository) Resume(ctx context.Context, jobID string) error {
+// Cancel turns a partial apply or forward into a compensation that reverts
+// its committed batches in reverse order.
+func (r *Repository) Cancel(ctx context.Context, jobID string) error {
+	return r.requeue(ctx, jobID, `operation = 'compensate', `,
+		`status = 'partial' AND operation = 'execute' AND payload #>> '{plan,action}' <> 'rollback'`, ErrNotCancelable)
+}
+
+func (r *Repository) requeue(ctx context.Context, jobID, assignments, condition string, rejected error) error {
 	if !validUUID(jobID) {
 		return ErrNotFound
 	}
-	result, err := r.db.ExecContext(ctx, `UPDATE migration_jobs SET status = 'pending', attempts = 0, available_at = now(), updated_at = now()
-		WHERE id = $1 AND status = 'partial'`, jobID)
+	result, err := r.db.ExecContext(ctx, `UPDATE migration_jobs SET `+assignments+`status = 'pending', attempts = 0,
+		available_at = now(), updated_at = now() WHERE id = $1 AND `+condition, jobID)
 	if err != nil {
-		return fmt.Errorf("resume job %s: %w", jobID, err)
+		return fmt.Errorf("requeue job %s: %w", jobID, err)
 	}
-	resumed, err := result.RowsAffected()
+	requeued, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("resume job %s: %w", jobID, err)
+		return fmt.Errorf("requeue job %s: %w", jobID, err)
 	}
-	if resumed == 0 {
+	if requeued == 0 {
 		if _, err := r.Get(ctx, jobID); err != nil {
 			return err
 		}
-		return ErrNotPartial
+		return rejected
 	}
 	return nil
 }
 
+// Complete finishes the job: a compensation ends as reverted, anything else
+// as succeeded.
 func (r *Repository) Complete(ctx context.Context, jobID, workerID string) error {
-	return r.updateLeased(ctx, jobID, workerID, `status = 'succeeded', last_error = '', `+finished)
+	return r.updateLeased(ctx, jobID, workerID, `status = CASE WHEN operation = 'compensate' THEN 'reverted' ELSE 'succeeded' END,
+		last_error = '', `+finished)
 }
 
-func (r *Repository) Fail(ctx context.Context, jobID, workerID, reason string) error {
-	return r.updateLeased(ctx, jobID, workerID, `status = 'failed', last_error = $3, `+finished, reason)
+// Fail stops the job after a failure that will not be retried. committed tells
+// whether the failed attempt itself committed a change. A job that never
+// changed the target fails. One that committed batches stops as partial, or as
+// partially reverted when it was reverting them, and keeps holding later jobs.
+func (r *Repository) Fail(ctx context.Context, jobID, workerID, reason string, committed bool) error {
+	return r.updateLeased(ctx, jobID, workerID, `touched = touched OR $4,
+		status = CASE
+			WHEN NOT (touched OR $4) THEN 'failed'
+			WHEN operation = 'compensate' OR payload #>> '{plan,action}' = 'rollback' THEN 'partially_reverted'
+			ELSE 'partial' END,
+		finished_at = CASE WHEN touched OR $4 THEN NULL ELSE now() END,
+		last_error = $3, `+unleased, reason, committed)
 }
 
 // Retry returns the job to the queue after delay. The attempt count is kept so
@@ -195,7 +214,7 @@ func (r *Repository) Get(ctx context.Context, jobID string) (Job, error) {
 
 // listColumns leaves the SQL out of the payload: listings never return it and
 // it can reach a megabyte per job.
-var listColumns = strings.Replace(jobColumns, "j.payload", `j.payload #- '{plan,sql}'`, 1)
+var listColumns = strings.Replace(jobColumns, "j.payload", `j.payload #- '{plan,sql}' #- '{plan,compensation_sql}'`, 1)
 
 // ListByDatabase returns the most recent jobs of a database registration first.
 func (r *Repository) ListByDatabase(ctx context.Context, databaseID string, limit int) ([]Job, error) {
@@ -261,7 +280,7 @@ func scanJob(row rowScanner) (Job, error) {
 	var job Job
 	var payload []byte
 	var startedAt, finishedAt sql.NullTime
-	err := row.Scan(&job.ID, &payload, &job.Status, &job.Attempts, &job.Progress.CommittedBatches,
+	err := row.Scan(&job.ID, &payload, &job.Status, &job.Operation, &job.Attempts, &job.Progress.CommittedBatches,
 		&job.Progress.CommittedRows, &job.Progress.TotalRows, &job.LastError, &job.AvailableAt, &job.CreatedAt,
 		&startedAt, &finishedAt)
 	if err != nil {

@@ -16,7 +16,9 @@ database, so jobs survive server and worker restarts.
 | `execution_id` | Unique execution identity; resubmitting it returns the stored job |
 | `database_id` | Database registration the job runs against |
 | `payload` | Complete `migration.ExecutionRequest`, including the reviewed plan, SQL, and W3C trace context |
-| `status` | `pending`, `running`, `partial`, `succeeded`, or `failed` |
+| `status` | `pending`, `running`, `partial`, `partially_reverted`, `succeeded`, `reverted`, or `failed` |
+| `operation` | `execute` runs the queued plan; `compensate` reverts the committed batches of a cancelled job |
+| `touched` | Set once an attempt committed a change, so a failure stops the job as partial instead of failed |
 | `attempts`, `last_error`, `available_at` | Attempt count, last failure reason, and next retry time |
 | `committed_batches`, `committed_rows`, `total_rows` | Committed progress of batch migrations |
 | `lease_owner`, `lease_expires_at` | Worker currently holding a running job |
@@ -26,9 +28,10 @@ Queue rules:
 - `Claim` takes the oldest runnable job with `FOR UPDATE SKIP LOCKED`, so
   concurrent workers never receive the same job.
 - A job is runnable only when no earlier job of the same database is still
-  `pending`, `running`, or `partial`. Each database therefore runs one
-  migration at a time in submission order, different databases run in
-  parallel, and a partial migration holds later jobs until it is resolved.
+  `pending`, `running`, `partial`, or `partially_reverted`. Each database
+  therefore runs one migration at a time in submission order, different
+  databases run in parallel, and a partial migration or compensation holds
+  later jobs until it is resolved.
 - A running job whose lease expired is claimed again by another worker. State
   changes (`Heartbeat`, `Complete`, `Fail`, `Retry`) succeed only for the
   worker that still holds the lease; a worker that lost it receives
@@ -155,13 +158,14 @@ and write them:
 | Table | Content |
 |---|---|
 | `platform_migration_batch_scopes` | Execution, migration, revision, batch settings, `scope_end`, `total_rows`, `status` (`running`/`completed`) |
-| `platform_migration_batches` | One row per committed batch: number, `first_key`, `last_key`, `row_count`, commit time |
+| `platform_migration_batches` | One row per committed batch: number, `first_key`, `last_key`, `row_count`, commit time, `reverted_at` |
 
-A batch row is written in the transaction of the batch it describes, so it is
-the commit evidence of that batch. A new attempt continues after the last
-batch row: committed batches never run twice, even after a worker crash, a
-lost commit response, or a duplicate job delivery. The stored ranges are the
-row scope that batch compensation uses.
+A batch row is written in the transaction of the batch it describes, and
+`reverted_at` is set in the transaction that reverts it, so each row is the
+commit evidence of its change. A new attempt continues after the last batch
+row: committed batches never run twice, even after a worker crash, a lost
+commit response, or a duplicate job delivery. The stored key ranges are the
+row scope that compensation reverts.
 
 ### Progress, partial status, and resume
 
@@ -171,14 +175,40 @@ row scope that batch compensation uses.
   permanently, or retries run out, after at least one batch committed, the job
   becomes `partial`: committed batches stay, the failed batch is rolled back,
   and `last_error` describes the failure.
-- A `partial` job holds every later job of the same database.
+- A `partial` job holds every later job of the same database until it is
+  resumed or cancelled.
 - `POST /databases/{databaseID}/jobs/{jobID}/resume` (View + Edit) queues a
-  partial job again with a fresh attempt budget. The worker continues after
-  the last committed batch and revalidates permission and approval for every
-  batch. A job that is not `partial` returns `409`.
-- Rolling back a batch migration is batch compensation and fails with
-  `rollback of batch migrations runs as batch compensation` until
-  compensation is available.
+  `partial` or `partially_reverted` job again with a fresh attempt budget. The
+  worker continues its operation from the checkpoint and revalidates
+  permission and approval for every batch. Any other status returns `409`.
+
+### Compensation
+
+Compensation reverts committed batches with the approved down SQL, one batch
+per transaction, from the last batch to the first. It is never a single
+rollback of the whole migration.
+
+- **Rollback of a completed batch migration.** A `rollback` action of a batch
+  revision runs its down SQL over the batches of the execution it reverts. The
+  rollback execution is written to the history, referencing the reverted
+  execution, in the transaction after the first batch is reverted last. A
+  later `forward` is a new execution with its own batches.
+- **Cancelling a partial apply or forward.** `POST
+  /databases/{databaseID}/jobs/{jobID}/cancel` (View + Edit) turns a `partial`
+  job into a compensation (`operation: compensate`). The worker reverts its
+  committed batches with the down SQL carried in the approved plan as
+  `compensation_sql`. The cancelled execution never reached the history, so
+  the history is not changed; the job ends as `reverted`.
+- **Unsafe compensation is refused.** An irreversible batch migration has no
+  approved down SQL, so cancelling it returns `409` with `the migration is
+  irreversible; create a new migration to repair its data`. Data that a down
+  SQL cannot restore belongs in an irreversible migration.
+- **Partial compensation.** If reverting a batch fails, its transaction rolls
+  back, the batches reverted so far stay reverted, and the job becomes
+  `partially_reverted` with the remaining batches in `progress`. It holds later
+  jobs of the database until it is resumed.
+- **Validation.** Every compensated batch revalidates permission, the plan, and
+  its approval in the locked transaction, exactly like executing a batch.
 
 ### Test dataset
 
@@ -208,8 +238,8 @@ its progress if a later batch fails.
 
 ## Job status API
 
-Reading jobs requires at least View Only access to the database; resuming a
-partial job requires View + Edit. A job is only reachable through the database
+Reading jobs requires at least View Only access to the database; resuming or
+cancelling a job requires View + Edit. A job is only reachable through the database
 it was queued for.
 
 | Method and path | Response |
@@ -217,6 +247,7 @@ it was queued for.
 | `GET /databases/{databaseID}/jobs?limit=50` | `{"jobs":[...]}`, newest first; `limit` is 1 to 100 |
 | `GET /databases/{databaseID}/jobs/{jobID}` | `{"job":{...}}` |
 | `POST /databases/{databaseID}/jobs/{jobID}/resume` | `202` with `{"job":{...}}`; requires View + Edit and the CSRF token |
+| `POST /databases/{databaseID}/jobs/{jobID}/cancel` | `202` with `{"job":{...}}`; requires View + Edit and the CSRF token |
 
 ```json
 {
@@ -230,6 +261,7 @@ it was queued for.
     "action": "apply",
     "revision": 1,
     "status": "pending",
+    "operation": "execute",
     "attempts": 0,
     "progress": {"committed_batches": 0, "committed_rows": 0, "total_rows": 0},
     "available_at": "2026-11-14T09:00:00Z",
@@ -241,8 +273,8 @@ it was queued for.
 `last_error`, `started_at`, and `finished_at` appear once set. The queued SQL
 and trace context are not returned. Errors use `{"error":"..."}` with `400`
 for an invalid `limit`, `401`/`403` from access control, `404` for unknown
-jobs, `409` when resuming a job that is not partial, and `500` for storage
-failures.
+jobs, `409` when the job cannot be resumed or cancelled, and `500` for
+storage failures.
 
 ## Tests
 

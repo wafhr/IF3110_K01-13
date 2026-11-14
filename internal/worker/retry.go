@@ -85,7 +85,8 @@ func (p RetryPolicy) backoff(attempt int) time.Duration {
 
 var permanentErrors = []error{
 	ErrUnsupportedTarget,
-	ErrUnsupportedBatchAction,
+	ErrCompensationUnavailable,
+	errExecutionFinished,
 	migration.ErrApprovalRequired,
 	migration.ErrImmutableMigration,
 	migration.ErrIrreversibleMigration,

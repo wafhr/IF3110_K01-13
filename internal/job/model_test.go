@@ -62,11 +62,18 @@ func TestValidateRequest(t *testing.T) {
 	}
 }
 
-func TestStatusTerminal(t *testing.T) {
-	tests := map[Status]bool{Pending: false, Running: false, Partial: false, Succeeded: true, Failed: true}
-	for status, want := range tests {
-		if got := status.Terminal(); got != want {
-			t.Errorf("%s terminal = %t, want %t", status, got, want)
+func TestStatusClasses(t *testing.T) {
+	tests := []struct {
+		status            Status
+		terminal, stopped bool
+	}{
+		{status: Pending}, {status: Running},
+		{status: Partial, stopped: true}, {status: PartiallyReverted, stopped: true},
+		{status: Succeeded, terminal: true}, {status: Reverted, terminal: true}, {status: Failed, terminal: true},
+	}
+	for _, test := range tests {
+		if test.status.Terminal() != test.terminal || test.status.Stopped() != test.stopped {
+			t.Errorf("%s terminal = %t, stopped = %t", test.status, test.status.Terminal(), test.status.Stopped())
 		}
 	}
 }

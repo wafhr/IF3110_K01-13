@@ -159,6 +159,7 @@ type ActionPlan struct {
 	RevertsExecutionID string    `json:"reverts_execution_id,omitempty"`
 	BaseExecutionID    string    `json:"base_execution_id,omitempty"`
 	Batch              BatchSpec `json:"batch,omitzero"`
+	CompensationSQL    string    `json:"compensation_sql,omitempty"`
 }
 
 // ExecutionRequest mengikat job pada aktor, approval, revisi, SQL, dan posisi

@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -14,8 +13,6 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
-
-var ErrUnsupportedBatchAction = errors.New("rollback of batch migrations runs as batch compensation")
 
 // ProgressFunc receives the committed progress after every batch commit.
 type ProgressFunc func(job.Progress)
@@ -85,9 +82,6 @@ func (q batchQueries) following(ctx context.Context, tx *sql.Tx, scope batchScop
 // attempt resumes after the last committed batch, and the execution history is
 // written in a final transaction once no range is left.
 func (e *Executor) runBatches(ctx context.Context, conn *sql.Conn, request migration.ExecutionRequest, report ProgressFunc) (migration.Execution, error) {
-	if request.Plan.Action == migration.Rollback {
-		return migration.Execution{}, ErrUnsupportedBatchAction
-	}
 	store, err := openCheckpoints(ctx, conn)
 	if err != nil {
 		return migration.Execution{}, err
@@ -184,7 +178,7 @@ func (e *Executor) finishBatches(ctx context.Context, tx *sql.Tx, prepared Prepa
 	if err != nil {
 		return migration.Execution{}, err
 	}
-	if err := store.complete(ctx, tx, executionID, e.now()); err != nil {
+	if err := store.finish(ctx, tx, executionID, scopeCompleted, e.now()); err != nil {
 		return migration.Execution{}, err
 	}
 	if err := tx.Commit(); err != nil {

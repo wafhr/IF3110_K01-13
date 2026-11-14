@@ -161,3 +161,30 @@ func TestResumeJob(t *testing.T) {
 		t.Fatalf("resume without edit access = %d", response.Code)
 	}
 }
+
+func TestCancelJob(t *testing.T) {
+	path := "/databases/" + testDatabaseID + "/jobs/" + testJobID + "/cancel"
+	irreversible := partialJob()
+	irreversible.Request.Plan.CompensationSQL = ""
+	tests := []struct {
+		name       string
+		job        Job
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "partial apply is compensated", job: partialJob(), wantStatus: http.StatusAccepted, wantBody: `"operation":"compensate"`},
+		{name: "irreversible migration", job: irreversible, wantStatus: http.StatusConflict, wantBody: ErrIrreversible.Error()},
+		{name: "job that is not partial", job: queuedJob(), wantStatus: http.StatusConflict, wantBody: ErrNotCancelable.Error()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := serveMethod(t, newFakeStore(test.job), allowGuard(t), http.MethodPost, path)
+			if response.Code != test.wantStatus || !strings.Contains(response.Body.String(), test.wantBody) {
+				t.Fatalf("cancel = %d %s", response.Code, response.Body.String())
+			}
+		})
+	}
+	if response := serveMethod(t, newFakeStore(partialJob()), denyGuard(), http.MethodPost, path); response.Code != http.StatusForbidden {
+		t.Fatalf("cancel without edit access = %d", response.Code)
+	}
+}

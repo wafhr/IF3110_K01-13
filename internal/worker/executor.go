@@ -52,8 +52,37 @@ func NewExecutor(openTarget migration.TargetOpener, preparer Preparer) (*Executo
 
 // Run returns the committed execution. When the target already holds commit
 // evidence for the execution ID, it returns that record without running SQL.
-// Batch migrations report their committed progress through report.
+// Batch migrations report their committed progress through report, and the
+// rollback of a batch migration reverts its batches in reverse order.
 func (e *Executor) Run(ctx context.Context, request migration.ExecutionRequest, report ProgressFunc) (migration.Execution, error) {
+	return e.locked(ctx, request, func(conn *sql.Conn) (migration.Execution, error) {
+		plan := request.Plan
+		switch {
+		case plan.Batch.Enabled() && plan.Action == migration.Rollback:
+			return e.revertBatches(ctx, conn, request, rollbackReversal(plan), report)
+		case plan.Batch.Enabled():
+			return e.runBatches(ctx, conn, request, report)
+		default:
+			return e.execute(ctx, conn, request)
+		}
+	})
+}
+
+// Compensate reverts the committed batches of a partial batch apply or
+// forward with the down SQL approved in its plan, in reverse batch order.
+func (e *Executor) Compensate(ctx context.Context, request migration.ExecutionRequest, report ProgressFunc) (migration.Execution, error) {
+	plan := request.Plan
+	if !plan.Batch.Enabled() || plan.Action == migration.Rollback || plan.CompensationSQL == "" {
+		return migration.Execution{}, ErrCompensationUnavailable
+	}
+	return e.locked(ctx, request, func(conn *sql.Conn) (migration.Execution, error) {
+		return e.revertBatches(ctx, conn, request, cancelReversal(request), report)
+	})
+}
+
+// locked runs work on a dedicated target connection that holds the database
+// migration lock for the whole call.
+func (e *Executor) locked(ctx context.Context, request migration.ExecutionRequest, work func(*sql.Conn) (migration.Execution, error)) (migration.Execution, error) {
 	db, dbms, err := e.openTarget(ctx, request.Plan.DatabaseID)
 	if err != nil {
 		return migration.Execution{}, err
@@ -72,10 +101,7 @@ func (e *Executor) Run(ctx context.Context, request migration.ExecutionRequest, 
 		return migration.Execution{}, err
 	}
 	defer unlock()
-	if request.Plan.Batch.Enabled() {
-		return e.runBatches(ctx, conn, request, report)
-	}
-	return e.execute(ctx, conn, request)
+	return work(conn)
 }
 
 func (e *Executor) execute(ctx context.Context, conn *sql.Conn, request migration.ExecutionRequest) (migration.Execution, error) {

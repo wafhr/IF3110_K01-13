@@ -8,10 +8,10 @@ CREATE TABLE IF NOT EXISTS {{schema}}.platform_migration_batch_scopes (
     batch_size INTEGER NOT NULL CHECK (batch_size > 0),
     scope_end TEXT,
     total_rows BIGINT NOT NULL CHECK (total_rows >= 0),
-    status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed')),
+    status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'reverted')),
     started_at TIMESTAMPTZ NOT NULL,
     completed_at TIMESTAMPTZ,
-    CHECK ((status = 'completed') = (completed_at IS NOT NULL))
+    CHECK ((status = 'running') = (completed_at IS NULL))
 );
 
 CREATE TABLE IF NOT EXISTS {{schema}}.platform_migration_batches (
@@ -21,5 +21,7 @@ CREATE TABLE IF NOT EXISTS {{schema}}.platform_migration_batches (
     last_key TEXT NOT NULL,
     row_count BIGINT NOT NULL CHECK (row_count > 0),
     committed_at TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (execution_id, batch_number)
+    reverted_at TIMESTAMPTZ,
+    PRIMARY KEY (execution_id, batch_number),
+    CHECK (reverted_at IS NULL OR reverted_at >= committed_at)
 );

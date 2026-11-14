@@ -16,7 +16,11 @@ import (
 //go:embed checkpoint.sql
 var checkpointSchema string
 
-var errHistoryMissing = errors.New("execution history is not initialized on the target")
+var (
+	errHistoryMissing  = errors.New("execution history is not initialized on the target")
+	errScopeMissing    = fmt.Errorf("%w: the reverted execution has no batch checkpoints", migration.ErrConflict)
+	errBatchNotApplied = errors.New("batch checkpoint is already reverted")
+)
 
 type querier interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -39,8 +43,9 @@ type batchRange struct {
 }
 
 // checkpoints stores batch scopes and committed batches in the schema of the
-// target's execution history. Each batch row is written in the transaction of
-// the batch it describes, so it is the commit evidence of that batch.
+// target's execution history. Each batch row is written, and later marked
+// reverted, in the transaction of the change it describes, so it is the commit
+// evidence of that change.
 type checkpoints struct {
 	scopes  string
 	batches string
@@ -122,9 +127,58 @@ func (c checkpoints) saveBatch(ctx context.Context, q querier, executionID strin
 	return nil
 }
 
-func (c checkpoints) complete(ctx context.Context, q querier, executionID string, completedAt time.Time) error {
-	if _, err := q.ExecContext(ctx, `UPDATE `+c.scopes+` SET status = 'completed', completed_at = $2 WHERE execution_id = $1`, executionID, completedAt); err != nil {
-		return fmt.Errorf("complete batch scope: %w", err)
+// copyScope starts the scope of an execution that reverts another one: it keeps
+// the reverted execution's settings and row total with its own start time.
+func (c checkpoints) copyScope(ctx context.Context, q querier, executionID, revertedID string, startedAt time.Time) error {
+	result, err := q.ExecContext(ctx, `INSERT INTO `+c.scopes+` (execution_id, database_id, migration_id, revision, batch_table,
+		batch_key, batch_size, scope_end, total_rows, started_at)
+		SELECT $1, database_id, migration_id, revision, batch_table, batch_key, batch_size, scope_end, total_rows, $2
+		FROM `+c.scopes+` WHERE execution_id = $3`, executionID, startedAt, revertedID)
+	if err != nil {
+		return fmt.Errorf("save reversal scope: %w", err)
+	}
+	copied, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("save reversal scope: %w", err)
+	}
+	if copied == 0 {
+		return errScopeMissing
+	}
+	return nil
+}
+
+// lastApplied returns the highest committed batch that is not reverted yet.
+func (c checkpoints) lastApplied(ctx context.Context, q querier, executionID string) (batchRange, bool, error) {
+	var last batchRange
+	err := q.QueryRowContext(ctx, `SELECT batch_number, first_key, last_key, row_count FROM `+c.batches+`
+		WHERE execution_id = $1 AND reverted_at IS NULL ORDER BY batch_number DESC LIMIT 1`, executionID).
+		Scan(&last.Number, &last.First, &last.Last, &last.Rows)
+	if errors.Is(err, sql.ErrNoRows) {
+		return batchRange{}, false, nil
+	}
+	if err != nil {
+		return batchRange{}, false, fmt.Errorf("load last applied batch: %w", err)
+	}
+	return last, true, nil
+}
+
+func (c checkpoints) markReverted(ctx context.Context, q querier, executionID string, batch int64, revertedAt time.Time) error {
+	result, err := q.ExecContext(ctx, `UPDATE `+c.batches+` SET reverted_at = $3
+		WHERE execution_id = $1 AND batch_number = $2 AND reverted_at IS NULL`, executionID, batch, revertedAt)
+	if err != nil {
+		return fmt.Errorf("save reverted batch: %w", err)
+	}
+	if reverted, err := result.RowsAffected(); err != nil || reverted != 1 {
+		return errBatchNotApplied
+	}
+	return nil
+}
+
+// finish closes a scope as completed, after all batches committed, or as
+// reverted, after all of them were compensated.
+func (c checkpoints) finish(ctx context.Context, q querier, executionID, status string, finishedAt time.Time) error {
+	if _, err := q.ExecContext(ctx, `UPDATE `+c.scopes+` SET status = $2, completed_at = $3 WHERE execution_id = $1`, executionID, status, finishedAt); err != nil {
+		return fmt.Errorf("finish batch scope: %w", err)
 	}
 	return nil
 }
@@ -132,7 +186,7 @@ func (c checkpoints) complete(ctx context.Context, q querier, executionID string
 func (c checkpoints) progress(ctx context.Context, q querier, executionID string) (job.Progress, error) {
 	var progress job.Progress
 	err := q.QueryRowContext(ctx, `SELECT count(b.batch_number), COALESCE(sum(b.row_count), 0), s.total_rows
-		FROM `+c.scopes+` s LEFT JOIN `+c.batches+` b ON b.execution_id = s.execution_id
+		FROM `+c.scopes+` s LEFT JOIN `+c.batches+` b ON b.execution_id = s.execution_id AND b.reverted_at IS NULL
 		WHERE s.execution_id = $1 GROUP BY s.total_rows`, executionID).
 		Scan(&progress.CommittedBatches, &progress.CommittedRows, &progress.TotalRows)
 	if err != nil {

@@ -129,7 +129,7 @@ func (f *migrationFixture) workerExecutor(t *testing.T, outages *atomic.Int32) *
 	return executor
 }
 
-// processJob runs a worker until the job of request is final or partial.
+// processJob runs a worker until the job of request is final or stopped.
 func (f *migrationFixture) processJob(t *testing.T, runner worker.Runner, request migration.ExecutionRequest) job.Job {
 	t.Helper()
 	return f.processJobWithin(t, runner, request, 15*time.Second)
@@ -160,7 +160,7 @@ func (f *migrationFixture) processJobWithin(t *testing.T, runner worker.Runner, 
 		if err != nil {
 			t.Fatal(err)
 		}
-		if current.Status.Terminal() || current.Status == job.Partial {
+		if current.Status.Terminal() || current.Status.Stopped() {
 			return current
 		}
 		time.Sleep(20 * time.Millisecond)

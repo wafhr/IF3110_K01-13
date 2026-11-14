@@ -18,8 +18,9 @@ type stubCall struct {
 }
 
 type stubQuery struct {
-	fragment string
-	rows     [][]driver.Value
+	fragment  string
+	rows      [][]driver.Value
+	remaining int
 }
 
 // stubTarget is a target database that records statements, arguments, and
@@ -40,6 +41,13 @@ func newStubTarget() *stubTarget { return &stubTarget{execErrors: map[string]err
 
 func (s *stubTarget) onQuery(fragment string, rows ...[]driver.Value) *stubTarget {
 	s.queries = append(s.queries, stubQuery{fragment: fragment, rows: rows})
+	return s
+}
+
+// onQueryOnce answers the first matching query only; later ones fall through
+// to the next matching rule.
+func (s *stubTarget) onQueryOnce(fragment string, rows ...[]driver.Value) *stubTarget {
+	s.queries = append(s.queries, stubQuery{fragment: fragment, rows: rows, remaining: 1})
 	return s
 }
 
@@ -100,10 +108,14 @@ func (s *stubTarget) query(query string, args []driver.NamedValue) (driver.Rows,
 	s.record(query, args)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, rule := range s.queries {
-		if strings.Contains(query, rule.fragment) {
-			return &stubTargetRows{rows: rule.rows}, nil
+	for i, rule := range s.queries {
+		if rule.remaining < 0 || !strings.Contains(query, rule.fragment) {
+			continue
 		}
+		if rule.remaining == 1 {
+			s.queries[i].remaining = -1
+		}
+		return &stubTargetRows{rows: rule.rows}, nil
 	}
 	return nil, fmt.Errorf("unexpected query: %s", query)
 }

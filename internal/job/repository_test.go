@@ -31,7 +31,7 @@ func jobRow(t *testing.T, request migration.ExecutionRequest, status Status, att
 	if attempts > 0 {
 		startedAt = testCreatedAt.Add(time.Second)
 	}
-	return []driver.Value{testJobID, payload, string(status), attempts, int64(0), int64(0), int64(0), "", testCreatedAt, testCreatedAt, startedAt, nil}
+	return []driver.Value{testJobID, payload, string(status), string(Execute), attempts, int64(0), int64(0), int64(0), "", testCreatedAt, testCreatedAt, startedAt, nil}
 }
 
 func TestNewRepositoryRequiresDatabase(t *testing.T) {
@@ -137,7 +137,7 @@ func TestLeasedTransitions(t *testing.T) {
 		},
 		"complete": func(r *Repository, id string) error { return r.Complete(context.Background(), id, testWorkerID) },
 		"fail": func(r *Repository, id string) error {
-			return r.Fail(context.Background(), id, testWorkerID, "syntax error")
+			return r.Fail(context.Background(), id, testWorkerID, "syntax error", false)
 		},
 		"release": func(r *Repository, id string) error {
 			return r.Release(context.Background(), id, testWorkerID)
@@ -147,9 +147,6 @@ func TestLeasedTransitions(t *testing.T) {
 		},
 		"progress": func(r *Repository, id string) error {
 			return r.UpdateProgress(context.Background(), id, testWorkerID, Progress{CommittedBatches: 2, CommittedRows: 2000, TotalRows: 5000})
-		},
-		"partial": func(r *Repository, id string) error {
-			return r.MarkPartial(context.Background(), id, testWorkerID, "SQLSTATE 22012: division by zero")
 		},
 	}
 	for name, transition := range transitions {
@@ -179,7 +176,7 @@ func TestTransitionArguments(t *testing.T) {
 	if err := repository.Retry(context.Background(), testJobID, testWorkerID, "connection reset", 1500*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.Fail(context.Background(), testJobID, testWorkerID, "syntax error"); err != nil {
+	if err := repository.Fail(context.Background(), testJobID, testWorkerID, "syntax error", false); err != nil {
 		t.Fatal(err)
 	}
 	updates := database.executed("UPDATE migration_jobs")
@@ -226,7 +223,7 @@ func TestListByDatabase(t *testing.T) {
 	if list.args[0] != testDatabaseID || list.args[1] != int64(20) {
 		t.Fatalf("list arguments = %v", list.args)
 	}
-	if !strings.Contains(list.query, "j.payload #- '{plan,sql}'") {
+	if !strings.Contains(list.query, "j.payload #- '{plan,sql}' #- '{plan,compensation_sql}'") {
 		t.Fatalf("listing loads the queued SQL: %s", list.query)
 	}
 	repository := (&stubDatabase{}).repository(t)
@@ -240,41 +237,72 @@ func TestListByDatabase(t *testing.T) {
 	}
 }
 
-func TestProgressAndPartialArguments(t *testing.T) {
+func TestProgressAndStopStatements(t *testing.T) {
 	database := &stubDatabase{}
 	repository := database.repository(t)
 	if err := repository.UpdateProgress(context.Background(), testJobID, testWorkerID, Progress{CommittedBatches: 2, CommittedRows: 2000, TotalRows: 5000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.MarkPartial(context.Background(), testJobID, testWorkerID, "division by zero"); err != nil {
+	if err := repository.Fail(context.Background(), testJobID, testWorkerID, "division by zero", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Complete(context.Background(), testJobID, testWorkerID); err != nil {
 		t.Fatal(err)
 	}
 	updates := database.executed("UPDATE migration_jobs")
-	if args := updates[0].args; args[2] != int64(2) || args[3] != int64(2000) || args[4] != int64(5000) {
-		t.Fatalf("progress arguments = %v", args)
+	if args := updates[0].args; args[2] != int64(2) || args[3] != int64(2000) || args[4] != int64(5000) || !strings.Contains(updates[0].query, "touched = TRUE") {
+		t.Fatalf("progress update = %+v", updates[0])
 	}
-	if !strings.Contains(updates[1].query, "status = 'partial'") || updates[1].args[2] != "division by zero" {
-		t.Fatalf("partial update = %+v", updates[1])
+	for _, fragment := range []string{"touched = touched OR $4", "WHEN NOT (touched OR $4) THEN 'failed'", "THEN 'partially_reverted'", "ELSE 'partial'", "finished_at = CASE WHEN touched OR $4 THEN NULL"} {
+		if !strings.Contains(updates[1].query, fragment) {
+			t.Errorf("fail statement misses %q", fragment)
+		}
+	}
+	if updates[1].args[2] != "division by zero" || updates[1].args[3] != true {
+		t.Fatalf("fail arguments = %v", updates[1].args)
+	}
+	if !strings.Contains(updates[2].query, "WHEN operation = 'compensate' THEN 'reverted' ELSE 'succeeded'") {
+		t.Fatalf("complete statement = %s", updates[2].query)
 	}
 }
 
-func TestResume(t *testing.T) {
-	resumed := &stubDatabase{}
-	if err := resumed.repository(t).Resume(context.Background(), testJobID); err != nil {
-		t.Fatal(err)
+func TestRequeueStoppedJobs(t *testing.T) {
+	tests := []struct {
+		name      string
+		requeue   func(*Repository, string) error
+		condition string
+		rejected  error
+	}{
+		{name: "resume", requeue: (*Repository).resumeFor, condition: "status IN ('partial', 'partially_reverted')", rejected: ErrNotResumable},
+		{name: "cancel", requeue: (*Repository).cancelFor, condition: "operation = 'execute' AND payload #>> '{plan,action}' <> 'rollback'", rejected: ErrNotCancelable},
 	}
-	if update := resumed.executed("WHERE id = $1 AND status = 'partial'"); len(update) != 1 || !strings.Contains(update[0].query, "attempts = 0") {
-		t.Fatalf("resume statements = %+v", update)
-	}
-	running := (&stubDatabase{}).onExec("status = 'partial'", 0).onQuery(jobByID, jobRow(t, testRequest(), Running, 1))
-	if err := running.repository(t).Resume(context.Background(), testJobID); !errors.Is(err, ErrNotPartial) {
-		t.Fatalf("resuming a running job returned %v", err)
-	}
-	missing := (&stubDatabase{}).onExec("status = 'partial'", 0).onQuery(jobByID)
-	if err := missing.repository(t).Resume(context.Background(), testJobID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("resuming a missing job returned %v", err)
-	}
-	if err := (&stubDatabase{}).repository(t).Resume(context.Background(), "job"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("resuming a malformed ID returned %v", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			accepted := &stubDatabase{}
+			if err := test.requeue(accepted.repository(t), testJobID); err != nil {
+				t.Fatal(err)
+			}
+			update := accepted.executed(test.condition)
+			if len(update) != 1 || !strings.Contains(update[0].query, "attempts = 0") || !strings.Contains(update[0].query, "status = 'pending'") {
+				t.Fatalf("requeue statements = %+v", update)
+			}
+			if (test.name == "cancel") != strings.Contains(update[0].query, "operation = 'compensate'") {
+				t.Fatalf("operation change in %s", update[0].query)
+			}
+			running := (&stubDatabase{}).onExec("WHERE id = $1 AND", 0).onQuery(jobByID, jobRow(t, testRequest(), Running, 1))
+			if err := test.requeue(running.repository(t), testJobID); !errors.Is(err, test.rejected) {
+				t.Fatalf("requeueing a running job returned %v", err)
+			}
+			missing := (&stubDatabase{}).onExec("WHERE id = $1 AND", 0).onQuery(jobByID)
+			if err := test.requeue(missing.repository(t), testJobID); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("requeueing a missing job returned %v", err)
+			}
+			if err := test.requeue((&stubDatabase{}).repository(t), "job"); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("requeueing a malformed ID returned %v", err)
+			}
+		})
 	}
 }
+
+func (r *Repository) resumeFor(jobID string) error { return r.Resume(context.Background(), jobID) }
+func (r *Repository) cancelFor(jobID string) error { return r.Cancel(context.Background(), jobID) }

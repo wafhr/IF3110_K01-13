@@ -5,6 +5,8 @@ CREATE TABLE IF NOT EXISTS migration_jobs (
     database_id UUID NOT NULL,
     payload JSONB NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
+    operation TEXT NOT NULL DEFAULT 'execute' CHECK (operation IN ('execute', 'compensate')),
+    touched BOOLEAN NOT NULL DEFAULT FALSE,
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     committed_batches BIGINT NOT NULL DEFAULT 0 CHECK (committed_batches >= 0),
     committed_rows BIGINT NOT NULL DEFAULT 0 CHECK (committed_rows >= 0),
@@ -17,7 +19,7 @@ CREATE TABLE IF NOT EXISTS migration_jobs (
     started_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT migration_jobs_status_check CHECK (status IN ('pending', 'running', 'partial', 'succeeded', 'failed')),
+    CONSTRAINT migration_jobs_status_check CHECK (status IN ('pending', 'running', 'partial', 'partially_reverted', 'succeeded', 'reverted', 'failed')),
     CONSTRAINT migration_jobs_lease_check CHECK ((status = 'running') = (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL))
 );
 

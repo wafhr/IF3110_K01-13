@@ -240,6 +240,7 @@ func TestTraceAttemptReportsPanicAndInvalidInputs(t *testing.T) {
 type settlement struct {
 	jobID, kind, reason string
 	delay               time.Duration
+	committed           bool
 }
 
 type fakeQueue struct {
@@ -294,8 +295,8 @@ func (q *fakeQueue) Complete(_ context.Context, jobID, _ string) error {
 	return nil
 }
 
-func (q *fakeQueue) Fail(_ context.Context, jobID, _, reason string) error {
-	q.settled <- settlement{jobID: jobID, kind: "fail", reason: reason}
+func (q *fakeQueue) Fail(_ context.Context, jobID, _, reason string, committed bool) error {
+	q.settled <- settlement{jobID: jobID, kind: "fail", reason: reason, committed: committed}
 	return nil
 }
 
@@ -315,10 +316,30 @@ func (f runnerFunc) Run(ctx context.Context, request migration.ExecutionRequest,
 	return f(ctx, request)
 }
 
+func (f runnerFunc) Compensate(context.Context, migration.ExecutionRequest, worker.ProgressFunc) (migration.Execution, error) {
+	return migration.Execution{}, errors.New("compensation was not expected")
+}
+
 type batchRunnerFunc func(context.Context, worker.ProgressFunc) (migration.Execution, error)
 
 func (f batchRunnerFunc) Run(ctx context.Context, _ migration.ExecutionRequest, report worker.ProgressFunc) (migration.Execution, error) {
 	return f(ctx, report)
+}
+
+func (f batchRunnerFunc) Compensate(context.Context, migration.ExecutionRequest, worker.ProgressFunc) (migration.Execution, error) {
+	return migration.Execution{}, errors.New("compensation was not expected")
+}
+
+type compensatingRunner struct{ compensated chan string }
+
+func (r compensatingRunner) Run(context.Context, migration.ExecutionRequest, worker.ProgressFunc) (migration.Execution, error) {
+	return migration.Execution{}, errors.New("execution was not expected")
+}
+
+func (r compensatingRunner) Compensate(_ context.Context, request migration.ExecutionRequest, report worker.ProgressFunc) (migration.Execution, error) {
+	report(job.Progress{CommittedBatches: 1, CommittedRows: 1000, TotalRows: 5000})
+	r.compensated <- request.ExecutionID
+	return migration.Execution{}, nil
 }
 
 func claimedJob(id string, attempts int) job.Job {
@@ -528,7 +549,7 @@ func TestWorkerRecordsBatchProgress(t *testing.T) {
 	}{
 		{name: "finished batch migration completes", committed: 3, wantKind: "complete"},
 		{name: "failure after committed batches leaves the job partial", err: errors.New("division by zero"), committed: 2, wantKind: "retry"},
-		{name: "permanent failure after committed batches is partial", err: migration.ErrConflict, committed: 2, wantKind: "partial"},
+		{name: "permanent failure after committed batches stops the job", err: migration.ErrConflict, committed: 2, wantKind: "fail"},
 		{name: "permanent failure before any batch fails", err: migration.ErrConflict, wantKind: "fail"},
 	}
 	for _, test := range tests {
@@ -540,7 +561,8 @@ func TestWorkerRecordsBatchProgress(t *testing.T) {
 				}
 				return migration.Execution{}, test.err
 			}), testConfig())
-			if settled := nextSettlement(t, queue); settled.kind != test.wantKind {
+			settled := nextSettlement(t, queue)
+			if settled.kind != test.wantKind || (settled.kind == "fail" && settled.committed != (test.committed > 0)) {
 				t.Fatalf("settlement = %+v, want %s", settled, test.wantKind)
 			}
 			queue.mu.Lock()
@@ -552,5 +574,24 @@ func TestWorkerRecordsBatchProgress(t *testing.T) {
 				t.Fatalf("last progress = %+v", queue.progress[len(queue.progress)-1])
 			}
 		})
+	}
+}
+
+func TestWorkerCompensatesCancelledJobs(t *testing.T) {
+	cancelled := claimedJob("a", 1)
+	cancelled.Operation = job.Compensate
+	queue := newFakeQueue(cancelled)
+	runner := compensatingRunner{compensated: make(chan string, 1)}
+	startWorker(t, queue, runner, testConfig())
+	if settled := nextSettlement(t, queue); settled.kind != "complete" {
+		t.Fatalf("settlement = %+v", settled)
+	}
+	if executionID := <-runner.compensated; executionID != "execution-a" {
+		t.Fatalf("compensated execution = %s", executionID)
+	}
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	if len(queue.progress) != 1 || queue.progress[0].CommittedBatches != 1 {
+		t.Fatalf("compensation progress = %+v", queue.progress)
 	}
 }

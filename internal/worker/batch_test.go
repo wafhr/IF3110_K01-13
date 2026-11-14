@@ -23,7 +23,7 @@ const (
 	progressQuery  = "LEFT JOIN"
 	batchInsert    = "INSERT INTO public.platform_migration_batches"
 	scopeInsert    = "INSERT INTO public.platform_migration_batch_scopes"
-	scopeComplete  = "SET status = 'completed'"
+	scopeFinish    = "SET status = $2, completed_at = $3"
 )
 
 func batchRequest(action migration.Action) migration.ExecutionRequest {
@@ -141,7 +141,10 @@ func TestRunBatchRecordsHistoryWhenNoRangeIsLeft(t *testing.T) {
 	if prepared.recordedAt == nil || !prepared.recordedAt.Equal(testStart) {
 		t.Fatalf("history started at %v, want the scope start", prepared.recordedAt)
 	}
-	if !target.ran(scopeComplete) || target.ran(batchSQL) || target.commits != 1 || len(reports) != 0 {
+	if finished := target.executed(scopeFinish); len(finished) != 1 || finished[0].args[1] != scopeCompleted {
+		t.Fatalf("finish statements = %q", target.order())
+	}
+	if target.ran(batchSQL) || target.commits != 1 || len(reports) != 0 {
 		t.Fatalf("finish statements = %q", target.order())
 	}
 }
@@ -167,16 +170,6 @@ func TestRunBatchRollsBackAFailedRange(t *testing.T) {
 		t.Fatalf("failed range statements = %q", target.order())
 	}
 }
-
-func TestBatchRollbackWaitsForCompensation(t *testing.T) {
-	target := newStubTarget()
-	executor := newTestExecutor(t, target, database.PostgreSQL, &fakePreparer{})
-	_, err := executor.Run(context.Background(), batchRequest(migration.Rollback), nil)
-	if !errors.Is(err, ErrUnsupportedBatchAction) || target.ran("BEGIN") {
-		t.Fatalf("batch rollback = %v", err)
-	}
-}
-
 func indexOf(statements []string, fragment string) int {
 	for i, statement := range statements {
 		if strings.Contains(statement, fragment) {

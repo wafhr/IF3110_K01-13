@@ -178,9 +178,15 @@ func (state MigrationState) planAction(definition Migration, revision Revision, 
 	if action == Forward && revision.SQLUp != state.PendingForward[len(state.PendingForward)-1].SQL {
 		return ActionPlan{}, fmt.Errorf("%w: original SQL does not match execution history", ErrConflict)
 	}
-	return ActionPlan{
+	plan := ActionPlan{
 		DatabaseID: state.DatabaseID, MigrationID: definition.ID, Revision: number, Name: definition.Name,
 		Action: action, SQL: statement, RevertsExecutionID: revertsID, BaseExecutionID: state.BaseExecutionID,
 		Batch: revision.Batch,
-	}, nil
+	}
+	// A batch apply or forward carries the revision's down SQL so cancelling its
+	// committed batches runs SQL that was reviewed and approved with the plan.
+	if revision.Batch.Enabled() && action != Rollback {
+		plan.CompensationSQL = revision.SQLDown
+	}
+	return plan, nil
 }

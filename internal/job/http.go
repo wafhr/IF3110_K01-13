@@ -1,6 +1,7 @@
 package job
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -28,6 +29,7 @@ func NewHTTPHandler(service *Service, guard DatabaseGuard) *HTTPHandler {
 	h.routes.Handle("GET /databases/{databaseID}/jobs", guard.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.list)))
 	h.routes.Handle("GET /databases/{databaseID}/jobs/{jobID}", guard.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.get)))
 	h.routes.Handle("POST /databases/{databaseID}/jobs/{jobID}/resume", guard.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(h.resume)))
+	h.routes.Handle("POST /databases/{databaseID}/jobs/{jobID}/cancel", guard.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(h.cancel)))
 	return h
 }
 
@@ -61,7 +63,15 @@ func (h *HTTPHandler) get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTPHandler) resume(w http.ResponseWriter, r *http.Request) {
-	job, err := h.service.Resume(r.Context(), r.PathValue("databaseID"), r.PathValue("jobID"))
+	h.requeue(w, r, h.service.Resume)
+}
+
+func (h *HTTPHandler) cancel(w http.ResponseWriter, r *http.Request) {
+	h.requeue(w, r, h.service.Cancel)
+}
+
+func (h *HTTPHandler) requeue(w http.ResponseWriter, r *http.Request, action func(context.Context, string, string) (Job, error)) {
+	job, err := action(r.Context(), r.PathValue("databaseID"), r.PathValue("jobID"))
 	if err != nil {
 		writeServiceError(w, r, err)
 		return
@@ -83,8 +93,8 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusNotFound, "job not found")
 	case errors.Is(err, ErrInvalidJob):
 		writeError(w, http.StatusBadRequest, "invalid job request")
-	case errors.Is(err, ErrNotPartial):
-		writeError(w, http.StatusConflict, ErrNotPartial.Error())
+	case errors.Is(err, ErrNotResumable), errors.Is(err, ErrNotCancelable), errors.Is(err, ErrIrreversible):
+		writeError(w, http.StatusConflict, err.Error())
 	default:
 		slog.ErrorContext(r.Context(), "job_request_failed", "status", "failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")

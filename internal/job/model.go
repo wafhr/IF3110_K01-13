@@ -14,24 +14,41 @@ import (
 type Status string
 
 const (
-	Pending   Status = "pending"
-	Running   Status = "running"
-	Partial   Status = "partial"
-	Succeeded Status = "succeeded"
-	Failed    Status = "failed"
+	Pending           Status = "pending"
+	Running           Status = "running"
+	Partial           Status = "partial"
+	PartiallyReverted Status = "partially_reverted"
+	Succeeded         Status = "succeeded"
+	Reverted          Status = "reverted"
+	Failed            Status = "failed"
+)
+
+// Operation tells the worker whether to run the queued plan or to compensate
+// the batches it already committed.
+type Operation string
+
+const (
+	Execute    Operation = "execute"
+	Compensate Operation = "compensate"
 )
 
 var (
-	ErrNotFound   = errors.New("job not found")
-	ErrNoJob      = errors.New("no job available")
-	ErrLeaseLost  = errors.New("job lease lost")
-	ErrConflict   = errors.New("job conflicts with the stored execution")
-	ErrNotPartial = errors.New("only partial jobs can be resumed")
-	ErrInvalidJob = errors.New("invalid job")
+	ErrNotFound      = errors.New("job not found")
+	ErrNoJob         = errors.New("no job available")
+	ErrLeaseLost     = errors.New("job lease lost")
+	ErrConflict      = errors.New("job conflicts with the stored execution")
+	ErrNotResumable  = errors.New("only partial or partially reverted jobs can be resumed")
+	ErrNotCancelable = errors.New("only a partial batch apply or forward can be cancelled")
+	ErrIrreversible  = errors.New("the migration is irreversible; create a new migration to repair its data")
+	ErrInvalidJob    = errors.New("invalid job")
 )
 
 // Terminal reports whether the queue will never hand the job out again.
-func (s Status) Terminal() bool { return s == Succeeded || s == Failed }
+func (s Status) Terminal() bool { return s == Succeeded || s == Reverted || s == Failed }
+
+// Stopped reports whether the job stopped with committed batches that still
+// need a resume or a cancellation.
+func (s Status) Stopped() bool { return s == Partial || s == PartiallyReverted }
 
 // Progress counts the batches and rows already committed by a batch migration
 // out of the TotalRows fixed when its scope was determined.
@@ -53,6 +70,7 @@ type Job struct {
 	Action      migration.Action           `json:"action"`
 	Revision    int64                      `json:"revision"`
 	Status      Status                     `json:"status"`
+	Operation   Operation                  `json:"operation"`
 	Attempts    int                        `json:"attempts"`
 	Progress    Progress                   `json:"progress"`
 	LastError   string                     `json:"last_error,omitempty"`

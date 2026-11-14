@@ -62,6 +62,16 @@ func (s *fakeStore) ListByDatabase(_ context.Context, databaseID string, limit i
 }
 
 func (s *fakeStore) Resume(_ context.Context, jobID string) error {
+	return s.requeue(jobID, ErrNotResumable, func(job Job) bool { return job.Status.Stopped() }, "")
+}
+
+func (s *fakeStore) Cancel(_ context.Context, jobID string) error {
+	return s.requeue(jobID, ErrNotCancelable, func(job Job) bool {
+		return job.Status == Partial && job.Operation == Execute && job.Action != migration.Rollback
+	}, Compensate)
+}
+
+func (s *fakeStore) requeue(jobID string, rejected error, allowed func(Job) bool, operation Operation) error {
 	if s.err != nil {
 		return s.err
 	}
@@ -69,10 +79,13 @@ func (s *fakeStore) Resume(_ context.Context, jobID string) error {
 	if !ok {
 		return ErrNotFound
 	}
-	if job.Status != Partial {
-		return ErrNotPartial
+	if !allowed(job) {
+		return rejected
 	}
 	job.Status, job.Attempts = Pending, 0
+	if operation != "" {
+		job.Operation = operation
+	}
 	s.jobs[jobID] = job
 	s.resumed = append(s.resumed, jobID)
 	return nil
@@ -80,13 +93,15 @@ func (s *fakeStore) Resume(_ context.Context, jobID string) error {
 
 func partialJob() Job {
 	job := queuedJob()
+	job.Request.Plan.Batch = migration.BatchSpec{Table: "accounts", KeyColumn: "id", Size: 1000}
+	job.Request.Plan.CompensationSQL = "UPDATE accounts SET balance_cents = balance_cents - 100 WHERE id BETWEEN $1 AND $2"
 	job.Status, job.Attempts = Partial, 3
 	job.Progress = Progress{CommittedBatches: 2, CommittedRows: 2000, TotalRows: 5000}
 	return job
 }
 
 func queuedJob() Job {
-	job := Job{ID: testJobID, Status: Pending, Request: testRequest(), CreatedAt: testCreatedAt, AvailableAt: testCreatedAt}
+	job := Job{ID: testJobID, Status: Pending, Operation: Execute, Request: testRequest(), CreatedAt: testCreatedAt, AvailableAt: testCreatedAt}
 	job.describe()
 	return job
 }
@@ -153,7 +168,43 @@ func TestServiceResume(t *testing.T) {
 	if err != nil || job.Status != Pending || job.Progress.CommittedBatches != 2 {
 		t.Fatalf("resumed job = %+v, %v", job, err)
 	}
-	if _, err := service.Resume(context.Background(), testDatabaseID, testJobID); !errors.Is(err, ErrNotPartial) {
+	if _, err := service.Resume(context.Background(), testDatabaseID, testJobID); !errors.Is(err, ErrNotResumable) {
 		t.Fatalf("resuming a pending job returned %v", err)
+	}
+}
+
+func TestServiceCancel(t *testing.T) {
+	irreversible := partialJob()
+	irreversible.Request.Plan.CompensationSQL = ""
+	rollback := partialJob()
+	rollback.Request.Plan.Action, rollback.Request.Plan.CompensationSQL = migration.Rollback, ""
+	rollback.describe()
+	tests := []struct {
+		name    string
+		job     Job
+		wantErr error
+	}{
+		{name: "partial apply is compensated", job: partialJob()},
+		{name: "irreversible migration is rejected", job: irreversible, wantErr: ErrIrreversible},
+		{name: "partial rollback cannot be cancelled", job: rollback, wantErr: ErrNotCancelable},
+		{name: "pending job cannot be cancelled", job: queuedJob(), wantErr: ErrNotCancelable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := newFakeStore(test.job)
+			job, err := newTestService(t, store).Cancel(context.Background(), testDatabaseID, testJobID)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("cancel error = %v, want %v", err, test.wantErr)
+			}
+			if test.wantErr == nil && (job.Status != Pending || job.Operation != Compensate) {
+				t.Fatalf("cancelled job = %+v", job)
+			}
+			if test.wantErr != nil && len(store.resumed) != 0 {
+				t.Fatal("a rejected cancellation changed the job")
+			}
+		})
+	}
+	if _, err := newTestService(t, newFakeStore(partialJob())).Cancel(context.Background(), otherDatabaseID, testJobID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cancel through another database returned %v", err)
 	}
 }

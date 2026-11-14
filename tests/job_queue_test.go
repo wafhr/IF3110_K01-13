@@ -124,7 +124,7 @@ func TestJobQueueIntegration(t *testing.T) {
 		for _, stale := range []error{
 			queue.Heartbeat(ctx, queued.ID, "worker-a", jobLease),
 			queue.Complete(ctx, queued.ID, "worker-a"),
-			queue.Fail(ctx, queued.ID, "worker-a", "late failure"),
+			queue.Fail(ctx, queued.ID, "worker-a", "late failure", false),
 		} {
 			if !errors.Is(stale, job.ErrLeaseLost) {
 				t.Fatalf("stale worker transition returned %v", stale)
@@ -154,7 +154,7 @@ func TestJobQueueIntegration(t *testing.T) {
 		if retried := claim(t, queue, "worker-b"); retried.ID != queued.ID || retried.Attempts != 2 {
 			t.Fatalf("retried claim = %+v", retried)
 		}
-		if err := queue.Fail(ctx, queued.ID, "worker-b", "syntax error"); err != nil {
+		if err := queue.Fail(ctx, queued.ID, "worker-b", "syntax error", false); err != nil {
 			t.Fatal(err)
 		}
 		failed, err := queue.Get(ctx, queued.ID)
@@ -174,6 +174,48 @@ func TestJobQueueIntegration(t *testing.T) {
 		execFixture(t, f.platform, `UPDATE migration_jobs SET status = 'failed', finished_at = now() WHERE id = $1`, partial.ID)
 		if next := claim(t, queue, "worker-b"); next.ID != later.ID {
 			t.Fatalf("claim after failure = %s, want %s", next.ID, later.ID)
+		}
+		completeAll(t, f)
+	})
+
+	t.Run("a failure after a committed change stops the job as partial", func(t *testing.T) {
+		databaseID := newID()
+		stopped := enqueue(t, queue, databaseID)
+		later := enqueue(t, queue, databaseID)
+		claim(t, queue, "worker-a")
+		if err := queue.Fail(ctx, stopped.ID, "worker-a", "division by zero", true); err != nil {
+			t.Fatal(err)
+		}
+		partial, err := queue.Get(ctx, stopped.ID)
+		if err != nil || partial.Status != job.Partial || partial.FinishedAt != nil {
+			t.Fatalf("stopped job = %+v, %v", partial, err)
+		}
+		expectEmpty(t, queue, "worker-b")
+		if err := queue.Cancel(ctx, stopped.ID); err != nil {
+			t.Fatal(err)
+		}
+		compensation := claim(t, queue, "worker-b")
+		if compensation.ID != stopped.ID || compensation.Operation != job.Compensate {
+			t.Fatalf("claimed compensation = %+v", compensation)
+		}
+		if err := queue.Fail(ctx, stopped.ID, "worker-b", "check constraint violated", false); err != nil {
+			t.Fatal(err)
+		}
+		if reverting, err := queue.Get(ctx, stopped.ID); err != nil || reverting.Status != job.PartiallyReverted {
+			t.Fatalf("failed compensation = %+v, %v", reverting, err)
+		}
+		if err := queue.Resume(ctx, stopped.ID); err != nil {
+			t.Fatal(err)
+		}
+		claim(t, queue, "worker-c")
+		if err := queue.Complete(ctx, stopped.ID, "worker-c"); err != nil {
+			t.Fatal(err)
+		}
+		if reverted, err := queue.Get(ctx, stopped.ID); err != nil || reverted.Status != job.Reverted {
+			t.Fatalf("finished compensation = %+v, %v", reverted, err)
+		}
+		if next := claim(t, queue, "worker-c"); next.ID != later.ID {
+			t.Fatalf("claim after compensation = %s, want %s", next.ID, later.ID)
 		}
 		completeAll(t, f)
 	})
