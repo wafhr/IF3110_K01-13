@@ -1,0 +1,271 @@
+//go:build integration
+
+package integration_test
+
+import (
+	"context"
+	"net/http"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/wafhr/IF3110_K01-13/internal/job"
+	"github.com/wafhr/IF3110_K01-13/internal/migration"
+	"github.com/wafhr/IF3110_K01-13/internal/worker"
+)
+
+const batchRows = 5000
+
+func TestMigrationBatchIntegration(t *testing.T) {
+	f := newMigrationFixture(t)
+	runner := f.workerExecutor(t, &atomic.Int32{})
+	f.seedBatchAccounts(t)
+
+	t.Run("each range commits separately and history is recorded once", func(t *testing.T) {
+		definition := f.createBatchMigration(t, "raise balances",
+			"UPDATE batch_accounts SET balance_cents = balance_cents + 100 WHERE id BETWEEN $1 AND $2",
+			"UPDATE batch_accounts SET balance_cents = balance_cents - 100 WHERE id BETWEEN $1 AND $2")
+		request := f.queueAction(t, definition, migration.Apply)
+		done := f.processJob(t, runner, request)
+		want := job.Progress{CommittedBatches: 5, CommittedRows: batchRows, TotalRows: batchRows}
+		if done.Status != job.Succeeded || done.Progress != want {
+			t.Fatalf("batch job = %+v", done)
+		}
+		assertBalances(t, f, 100, batchRows)
+		assertCount(t, f.target, `SELECT count(*) FROM platform_migration_batches WHERE execution_id = $1`, 5, request.ExecutionID)
+		assertCount(t, f.target, `SELECT count(*) FROM platform_migration_batches WHERE execution_id = $1 AND batch_number = 3
+			AND first_key = '2001' AND last_key = '3000' AND row_count = 1000`, 1, request.ExecutionID)
+		assertCount(t, f.target, `SELECT count(*) FROM platform_migration_batch_scopes WHERE execution_id = $1
+			AND status = 'completed' AND scope_end = '5000' AND total_rows = 5000`, 1, request.ExecutionID)
+		assertCount(t, f.target, `SELECT count(*) FROM platform_migration_executions WHERE id = $1`, 1, request.ExecutionID)
+
+		var detail struct {
+			Job job.Job `json:"job"`
+		}
+		decode(t, f.reader.do(t, http.MethodGet, "/databases/"+f.databaseID+"/jobs/"+done.ID, nil, http.StatusOK), &detail)
+		if detail.Job.Progress != want {
+			t.Fatalf("job API progress = %+v", detail.Job.Progress)
+		}
+		if again, err := runner.Run(context.Background(), request, nil); err != nil || again.ID != request.ExecutionID {
+			t.Fatalf("redelivery = %+v, %v", again, err)
+		}
+		assertBalances(t, f, 100, batchRows)
+	})
+
+	t.Run("rows with a NULL key are outside the batch scope", func(t *testing.T) {
+		execFixture(t, f.target, `CREATE TABLE batch_vouchers (code BIGINT UNIQUE, uses INT NOT NULL DEFAULT 0);
+			INSERT INTO batch_vouchers (code) SELECT code FROM generate_series(1, 2500) AS code;
+			INSERT INTO batch_vouchers (code) VALUES (NULL), (NULL), (NULL)`)
+		execFixture(t, f.target, `GRANT SELECT, UPDATE ON batch_vouchers TO `+pgx.Identifier{f.createdRole}.Sanitize())
+		var result struct {
+			Migration migration.Migration `json:"migration"`
+		}
+		decode(t, f.editor.do(t, http.MethodPost, f.migrationPath()+"/definitions", map[string]any{
+			"name": "count voucher use", "sql_up": "UPDATE batch_vouchers SET uses = uses + 1 WHERE code BETWEEN $1 AND $2",
+			"sql_down": "UPDATE batch_vouchers SET uses = uses - 1 WHERE code BETWEEN $1 AND $2",
+			"batch":    map[string]any{"table": "batch_vouchers", "key_column": "code", "size": 1000},
+		}, http.StatusCreated), &result)
+		done := f.processJob(t, runner, f.queueAction(t, result.Migration, migration.Apply))
+		if done.Status != job.Succeeded || done.Progress != (job.Progress{CommittedBatches: 3, CommittedRows: 2500, TotalRows: 2500}) {
+			t.Fatalf("NULL key job = %+v", done)
+		}
+		assertCount(t, f.target, `SELECT count(*) FROM batch_vouchers WHERE uses = 1`, 2500)
+		assertCount(t, f.target, `SELECT count(*) FROM batch_vouchers WHERE code IS NULL AND uses = 0`, 3)
+	})
+
+	t.Run("failed range leaves the job partial and resume continues from the checkpoint", func(t *testing.T) {
+		execFixture(t, f.target, `UPDATE batch_accounts SET note = 'poison' WHERE id = 2500`)
+		definition := f.createBatchMigration(t, "add bonus",
+			"UPDATE batch_accounts SET balance_cents = balance_cents + 10 / (CASE WHEN note = 'poison' THEN 0 ELSE 1 END) WHERE id BETWEEN $1 AND $2",
+			"UPDATE batch_accounts SET balance_cents = balance_cents - 10 WHERE id BETWEEN $1 AND $2")
+		request := f.queueAction(t, definition, migration.Apply)
+		partial := f.processJob(t, runner, request)
+		if partial.Status != job.Partial || partial.Progress.CommittedBatches != 2 || partial.Progress.CommittedRows != 2000 ||
+			partial.LastError != "SQLSTATE 22012: division by zero" {
+			t.Fatalf("partial job = %+v", partial)
+		}
+		assertCount(t, f.target, `SELECT count(*) FROM batch_accounts WHERE balance_cents = id + 110`, 2000)
+		assertCount(t, f.target, `SELECT count(*) FROM platform_migration_executions WHERE id = $1`, 0, request.ExecutionID)
+		if _, err := f.jobs.Claim(context.Background(), "probe", jobLease); err == nil {
+			t.Fatal("a partial job was handed out without being resumed")
+		}
+
+		f.reader.do(t, http.MethodPost, "/databases/"+f.databaseID+"/jobs/"+partial.ID+"/resume", nil, http.StatusForbidden)
+		execFixture(t, f.target, `UPDATE batch_accounts SET note = NULL WHERE id = 2500`)
+		var resumed struct {
+			Job job.Job `json:"job"`
+		}
+		decode(t, f.editor.do(t, http.MethodPost, "/databases/"+f.databaseID+"/jobs/"+partial.ID+"/resume", nil, http.StatusAccepted), &resumed)
+		if resumed.Job.Status != job.Pending {
+			t.Fatalf("resumed job = %+v", resumed.Job)
+		}
+		done := f.processJob(t, runner, request)
+		if done.Status != job.Succeeded || done.Progress.CommittedBatches != 5 || done.Progress.CommittedRows != batchRows {
+			t.Fatalf("resumed job = %+v", done)
+		}
+		assertBalances(t, f, 110, batchRows)
+	})
+
+	t.Run("interrupted attempt resumes after the last committed batch", func(t *testing.T) {
+		definition := f.createBatchMigration(t, "add interest",
+			"UPDATE batch_accounts SET balance_cents = balance_cents + 1 WHERE id BETWEEN $1 AND $2",
+			"UPDATE batch_accounts SET balance_cents = balance_cents - 1 WHERE id BETWEEN $1 AND $2")
+		request := f.queueAction(t, definition, migration.Apply)
+		done := f.processJob(t, &interruptingRunner{runner: runner, after: 2}, request)
+		if done.Status != job.Succeeded || done.Attempts != 2 || done.Progress.CommittedBatches != 5 {
+			t.Fatalf("interrupted job = %+v", done)
+		}
+		assertBalances(t, f, 111, batchRows)
+	})
+
+	t.Run("rollback reverts every batch in reverse order and forward applies them again", func(t *testing.T) {
+		definition := f.createBatchMigration(t, "mark accounts",
+			"UPDATE batch_accounts SET note = 'seen' WHERE id BETWEEN $1 AND $2",
+			"UPDATE batch_accounts SET note = NULL WHERE id BETWEEN $1 AND $2")
+		apply := f.queueAction(t, definition, migration.Apply)
+		f.processJob(t, runner, apply)
+		rollback := f.queueAction(t, definition, migration.Rollback)
+		done := f.processJob(t, runner, rollback)
+		if done.Status != job.Succeeded || done.Progress.CommittedBatches != 0 || done.Progress.TotalRows != batchRows {
+			t.Fatalf("batch rollback job = %+v", done)
+		}
+		assertCount(t, f.target, `SELECT count(*) FROM batch_accounts WHERE note IS NULL`, batchRows)
+		assertCount(t, f.target, `SELECT count(*) FROM platform_migration_executions WHERE id = $1 AND reverts_execution_id = $2`, 1, rollback.ExecutionID, apply.ExecutionID)
+		assertCount(t, f.target, `SELECT count(*) FROM platform_migration_batches newer JOIN platform_migration_batches older
+			ON older.execution_id = newer.execution_id AND older.batch_number = newer.batch_number - 1
+			WHERE newer.execution_id = $1 AND newer.reverted_at <= older.reverted_at`, 4, apply.ExecutionID)
+		assertCount(t, f.target, `SELECT count(*) FROM platform_migration_batch_scopes WHERE execution_id = $1 AND status = 'reverted'`, 1, apply.ExecutionID)
+
+		forward := f.processJob(t, runner, f.queueAction(t, definition, migration.Forward))
+		if forward.Status != job.Succeeded || forward.Progress.CommittedBatches != 5 {
+			t.Fatalf("batch forward job = %+v", forward)
+		}
+		assertCount(t, f.target, `SELECT count(*) FROM batch_accounts WHERE note = 'seen'`, batchRows)
+		f.processJob(t, runner, f.queueAction(t, definition, migration.Rollback))
+		assertCount(t, f.target, `SELECT count(*) FROM batch_accounts WHERE note IS NULL`, batchRows)
+	})
+
+	t.Run("cancelling a partial apply compensates its batches and resumes after a failed revert", func(t *testing.T) {
+		execFixture(t, f.target, `UPDATE batch_accounts SET note = 'poison' WHERE id = 2500`)
+		execFixture(t, f.target, `UPDATE batch_accounts SET note = 'stuck' WHERE id = 500`)
+		definition := f.createBatchMigration(t, "add cashback",
+			"UPDATE batch_accounts SET balance_cents = balance_cents + 5 / (CASE WHEN note = 'poison' THEN 0 ELSE 1 END) WHERE id BETWEEN $1 AND $2",
+			"UPDATE batch_accounts SET balance_cents = balance_cents - 5 / (CASE WHEN note = 'stuck' THEN 0 ELSE 1 END) WHERE id BETWEEN $1 AND $2")
+		request := f.queueAction(t, definition, migration.Apply)
+		partial := f.processJob(t, runner, request)
+		if partial.Status != job.Partial || partial.Progress.CommittedBatches != 2 {
+			t.Fatalf("partial job = %+v", partial)
+		}
+		jobPath := "/databases/" + f.databaseID + "/jobs/" + partial.ID
+
+		f.reader.do(t, http.MethodPost, jobPath+"/cancel", nil, http.StatusForbidden)
+		var cancelled struct {
+			Job job.Job `json:"job"`
+		}
+		decode(t, f.editor.do(t, http.MethodPost, jobPath+"/cancel", nil, http.StatusAccepted), &cancelled)
+		if cancelled.Job.Status != job.Pending || cancelled.Job.Operation != job.Compensate {
+			t.Fatalf("cancelled job = %+v", cancelled.Job)
+		}
+		stuck := f.processJob(t, runner, request)
+		if stuck.Status != job.PartiallyReverted || stuck.Progress.CommittedBatches != 1 || stuck.LastError != "SQLSTATE 22012: division by zero" {
+			t.Fatalf("partially reverted job = %+v", stuck)
+		}
+		assertCount(t, f.target, `SELECT count(*) FROM batch_accounts WHERE id BETWEEN 1001 AND 2000 AND balance_cents = id + 111`, 1000)
+		assertCount(t, f.target, `SELECT count(*) FROM batch_accounts WHERE id BETWEEN 1 AND 1000 AND balance_cents = id + 116`, 1000)
+		if _, err := f.jobs.Claim(context.Background(), "probe", jobLease); err == nil {
+			t.Fatal("a partially reverted job was handed out without being resumed")
+		}
+		f.editor.do(t, http.MethodPost, jobPath+"/cancel", nil, http.StatusConflict)
+
+		execFixture(t, f.target, `UPDATE batch_accounts SET note = NULL WHERE id IN (500, 2500)`)
+		f.editor.do(t, http.MethodPost, jobPath+"/resume", nil, http.StatusAccepted)
+		reverted := f.processJob(t, runner, request)
+		if reverted.Status != job.Reverted || reverted.Progress.CommittedBatches != 0 || reverted.FinishedAt == nil {
+			t.Fatalf("reverted job = %+v", reverted)
+		}
+		assertBalances(t, f, 111, batchRows)
+		assertCount(t, f.target, `SELECT count(*) FROM platform_migration_executions WHERE id = $1`, 0, request.ExecutionID)
+		assertCount(t, f.target, `SELECT count(*) FROM platform_migration_batches WHERE execution_id = $1 AND reverted_at IS NOT NULL`, 2, request.ExecutionID)
+		f.editor.do(t, http.MethodPost, jobPath+"/resume", nil, http.StatusConflict)
+	})
+
+	t.Run("irreversible batch migration cannot be cancelled", func(t *testing.T) {
+		execFixture(t, f.target, `UPDATE batch_accounts SET note = 'poison' WHERE id = 1500`)
+		var result struct {
+			Migration migration.Migration `json:"migration"`
+		}
+		decode(t, f.editor.do(t, http.MethodPost, f.migrationPath()+"/definitions", map[string]any{
+			"name": "round balances", "irreversible": true, "irreversible_reason": "rounding discards cents",
+			"sql_up": "UPDATE batch_accounts SET balance_cents = balance_cents / (CASE WHEN note = 'poison' THEN 0 ELSE 1 END) WHERE id BETWEEN $1 AND $2",
+			"batch":  map[string]any{"table": "batch_accounts", "key_column": "id", "size": 1000},
+		}, http.StatusCreated), &result)
+		partial := f.processJob(t, runner, f.queueAction(t, result.Migration, migration.Apply))
+		if partial.Status != job.Partial {
+			t.Fatalf("irreversible partial job = %+v", partial)
+		}
+		var rejection struct {
+			Error string `json:"error"`
+		}
+		decode(t, f.editor.do(t, http.MethodPost, "/databases/"+f.databaseID+"/jobs/"+partial.ID+"/cancel", nil, http.StatusConflict), &rejection)
+		if rejection.Error != job.ErrIrreversible.Error() {
+			t.Fatalf("cancel rejection = %q", rejection.Error)
+		}
+	})
+}
+
+// interruptingRunner cancels the first attempt right after it commits the
+// given number of batches, like a worker stopping between batches. It
+// interrupts batch execution and compensation alike.
+type interruptingRunner struct {
+	runner  *worker.Executor
+	after   int
+	commits int
+	once    sync.Once
+}
+
+func (r *interruptingRunner) Run(ctx context.Context, request migration.ExecutionRequest, report worker.ProgressFunc) (migration.Execution, error) {
+	return r.interrupt(ctx, request, report, r.runner.Run)
+}
+
+func (r *interruptingRunner) Compensate(ctx context.Context, request migration.ExecutionRequest, report worker.ProgressFunc) (migration.Execution, error) {
+	return r.interrupt(ctx, request, report, r.runner.Compensate)
+}
+
+func (r *interruptingRunner) interrupt(ctx context.Context, request migration.ExecutionRequest, report worker.ProgressFunc,
+	run func(context.Context, migration.ExecutionRequest, worker.ProgressFunc) (migration.Execution, error)) (migration.Execution, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	return run(ctx, request, func(progress job.Progress) {
+		report(progress)
+		r.commits++
+		if r.commits >= r.after {
+			r.once.Do(cancel)
+		}
+	})
+}
+
+func (f *migrationFixture) seedBatchAccounts(t *testing.T) {
+	t.Helper()
+	execFixture(t, f.target, `CREATE TABLE batch_accounts (id BIGINT PRIMARY KEY, balance_cents BIGINT NOT NULL, note TEXT);
+		INSERT INTO batch_accounts SELECT id, id, NULL FROM generate_series(1, 5000) AS id`)
+	execFixture(t, f.target, `GRANT SELECT, UPDATE ON batch_accounts TO `+pgx.Identifier{f.createdRole}.Sanitize())
+}
+
+func (f *migrationFixture) createBatchMigration(t *testing.T, name, up, down string) migration.Migration {
+	t.Helper()
+	var result struct {
+		Migration migration.Migration `json:"migration"`
+	}
+	decode(t, f.editor.do(t, http.MethodPost, f.migrationPath()+"/definitions", map[string]any{
+		"name": name, "sql_up": up, "sql_down": down,
+		"batch": map[string]any{"table": "batch_accounts", "key_column": "id", "size": 1000},
+	}, http.StatusCreated), &result)
+	return result.Migration
+}
+
+func assertBalances(t *testing.T, f *migrationFixture, offset, rows int) {
+	t.Helper()
+	assertCount(t, f.target, `SELECT count(*) FROM batch_accounts WHERE balance_cents = id + $1`, rows, offset)
+}

@@ -66,7 +66,7 @@ func createRepositorySteps() []repositoryStep {
 	definition := definitionStep("INSERT INTO migration_definitions", 1, false)
 	definition.check = repositoryArguments(repositoryDatabaseID, "create customers", repositoryActorID)
 	revision := revisionStep("INSERT INTO migration_revisions", 1)
-	revision.check = repositoryArguments(repositoryMigrationID, int64(1), validRevision().SQLUp, validRevision().SQLDown, false, "", repositoryActorID)
+	revision.check = repositoryArguments(repositoryMigrationID, int64(1), validRevision().SQLUp, validRevision().SQLDown, false, "", "", "", int64(0), repositoryActorID)
 	return []repositoryStep{
 		{operation: "begin"},
 		{operation: "query", statement: "FOR KEY SHARE", rows: [][]driver.Value{{repositoryDatabaseID}}, check: repositoryArguments(repositoryDatabaseID)},
@@ -164,7 +164,7 @@ func reviseRepositorySteps() []repositoryStep {
 	lock := definitionStep("FOR UPDATE", 1, false)
 	lock.check = repositoryArguments(repositoryDatabaseID, repositoryMigrationID)
 	revision := revisionStep("INSERT INTO migration_revisions", 2)
-	revision.check = repositoryArguments(repositoryMigrationID, int64(2), validRevision().SQLUp, validRevision().SQLDown, false, "", repositoryActorID)
+	revision.check = repositoryArguments(repositoryMigrationID, int64(2), validRevision().SQLUp, validRevision().SQLDown, false, "", "", "", int64(0), repositoryActorID)
 	update := definitionStep("UPDATE migration_definitions", 2, false)
 	update.check = repositoryArguments(repositoryDatabaseID, repositoryMigrationID, "create customers", int64(2))
 	return []repositoryStep{{operation: "begin"}, lock, revision, update, {operation: "commit"}}

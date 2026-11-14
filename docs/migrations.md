@@ -7,14 +7,15 @@ apply/rollback/forward planning, PostgreSQL history, and integration contracts
 for approval and execution. The server initializes the definition repository
 at startup.
 
-Production wiring currently connects access checks through `access.Service`.
-Production approval providers, the persistent queue, the worker loop, and SPA
-integration are pending implementation in their respective modules. Action
-submissions with valid payloads return `503` while an approval or queue provider
-is unavailable. The submission examples below apply once these dependencies
-are connected.
+Production wiring connects access checks through `access.Service` and the
+persistent queue through `job.Service` (see
+[Migration execution](migration-execution.md)). Production approval providers,
+the worker loop, and SPA integration are pending implementation in their
+respective modules. Action submissions with valid payloads return `503` while
+the approval provider is unavailable. The submission examples below apply once
+these dependencies are connected.
 
-Integration tests use a dedicated test approval provider, a persistent test
+Integration tests use a dedicated test approval provider, the production job
 queue in the platform database, and a caller of the execution hooks. They
 verify the APIs, repositories, and migration transactions. Coverage for approval
 by every group leader, concurrent worker job claiming, batching, and process
@@ -120,6 +121,20 @@ The following irreversible definition includes a reason for review.
   "sql_up": "DELETE FROM public.archives WHERE expired = true",
   "irreversible": true,
   "irreversible_reason": "The archived data backup is no longer available"
+}
+```
+
+A definition with `batch` runs per key range instead of in one transaction.
+Its SQL receives the first and last key of each batch as `$1` and `$2`, and
+`table`, `key_column`, and `size` are part of the immutable revision. See
+[Migration execution](migration-execution.md#batch-migrations).
+
+```json
+{
+  "name": "raise balances",
+  "sql_up": "UPDATE public.accounts SET balance_cents = balance_cents + 100 WHERE id BETWEEN $1 AND $2",
+  "sql_down": "UPDATE public.accounts SET balance_cents = balance_cents - 100 WHERE id BETWEEN $1 AND $2",
+  "batch": {"table": "public.accounts", "key_column": "id", "size": 10000}
 }
 ```
 

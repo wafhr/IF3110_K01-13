@@ -274,3 +274,34 @@ func TestMigrationStateDeduplicatesLegacyImportsAcrossAliases(t *testing.T) {
 		t.Fatal("salinan legacy berbeda diterima", err)
 	}
 }
+
+func TestPlanActionCarriesBatchCompensationSQL(t *testing.T) {
+	execution := timelineExecution(1, 1, migration.Apply)
+	revision := batchRevision()
+	revision.MigrationID, revision.Number = execution.MigrationID, execution.Revision
+	revision, err := migration.NormalizeRevision(revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apply, err := migration.PlanAction(repositoryDatabaseID, nil, timelineDefinition(execution), revision, migration.Apply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apply.CompensationSQL != revision.SQLDown || apply.SQL != revision.SQLUp || apply.Batch != revision.Batch {
+		t.Fatalf("batch apply plan = %+v", apply)
+	}
+
+	execution.SQL = revision.SQLUp
+	rollback, err := migration.PlanAction(repositoryDatabaseID, []migration.Execution{execution}, timelineDefinition(execution), revision, migration.Rollback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rollback.CompensationSQL != "" || rollback.SQL != revision.SQLDown || rollback.RevertsExecutionID != execution.ID {
+		t.Fatalf("batch rollback plan = %+v", rollback)
+	}
+
+	regular, err := migration.PlanAction(repositoryDatabaseID, nil, timelineDefinition(execution), timelineRevision(execution), migration.Apply)
+	if err != nil || regular.CompensationSQL != "" {
+		t.Fatalf("regular plan = %+v, %v", regular, err)
+	}
+}

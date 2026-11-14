@@ -79,11 +79,12 @@ func (h *HTTPHandler) withDefinitions(next http.HandlerFunc) http.HandlerFunc {
 }
 
 type definitionInput struct {
-	Name               string `json:"name"`
-	SQLUp              string `json:"sql_up"`
-	SQLDown            string `json:"sql_down"`
-	Irreversible       bool   `json:"irreversible"`
-	IrreversibleReason string `json:"irreversible_reason"`
+	Name               string    `json:"name"`
+	SQLUp              string    `json:"sql_up"`
+	SQLDown            string    `json:"sql_down"`
+	Irreversible       bool      `json:"irreversible"`
+	IrreversibleReason string    `json:"irreversible_reason"`
+	Batch              BatchSpec `json:"batch"`
 }
 
 func (input definitionInput) normalized(number int64) (string, Revision, error) {
@@ -92,7 +93,7 @@ func (input definitionInput) normalized(number int64) (string, Revision, error) 
 		return "", Revision{}, err
 	}
 	revision, err := NormalizeRevision(Revision{Number: number, SQLUp: input.SQLUp, SQLDown: input.SQLDown,
-		Irreversible: input.Irreversible, IrreversibleReason: input.IrreversibleReason})
+		Irreversible: input.Irreversible, IrreversibleReason: input.IrreversibleReason, Batch: input.Batch})
 	return name, revision, err
 }
 

@@ -120,3 +120,30 @@ func TestApplicationRoutesSeparateFrontendFromAccessAPI(t *testing.T) {
 		})
 	}
 }
+
+func TestJobRoutesBelongToTheJobModule(t *testing.T) {
+	module := func(name string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(name))
+		})
+	}
+	handler := app.RoutesWith(app.Modules{
+		Access: module("access"), Viewer: module("viewer"), Migration: module("migration"), Job: module("job"), Frontend: module("frontend"),
+	})
+	for _, tc := range []struct{ path, want string }{
+		{"/databases/id/jobs", "job"},
+		{"/databases/id/jobs/job-id", "job"},
+		{"/databases/id/jobs/job-id/resume", "job"},
+		{"/databases/id/migrations", "migration"},
+		{"/databases/id/schemas/jobs/tables", "viewer"},
+		{"/jobs", "frontend"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			if response.Body.String() != tc.want {
+				t.Fatalf("route = %q, want %q", response.Body.String(), tc.want)
+			}
+		})
+	}
+}

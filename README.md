@@ -60,6 +60,12 @@ database target. Hak `view_only` dan `view_edit` diberikan kepada group.
    go run ./cmd/server
    ```
 
+   Jalankan worker migration pada terminal lain dengan `.env` yang sama:
+
+   ```sh
+   go run ./cmd/worker
+   ```
+
 5. Buka `http://localhost:8080/login`, login dengan akun bootstrap, lalu
    daftarkan database target dan berikan grant melalui group.
 
@@ -68,8 +74,9 @@ Detail konfigurasi ada di [Panduan database management](docs/database-management
 Panduan atribut, redaction, contoh output, pengujian, dan status integrasi worker
 tersedia pada [Logging dan tracing](docs/logging-tracing.md).
 API definisi/revisi dan history Milestone 2 dapat digunakan setelah server
-berjalan. Pengajuan tindakan saat ini menghasilkan `503` sampai provider
-approval dan antrean dipasang. Editor frontend sedang disesuaikan dengan alur
+berjalan. Antrean job persisten dan API status job sudah terpasang (lihat
+[Migration execution](docs/migration-execution.md)). Pengajuan tindakan saat ini
+menghasilkan `503` sampai provider approval dipasang. Editor frontend sedang disesuaikan dengan alur
 baru. Detail endpoint, payload, kontrak worker, dan status integrasi tersedia
 pada panduan migration.
 
@@ -110,6 +117,7 @@ go test -tags=integration -count=1 ./tests -run '^TestMigration.*Integration$'
 
 ```text
 cmd/server/                 entry point dan wiring aplikasi
+cmd/worker/                 entry point worker eksekusi migration
 internal/access/            autentikasi, session, group, dan authorization
   schema.sql                tabel user, group, grant, dan session
 internal/app/               routing komposisi modul
@@ -117,6 +125,7 @@ internal/config/            konfigurasi environment
 internal/database/          registry target dan metadata domain
   schema.sql                tabel registry koneksi target
 internal/database/http/     API registry dan viewer
+internal/job/               antrean job persisten dan API status job
 internal/migration/         definisi/revisi, rollback/forward, history, dan kontrak eksekusi
 internal/platformdb/        koneksi database platform
 internal/targetdb/          pengelolaan koneksi target

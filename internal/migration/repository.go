@@ -16,7 +16,7 @@ import (
 var definitionSchema string
 
 const definitionColumns = `id::text, database_id::text, name, current_revision, created_by::text, created_at, updated_at, frozen_at`
-const revisionColumns = `migration_id::text, number, sql_up, sql_down, irreversible, irreversible_reason, created_by::text, created_at`
+const revisionColumns = `migration_id::text, number, sql_up, sql_down, irreversible, irreversible_reason, batch_table, batch_key, batch_size, created_by::text, created_at`
 
 // Repository menyimpan definisi pada database platform. Pemanggil menerapkan
 // kontrol akses sebelum menyediakan operasi ini melalui service atau HTTP.
@@ -244,9 +244,10 @@ func (r *Repository) FreezeRevision(ctx context.Context, databaseID, migrationID
 
 func insertRevision(ctx context.Context, tx *sql.Tx, revision Revision) (Revision, error) {
 	return scanRevision(tx.QueryRowContext(ctx, `
-		INSERT INTO migration_revisions (migration_id, number, sql_up, sql_down, irreversible, irreversible_reason, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING `+revisionColumns,
-		revision.MigrationID, revision.Number, revision.SQLUp, revision.SQLDown, revision.Irreversible, revision.IrreversibleReason, revision.CreatedBy))
+		INSERT INTO migration_revisions (migration_id, number, sql_up, sql_down, irreversible, irreversible_reason, batch_table, batch_key, batch_size, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING `+revisionColumns,
+		revision.MigrationID, revision.Number, revision.SQLUp, revision.SQLDown, revision.Irreversible, revision.IrreversibleReason,
+		revision.Batch.Table, revision.Batch.KeyColumn, revision.Batch.Size, revision.CreatedBy))
 }
 
 func scanDefinition(row interface{ Scan(...any) error }) (Migration, error) {
@@ -259,7 +260,8 @@ func scanDefinition(row interface{ Scan(...any) error }) (Migration, error) {
 func scanRevision(row interface{ Scan(...any) error }) (Revision, error) {
 	var revision Revision
 	err := row.Scan(&revision.MigrationID, &revision.Number, &revision.SQLUp, &revision.SQLDown,
-		&revision.Irreversible, &revision.IrreversibleReason, &revision.CreatedBy, &revision.CreatedAt)
+		&revision.Irreversible, &revision.IrreversibleReason, &revision.Batch.Table, &revision.Batch.KeyColumn,
+		&revision.Batch.Size, &revision.CreatedBy, &revision.CreatedAt)
 	return revision, err
 }
 

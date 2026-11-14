@@ -231,3 +231,52 @@ func TestExecutionRequestTraceContextIsOptionalAndRoundTrips(t *testing.T) {
 		t.Fatal("context hook tidak memulihkan parent payload")
 	}
 }
+
+func batchRevision() migration.Revision {
+	return migration.Revision{
+		MigrationID: "00000000-0000-4000-8000-000000000001",
+		Number:      1,
+		SQLUp:       "UPDATE accounts SET balance_cents = balance_cents + 100 WHERE id BETWEEN $1 AND $2",
+		SQLDown:     "UPDATE accounts SET balance_cents = balance_cents - 100 WHERE id BETWEEN $1 AND $2",
+		Batch:       migration.BatchSpec{Table: " billing.accounts ", KeyColumn: " id ", Size: 1000},
+	}
+}
+
+func TestNormalizeRevisionBatch(t *testing.T) {
+	normalized, err := migration.NormalizeRevision(batchRevision())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized.Batch != (migration.BatchSpec{Table: "billing.accounts", KeyColumn: "id", Size: 1000}) {
+		t.Fatalf("batch = %+v", normalized.Batch)
+	}
+	if got := normalized.Batch.TableIdentifier(); len(got) != 2 || got[0] != "billing" || got[1] != "accounts" {
+		t.Fatalf("table identifier = %q", got)
+	}
+	regular, err := migration.NormalizeRevision(validRevision())
+	if err != nil || regular.Batch.Enabled() {
+		t.Fatalf("regular revision batch = %+v, %v", regular.Batch, err)
+	}
+	irreversible := batchRevision()
+	irreversible.SQLDown, irreversible.Irreversible, irreversible.IrreversibleReason = "", true, "rounding loses data"
+	if _, err := migration.NormalizeRevision(irreversible); err != nil {
+		t.Fatalf("irreversible batch revision rejected: %v", err)
+	}
+	for name, change := range map[string]func(*migration.Revision){
+		"missing table":            func(r *migration.Revision) { r.Batch.Table = "" },
+		"missing key column":       func(r *migration.Revision) { r.Batch.KeyColumn = " " },
+		"too many name parts":      func(r *migration.Revision) { r.Batch.Table = "db.billing.accounts" },
+		"empty schema":             func(r *migration.Revision) { r.Batch.Table = ".accounts" },
+		"identifier too long":      func(r *migration.Revision) { r.Batch.KeyColumn = strings.Repeat("k", 64) },
+		"zero size":                func(r *migration.Revision) { r.Batch.Size = 0 },
+		"size above limit":         func(r *migration.Revision) { r.Batch.Size = migration.MaxBatchSize + 1 },
+		"up SQL ignores the range": func(r *migration.Revision) { r.SQLUp = "UPDATE accounts SET balance_cents = 0" },
+		"down SQL ignores the end": func(r *migration.Revision) { r.SQLDown = "UPDATE accounts SET balance_cents = 0 WHERE id >= $1" },
+	} {
+		revision := batchRevision()
+		change(&revision)
+		if _, err := migration.NormalizeRevision(revision); !errors.Is(err, migration.ErrInvalidMigration) {
+			t.Errorf("%s: error = %v", name, err)
+		}
+	}
+}

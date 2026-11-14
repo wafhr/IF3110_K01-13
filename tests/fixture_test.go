@@ -29,6 +29,7 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/app"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
 	databasehttp "github.com/wafhr/IF3110_K01-13/internal/database/http"
+	"github.com/wafhr/IF3110_K01-13/internal/job"
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb/drivers"
@@ -352,6 +353,7 @@ type migrationFixture struct {
 	definitions                        *migration.Repository
 	migrations                         *migration.Service
 	approvals                          *migrationTestApprovals
+	jobs                               *job.Repository
 	editor, reader, platformAdmin      *apiClient
 	databaseID, actorID, editorGroupID string
 }
@@ -377,18 +379,6 @@ func (a *migrationTestApprovals) ValidateApproval(_ context.Context, request mig
 	return nil
 }
 
-// Antrean uji menyimpan payload di platform agar receipt dapat dibaca kembali.
-type migrationTestQueue struct{ db *sql.DB }
-
-func (q migrationTestQueue) Enqueue(ctx context.Context, request migration.ExecutionRequest) (string, error) {
-	payload, err := json.Marshal(request)
-	if err != nil {
-		return "", err
-	}
-	_, err = q.db.ExecContext(ctx, `INSERT INTO integration_migration_jobs (id, payload) VALUES ($1, $2)`, request.ExecutionID, string(payload))
-	return request.ExecutionID, err
-}
-
 func newMigrationFixture(t *testing.T) *migrationFixture {
 	t.Helper()
 	f := newFixture(t)
@@ -401,20 +391,27 @@ func newMigrationFixture(t *testing.T) *migrationFixture {
 	if err := definitions.Initialize(ctx); err != nil {
 		t.Fatal(err)
 	}
-	execFixture(t, f.platform, `CREATE TABLE integration_migration_jobs (id UUID PRIMARY KEY, payload JSONB NOT NULL)`)
+	jobs := newJobQueue(t, f)
+	queue, err := job.NewService(jobs)
+	if err != nil {
+		t.Fatal(err)
+	}
 	execFixture(t, f.target, `GRANT CREATE ON SCHEMA public TO `+pgx.Identifier{f.createdRole}.Sanitize())
 	approvals := &migrationTestApprovals{snapshots: make(map[string]migrationTestApproval)}
 	authService := access.NewService(f.platform)
 	migrations := migration.NewServiceWithExecution(f.openTarget, definitions, migration.ExecutionDependencies{
-		Authorizer: authService, Approvals: approvals, Queue: migrationTestQueue{f.platform},
+		Authorizer: authService, Approvals: approvals, Queue: queue,
 	})
 	auth := access.NewHTTPHandler(authService, false)
 	f.server.Close()
-	f.server = httptest.NewServer(telemetry.HTTPHandler(app.RoutesWithModulesAndFrontend(auth,
-		databasehttp.NewHandler(f.registry, f.pools, auth),
-		databasehttp.NewViewerHandler(f.registry, f.inspector, auth),
-		migration.NewHTTPHandler(migrations, auth), nil)))
-	result := &migrationFixture{fixture: f, definitions: definitions, migrations: migrations, approvals: approvals}
+	f.server = httptest.NewServer(telemetry.HTTPHandler(app.RoutesWith(app.Modules{
+		Access:    auth,
+		Database:  databasehttp.NewHandler(f.registry, f.pools, auth),
+		Viewer:    databasehttp.NewViewerHandler(f.registry, f.inspector, auth),
+		Migration: migration.NewHTTPHandler(migrations, auth),
+		Job:       job.NewHTTPHandler(queue, auth),
+	})))
+	result := &migrationFixture{fixture: f, definitions: definitions, migrations: migrations, approvals: approvals, jobs: jobs}
 	result.platformAdmin = f.login(t, "admin", adminPassword)
 	var registered struct {
 		Database database.Database `json:"database"`
@@ -476,13 +473,12 @@ func (f *migrationFixture) queueAction(t *testing.T, definition migration.Migrat
 	if receipt.JobID == "" || receipt.ExecutionID == "" {
 		t.Fatal("pengajuan tidak menghasilkan identitas job dan execution")
 	}
-	var payload []byte
-	if err := f.platform.QueryRow(`SELECT payload FROM integration_migration_jobs WHERE id=$1`, receipt.JobID).Scan(&payload); err != nil {
+	queued, err := f.jobs.Get(context.Background(), receipt.JobID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	var request migration.ExecutionRequest
-	decode(t, payload, &request)
-	if request.ExecutionID != receipt.ExecutionID || request.Plan != plan || request.ActorID != f.actorID {
+	request := queued.Request
+	if queued.Status != job.Pending || request.ExecutionID != receipt.ExecutionID || request.Plan != plan || request.ActorID != f.actorID {
 		t.Fatal("payload antrean berbeda dari snapshot pengajuan")
 	}
 	return request
