@@ -12,8 +12,10 @@ migration yang tercatat. PostgreSQL tetap menyimpan data platform.
 - Viewer untuk schema, table, column, constraint, index, dan data.
 - Definisi dan revisi SQL up/down, perencanaan rollback/forward linear, dan
   history commit PostgreSQL melalui API Milestone 2.
-- Kontrak pengajuan berapproval dan eksekusi melalui antrean. Provider produksi
-  approval, queue/worker, serta integrasi SPA sedang dikembangkan.
+- Review migration dan approval leader setiap group, antrean job persisten,
+  worker asynchronous, pemantauan progres, resume, dan kompensasi batch.
+- Frontend Single-Page Application yang merangkum login, administrasi,
+  database viewer, editor migration, review/approval, history, dan job.
 - Schema diff dari definisi JSON dan kandidat SQL untuk tabel/kolom yang belum
   ada; hasilnya dapat ditinjau dan diedit di editor sebelum dijalankan.
 - Structured log JSON, audit aktivitas, tracing HTTP/SQL, serta propagasi trace
@@ -73,12 +75,11 @@ Detail konfigurasi ada di [Panduan database management](docs/database-management
 [Access control](docs/access-control.md), dan [Migration](docs/migrations.md).
 Panduan atribut, redaction, contoh output, pengujian, dan status integrasi worker
 tersedia pada [Logging dan tracing](docs/logging-tracing.md).
-API definisi/revisi dan history Milestone 2 dapat digunakan setelah server
-berjalan. Antrean job persisten dan API status job sudah terpasang (lihat
-[Migration execution](docs/migration-execution.md)). Pengajuan tindakan saat ini
-menghasilkan `503` sampai provider approval dipasang. Editor frontend sedang disesuaikan dengan alur
-baru. Detail endpoint, payload, kontrak worker, dan status integrasi tersedia
-pada panduan migration.
+API definisi/revisi, review/approval, antrean, dan history Milestone 2 dapat
+digunakan setelah server dan worker berjalan. Detail kontrak backend tersedia
+pada [panduan migration](docs/migrations.md) dan [panduan eksekusi](docs/migration-execution.md).
+Panduan halaman SPA, navigasi, dan integrasi API tersedia di
+[docs/spa.md](docs/spa.md).
 
 ## Test
 

@@ -9,13 +9,11 @@ apply/rollback/forward planning, PostgreSQL history, and integration contracts
 for approval and execution. The server initializes the definition repository
 at startup.
 
-Production wiring connects access checks through `access.Service` and the
-persistent queue through `job.Service` (see
-[Migration execution](migration-execution.md)). Production approval providers,
-the worker loop, and SPA integration are pending implementation in their
-respective modules. Action submissions with valid payloads return `503` while
-the approval provider is unavailable. The submission examples below apply once
-these dependencies are connected.
+Production wiring connects access checks through `access.Service`, approval
+reviews through `WorkflowService`, and the persistent queue through
+`job.Service` (see [Migration execution](migration-execution.md)). The SPA uses
+these APIs for definition editing, review and leader approval, submission, and
+job monitoring. The end-user screens are described in [Frontend SPA](spa.md).
 
 Integration tests use a dedicated test approval provider, the production job
 queue in the platform database, and a caller of the execution hooks. They
@@ -169,13 +167,13 @@ persistent storage, the `202` response contains both identifiers.
 }
 ```
 
-SQL completion is monitored through the job module under development.
-The submission API completes validation and queue persistence before returning.
+SQL completion is monitored through the job status API. The submission API
+completes validation and queue persistence before returning.
 
 `POST /databases/{databaseID}/migrations` also accepts submissions with
 `migration_id`, `action`, and `approval_id`. Milestone 1 payloads containing
-`name` and `sql` return `400`. Frontend integration updates the editor to use
-definitions, review, action submission, and job monitoring.
+`name` and `sql` return `400`. The SPA editor uses definitions, review, action
+submission, and job monitoring.
 
 ### Ordering rules
 
