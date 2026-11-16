@@ -102,6 +102,11 @@ func (s *Service) SetDatabasePermission(ctx context.Context, groupID, databaseID
 	if err != nil {
 		return mapMissingOrError(err)
 	}
+	if previous != permission {
+		if err := bumpDatabaseApprovalEpoch(ctx, tx, databaseID); err != nil {
+			return fmt.Errorf("invalidate approvals after database grant change: %w", err)
+		}
+	}
 	switch {
 	case permission.rank() > previous.rank():
 		err = requireSessionRotation(ctx, tx, groupSessions, groupID)
@@ -132,6 +137,9 @@ func (s *Service) DeleteDatabasePermission(ctx context.Context, groupID, databas
 	}
 	if err := requireAffected(result); err != nil {
 		return err
+	}
+	if err := bumpDatabaseApprovalEpoch(ctx, tx, databaseID); err != nil {
+		return fmt.Errorf("invalidate approvals after database grant removal: %w", err)
 	}
 	if err := revokeSessions(ctx, tx, groupSessions, groupID); err != nil {
 		return fmt.Errorf("revoke group sessions after permission removal: %w", err)

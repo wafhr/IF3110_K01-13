@@ -90,7 +90,7 @@ func TestCreateUser(t *testing.T) {
 }
 
 func TestCreateGroup(t *testing.T) {
-	created := []driver.Value{testGroupID, "Data Team", testNow}
+	created := []driver.Value{testGroupID, "Data Team", "", testNow}
 	tests := []struct {
 		name     string
 		input    string
@@ -99,7 +99,7 @@ func TestCreateGroup(t *testing.T) {
 	}{
 		{name: "blank name", input: "  ", database: newFakeDatabase(), wantErr: ErrInvalidInput},
 		{name: "duplicate name", input: "Data Team", database: newFakeDatabase().failQuery(groupInsert, sqlStateError("23505")), wantErr: ErrConflict},
-		{name: "created", input: " Data Team ", database: newFakeDatabase().onQuery(groupInsert, []string{"id", "name", "created_at"}, created)},
+		{name: "created", input: " Data Team ", database: newFakeDatabase().onQuery(groupInsert, []string{"id", "name", "leader_id", "created_at"}, created)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

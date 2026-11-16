@@ -39,6 +39,7 @@ type User struct {
 type Group struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
+	LeaderID  string    `json:"leader_id,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -174,6 +175,14 @@ func (s *Service) UpdateUser(ctx context.Context, id string, active, platformAdm
 			return ErrConflict
 		}
 	}
+	if wasActive && !active {
+		if err := bumpLeaderApprovalEpochs(ctx, tx, id); err != nil {
+			return fmt.Errorf("invalidate approvals for deactivated leader: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE access_groups SET leader_user_id = NULL WHERE leader_user_id = $1`, id); err != nil {
+			return fmt.Errorf("clear leaders for deactivated user: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE access_users SET is_active = $1, is_platform_admin = $2 WHERE id = $3`, active, platformAdmin, id); err != nil {
 		return fmt.Errorf("update user: %w", err)
 	}
@@ -198,7 +207,7 @@ func (s *Service) CreateGroup(ctx context.Context, name string) (createdGroup Gr
 		return Group{}, err
 	}
 	var group Group
-	err = s.db.QueryRowContext(ctx, `INSERT INTO access_groups (name) VALUES ($1) RETURNING id::text, name, created_at`, name).Scan(&group.ID, &group.Name, &group.CreatedAt)
+	err = s.db.QueryRowContext(ctx, `INSERT INTO access_groups (name) VALUES ($1) RETURNING id::text, name, COALESCE(leader_user_id::text, ''), created_at`, name).Scan(&group.ID, &group.Name, &group.LeaderID, &group.CreatedAt)
 	if isUniqueViolation(err) {
 		return Group{}, ErrConflict
 	}
@@ -213,7 +222,7 @@ func (s *Service) ListGroups(ctx context.Context) (result []Group, activityErr e
 	ctx, activity := telemetry.StartActivity(ctx, "groups_list")
 	defer activity.End(&activityErr)
 
-	rows, err := s.db.QueryContext(ctx, `SELECT id::text, name, created_at FROM access_groups ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id::text, name, COALESCE(leader_user_id::text, ''), created_at FROM access_groups ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list groups: %w", err)
 	}
@@ -221,7 +230,7 @@ func (s *Service) ListGroups(ctx context.Context) (result []Group, activityErr e
 	groups := make([]Group, 0)
 	for rows.Next() {
 		var group Group
-		if err := rows.Scan(&group.ID, &group.Name, &group.CreatedAt); err != nil {
+		if err := rows.Scan(&group.ID, &group.Name, &group.LeaderID, &group.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan group: %w", err)
 		}
 		groups = append(groups, group)
@@ -267,6 +276,9 @@ func (s *Service) DeleteGroup(ctx context.Context, groupID string) (activityErr 
 		return err
 	}
 	defer tx.Rollback()
+	if err := bumpGroupApprovalEpochs(ctx, tx, groupID); err != nil {
+		return fmt.Errorf("invalidate approvals before group deletion: %w", err)
+	}
 	if err := revokeSessions(ctx, tx, groupSessions, groupID); err != nil {
 		return fmt.Errorf("revoke group sessions: %w", err)
 	}
@@ -314,6 +326,9 @@ func addMember(ctx context.Context, tx *sql.Tx, groupID, userID string) error {
 	if err != nil || added == 0 {
 		return err
 	}
+	if err := bumpGroupApprovalEpochs(ctx, tx, groupID); err != nil {
+		return fmt.Errorf("invalidate approvals after membership grant: %w", err)
+	}
 	if err := requireSessionRotation(ctx, tx, userSessions, userID); err != nil {
 		return fmt.Errorf("rotate sessions after group membership grant: %w", err)
 	}
@@ -321,12 +336,18 @@ func addMember(ctx context.Context, tx *sql.Tx, groupID, userID string) error {
 }
 
 func removeMember(ctx context.Context, tx *sql.Tx, groupID, userID string) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE access_groups SET leader_user_id = NULL WHERE id = $1 AND leader_user_id = $2`, groupID, userID); err != nil {
+		return fmt.Errorf("clear group leader before membership removal: %w", err)
+	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM access_group_members WHERE group_id = $1 AND user_id = $2`, groupID, userID)
 	if err != nil {
 		return fmt.Errorf("remove group member: %w", err)
 	}
 	if err := requireAffected(result); err != nil {
 		return err
+	}
+	if err := bumpGroupApprovalEpochs(ctx, tx, groupID); err != nil {
+		return fmt.Errorf("invalidate approvals after membership removal: %w", err)
 	}
 	if err := revokeSessions(ctx, tx, userSessions, userID); err != nil {
 		return fmt.Errorf("revoke sessions after group membership removal: %w", err)
