@@ -1,5 +1,7 @@
 # Database migrations
 
+Review and leader approval flow is documented in [Migration workflow and approval](migration-workflow.md).
+
 ## Milestone 2 implementation status
 
 The `internal/migration` package provides definition and revision APIs,
