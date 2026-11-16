@@ -47,6 +47,7 @@ func (h *HTTPHandler) routes() {
 	h.mux.Handle("PATCH /admin/users/{userID}", h.protected(true, true, http.HandlerFunc(h.updateUser)))
 	h.mux.Handle("GET /admin/groups", h.protected(true, false, http.HandlerFunc(h.listGroups)))
 	h.mux.Handle("POST /admin/groups", h.protected(true, true, http.HandlerFunc(h.createGroup)))
+	h.mux.Handle("PUT /admin/groups/{groupID}/leader", h.protected(true, true, http.HandlerFunc(h.setGroupLeader)))
 	h.mux.Handle("DELETE /admin/groups/{groupID}", h.protected(true, true, http.HandlerFunc(h.deleteGroup)))
 	h.mux.Handle("GET /admin/groups/{groupID}/members", h.protected(true, false, http.HandlerFunc(h.listGroupMembers)))
 	h.mux.Handle("GET /admin/groups/{groupID}/databases", h.protected(true, false, http.HandlerFunc(h.listDatabaseGrants)))
@@ -385,6 +386,20 @@ func (h *HTTPHandler) createGroup(w http.ResponseWriter, r *http.Request) {
 
 func (h *HTTPHandler) deleteGroup(w http.ResponseWriter, r *http.Request) {
 	if err := h.service.DeleteGroup(r.Context(), r.PathValue("groupID")); err != nil {
+		writeServiceError(w, r.Context(), err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *HTTPHandler) setGroupLeader(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		UserID string `json:"user_id"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if err := h.service.SetGroupLeader(r.Context(), r.PathValue("groupID"), input.UserID); err != nil {
 		writeServiceError(w, r.Context(), err)
 		return
 	}

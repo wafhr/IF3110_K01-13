@@ -13,11 +13,20 @@ CREATE TABLE IF NOT EXISTS access_groups (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE access_groups ADD COLUMN IF NOT EXISTS leader_user_id UUID;
+
 CREATE TABLE IF NOT EXISTS access_group_members (
     group_id UUID NOT NULL REFERENCES access_groups(id) ON DELETE CASCADE,
     user_id UUID NOT NULL REFERENCES access_users(id) ON DELETE CASCADE,
     PRIMARY KEY (group_id, user_id)
 );
+
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'access_groups_leader_membership_fkey') THEN
+        ALTER TABLE access_groups ADD CONSTRAINT access_groups_leader_membership_fkey
+            FOREIGN KEY (id, leader_user_id) REFERENCES access_group_members(group_id, user_id);
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS access_group_database_permissions (
     group_id UUID NOT NULL REFERENCES access_groups(id) ON DELETE CASCADE,
