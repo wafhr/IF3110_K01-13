@@ -57,3 +57,10 @@ ALTER TABLE access_sessions ADD COLUMN IF NOT EXISTS rotation_required BOOLEAN N
 CREATE INDEX IF NOT EXISTS access_sessions_user_id_idx ON access_sessions(user_id);
 CREATE INDEX IF NOT EXISTS access_group_members_user_id_idx ON access_group_members(user_id);
 CREATE INDEX IF NOT EXISTS access_permissions_database_id_idx ON access_group_database_permissions(database_id);
+
+-- Monotonic policy epochs make any grant, membership, or leader change revoke
+-- existing migration approvals, even if a prior configuration is restored.
+CREATE TABLE IF NOT EXISTS access_database_approval_epochs (
+    database_id UUID PRIMARY KEY,
+    epoch BIGINT NOT NULL DEFAULT 1 CHECK (epoch > 0)
+);

@@ -25,9 +25,9 @@ func NewMigrationService(platform *sql.DB, registry *database.Repository, connec
 		target, err := connector.Open(ctx, connection)
 		return target, connection.DBMS, err
 	}
+	workflow, _ := migration.NewWorkflowService(platform)
 	service := migration.NewServiceWithExecution(openTarget, definitions, migration.ExecutionDependencies{
-		Authorizer: access.NewService(platform),
-		Queue:      queue,
+		Authorizer: access.NewService(platform), Approvals: workflow, Queue: queue,
 	})
 	return service, openTarget
 }

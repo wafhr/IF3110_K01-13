@@ -59,6 +59,32 @@ END $$;
 CREATE INDEX IF NOT EXISTS migration_definitions_database_idx
     ON migration_definitions(database_id, created_at, id);
 
+CREATE TABLE IF NOT EXISTS migration_workflows (
+    id UUID PRIMARY KEY,
+    database_id UUID NOT NULL,
+    migration_id UUID NOT NULL REFERENCES migration_definitions(id),
+    revision BIGINT NOT NULL CHECK (revision > 0),
+    action TEXT NOT NULL CHECK (action IN ('apply', 'rollback', 'forward')),
+    plan JSONB NOT NULL,
+    plan_hash TEXT NOT NULL CHECK (length(plan_hash) = 64),
+    policy_epoch BIGINT NOT NULL CHECK (policy_epoch > 0),
+    status TEXT NOT NULL CHECK (status IN ('pending_review', 'approved')),
+    submitted_by UUID NOT NULL,
+    submitted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS migration_workflows_definition_idx
+    ON migration_workflows(database_id, migration_id, submitted_at DESC);
+
+CREATE TABLE IF NOT EXISTS migration_approvals (
+    workflow_id UUID NOT NULL REFERENCES migration_workflows(id) ON DELETE CASCADE,
+    group_id UUID NOT NULL REFERENCES access_groups(id) ON DELETE CASCADE,
+    leader_user_id UUID NOT NULL REFERENCES access_users(id) ON DELETE CASCADE,
+    approved_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (workflow_id, group_id)
+);
+
 -- Perubahan draft menambahkan revisi baru agar salinan revisi sebelumnya tetap utuh.
 CREATE OR REPLACE FUNCTION protect_migration_revision() RETURNS TRIGGER
 LANGUAGE plpgsql AS $$ BEGIN

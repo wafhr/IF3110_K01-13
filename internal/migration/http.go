@@ -57,9 +57,88 @@ func NewHTTPHandler(service *Service, auth *access.HTTPHandler, readers ...Schem
 	h.routes.Handle("PUT /databases/{databaseID}/migrations/definitions/{migrationID}", auth.RequireDatabaseAccess(access.ViewEdit, h.withDefinitions(h.reviseDefinition)))
 	h.routes.Handle("GET /databases/{databaseID}/migrations/definitions/{migrationID}/revisions/{revision}", auth.RequireDatabaseAccess(access.ViewOnly, h.withDefinitions(h.getDefinitionRevision)))
 	h.routes.Handle("POST /databases/{databaseID}/migrations/definitions/{migrationID}/actions", auth.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(h.submitAction)))
+	h.routes.Handle("POST /databases/{databaseID}/migrations/definitions/{migrationID}/review", auth.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(h.submitReview)))
+	h.routes.Handle("GET /databases/{databaseID}/migrations/definitions/{migrationID}/workflow", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.getLatestWorkflow)))
+	h.routes.Handle("GET /databases/{databaseID}/migrations/workflows/{workflowID}", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.getWorkflow)))
+	h.routes.Handle("POST /databases/{databaseID}/migrations/workflows/{workflowID}/approvals", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.approveWorkflow)))
 	h.routes.Handle("GET /databases/{databaseID}/migrations/history", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.executionHistory)))
 	h.routes.Handle("GET /databases/{databaseID}/migrations/history/{executionID}", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.executionDetail)))
 	return h
+}
+
+func (h *HTTPHandler) workflowService() *WorkflowService {
+	if h.service == nil {
+		return nil
+	}
+	workflow, _ := h.service.execution.Approvals.(*WorkflowService)
+	return workflow
+}
+
+func (h *HTTPHandler) submitReview(w http.ResponseWriter, r *http.Request) {
+	workflow := h.workflowService()
+	if workflow == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "workflow unavailable"})
+		return
+	}
+	var input struct {
+		Action Action `json:"action"`
+	}
+	if !decodeRequestJSON(w, r, &input) {
+		return
+	}
+	plan, err := h.service.PrepareAction(r.Context(), r.PathValue("databaseID"), r.PathValue("migrationID"), input.Action)
+	if err != nil {
+		migrationError(w, r.Context(), err)
+		return
+	}
+	result, err := workflow.SubmitReview(r.Context(), access.CurrentUser(r.Context()).ID, plan)
+	if err != nil {
+		migrationError(w, r.Context(), err)
+		return
+	}
+	jsonResponse(w, http.StatusCreated, map[string]Workflow{"workflow": result})
+}
+
+func (h *HTTPHandler) getWorkflow(w http.ResponseWriter, r *http.Request) {
+	workflow := h.workflowService()
+	if workflow == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "workflow unavailable"})
+		return
+	}
+	result, err := workflow.GetWorkflow(r.Context(), access.CurrentUser(r.Context()).ID, r.PathValue("databaseID"), r.PathValue("workflowID"))
+	if err != nil {
+		migrationError(w, r.Context(), err)
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]Workflow{"workflow": result})
+}
+
+func (h *HTTPHandler) getLatestWorkflow(w http.ResponseWriter, r *http.Request) {
+	workflow := h.workflowService()
+	if workflow == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "workflow unavailable"})
+		return
+	}
+	result, err := workflow.GetLatestWorkflow(r.Context(), access.CurrentUser(r.Context()).ID, r.PathValue("databaseID"), r.PathValue("migrationID"))
+	if err != nil {
+		migrationError(w, r.Context(), err)
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]Workflow{"workflow": result})
+}
+
+func (h *HTTPHandler) approveWorkflow(w http.ResponseWriter, r *http.Request) {
+	workflow := h.workflowService()
+	if workflow == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "workflow unavailable"})
+		return
+	}
+	result, err := workflow.Approve(r.Context(), access.CurrentUser(r.Context()).ID, r.PathValue("databaseID"), r.PathValue("workflowID"))
+	if err != nil {
+		migrationError(w, r.Context(), err)
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]Workflow{"workflow": result})
 }
 func (h *HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")

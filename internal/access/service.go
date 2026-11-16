@@ -176,6 +176,9 @@ func (s *Service) UpdateUser(ctx context.Context, id string, active, platformAdm
 		}
 	}
 	if wasActive && !active {
+		if err := bumpLeaderApprovalEpochs(ctx, tx, id); err != nil {
+			return fmt.Errorf("invalidate approvals for deactivated leader: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE access_groups SET leader_user_id = NULL WHERE leader_user_id = $1`, id); err != nil {
 			return fmt.Errorf("clear leaders for deactivated user: %w", err)
 		}
@@ -273,6 +276,9 @@ func (s *Service) DeleteGroup(ctx context.Context, groupID string) (activityErr 
 		return err
 	}
 	defer tx.Rollback()
+	if err := bumpGroupApprovalEpochs(ctx, tx, groupID); err != nil {
+		return fmt.Errorf("invalidate approvals before group deletion: %w", err)
+	}
 	if err := revokeSessions(ctx, tx, groupSessions, groupID); err != nil {
 		return fmt.Errorf("revoke group sessions: %w", err)
 	}
@@ -320,6 +326,9 @@ func addMember(ctx context.Context, tx *sql.Tx, groupID, userID string) error {
 	if err != nil || added == 0 {
 		return err
 	}
+	if err := bumpGroupApprovalEpochs(ctx, tx, groupID); err != nil {
+		return fmt.Errorf("invalidate approvals after membership grant: %w", err)
+	}
 	if err := requireSessionRotation(ctx, tx, userSessions, userID); err != nil {
 		return fmt.Errorf("rotate sessions after group membership grant: %w", err)
 	}
@@ -336,6 +345,9 @@ func removeMember(ctx context.Context, tx *sql.Tx, groupID, userID string) error
 	}
 	if err := requireAffected(result); err != nil {
 		return err
+	}
+	if err := bumpGroupApprovalEpochs(ctx, tx, groupID); err != nil {
+		return fmt.Errorf("invalidate approvals after membership removal: %w", err)
 	}
 	if err := revokeSessions(ctx, tx, userSessions, userID); err != nil {
 		return fmt.Errorf("revoke sessions after group membership removal: %w", err)
