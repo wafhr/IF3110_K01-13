@@ -77,41 +77,55 @@ func NewServiceWithExecution(openTarget TargetOpener, definitions ExecutionDefin
 // PrepareAction menyusun rencana tanpa menjalankan SQL migration. Rencana
 // permintaan harus diperiksa kembali setelah lock dan sebelum eksekusi worker.
 func (s *Service) PrepareAction(ctx context.Context, databaseID, migrationID string, action Action) (ActionPlan, error) {
+	plan, _, err := s.prepareAction(ctx, databaseID, migrationID, action)
+	return plan, err
+}
+
+// prepareAction juga mengembalikan DBMS target agar validasi SQL memakai
+// aturan dialek yang sama dengan runner.
+func (s *Service) prepareAction(ctx context.Context, databaseID, migrationID string, action Action) (ActionPlan, database.DBMS, error) {
 	if !validUUID(databaseID) || !validUUID(migrationID) {
-		return ActionPlan{}, ErrInvalidMigration
+		return ActionPlan{}, "", ErrInvalidMigration
 	}
 	if action != Apply && action != Rollback && action != Forward {
-		return ActionPlan{}, ErrInvalidMigration
+		return ActionPlan{}, "", ErrInvalidMigration
 	}
 	if s.definitions == nil || s.openTarget == nil {
-		return ActionPlan{}, fmt.Errorf("%w: migration definition dependencies are unavailable", ErrStorage)
+		return ActionPlan{}, "", fmt.Errorf("%w: migration definition dependencies are unavailable", ErrStorage)
 	}
 	definition, err := s.definitions.Get(ctx, databaseID, migrationID)
 	if err != nil {
-		return ActionPlan{}, err
+		return ActionPlan{}, "", err
 	}
-	db, _, err := s.openHistory(ctx, databaseID)
+	db, history, err := s.openHistory(ctx, databaseID)
 	if err != nil {
-		return ActionPlan{}, err
+		return ActionPlan{}, "", err
 	}
 	defer db.Close()
-	executions, err := listExecutions(ctx, db, "", false)
+	executions, err := history.listAll(ctx)
 	if err != nil {
-		return ActionPlan{}, err
+		return ActionPlan{}, "", err
 	}
 	state, err := BuildMigrationState(databaseID, executions)
 	if err != nil {
-		return ActionPlan{}, err
+		return ActionPlan{}, "", err
 	}
 	number, _, err := state.actionRevision(definition, action)
 	if err != nil {
-		return ActionPlan{}, err
+		return ActionPlan{}, "", err
 	}
 	revision, err := s.definitions.GetRevision(ctx, databaseID, migrationID, number)
 	if err != nil {
-		return ActionPlan{}, err
+		return ActionPlan{}, "", err
 	}
-	return state.planAction(definition, revision, action)
+	plan, err := state.planAction(definition, revision, action)
+	if err != nil {
+		return ActionPlan{}, "", err
+	}
+	if history.dbms == database.MySQL && plan.Batch.Enabled() {
+		return ActionPlan{}, "", fmt.Errorf("%w: batch migrations require a PostgreSQL target", ErrInvalidMigration)
+	}
+	return plan, history.dbms, nil
 }
 
 // SubmitAction memvalidasi pengajuan tanpa menjalankan SQL. Approval mengikat
@@ -131,11 +145,11 @@ func (s *Service) SubmitAction(ctx context.Context, actorID, databaseID, migrati
 	if err := s.execution.Authorizer.AuthorizeDatabase(ctx, actorID, databaseID, access.ViewEdit); err != nil {
 		return QueuedAction{}, err
 	}
-	plan, err := s.PrepareAction(ctx, databaseID, migrationID, action)
+	plan, dbms, err := s.prepareAction(ctx, databaseID, migrationID, action)
 	if err != nil {
 		return QueuedAction{}, err
 	}
-	if transactionControl(plan.SQL) {
+	if transactionControlFor(dbms, plan.SQL) {
 		return QueuedAction{}, ErrInvalidMigration
 	}
 	var id [16]byte
@@ -194,6 +208,7 @@ func MigrationLockKey(databaseID string) (int64, error) {
 // sama. Jika salah satu langkah gagal, worker wajib melakukan rollback.
 type PreparedExecution struct {
 	tx                *sql.Tx
+	dbms              database.DBMS
 	request           ExecutionRequest
 	committed         *Execution
 	historySearchPath string
@@ -226,6 +241,9 @@ func (p PreparedExecution) Record(ctx context.Context, startedAt time.Time) (rec
 		MigrationID: plan.MigrationID, Revision: plan.Revision, Name: plan.Name, Action: plan.Action,
 		SQL: plan.SQL, Status: Success, ExecutedBy: p.request.ActorID, StartedAt: startedAt,
 		FinishedAt: &finishedAt, RevertsExecutionID: plan.RevertsExecutionID}
+	if p.dbms == database.MySQL {
+		return appendExecution(ctx, p.tx, database.MySQL, execution)
+	}
 	// SQL migration dapat mengganti search_path. Metadata dan trigger history
 	// memakai schema asalnya, lalu pengaturan SQL migration dipulihkan kembali.
 	var migrationSearchPath string
@@ -249,7 +267,13 @@ func (p PreparedExecution) Record(ctx context.Context, startedAt time.Time) (rec
 // PrepareExecution dipanggil worker sebelum SQL. Schema history disiapkan oleh
 // jalur pengajuan. Pemeriksaan ulang menggunakan history lengkap di transaksi
 // target, permission terkini, dan approval yang masih sesuai snapshot.
-func (s *Service) PrepareExecution(ctx context.Context, tx *sql.Tx, request ExecutionRequest) (prepared PreparedExecution, activityErr error) {
+func (s *Service) PrepareExecution(ctx context.Context, tx *sql.Tx, request ExecutionRequest) (PreparedExecution, error) {
+	return s.PrepareExecutionOn(ctx, tx, database.PostgreSQL, request)
+}
+
+// PrepareExecutionOn menjalankan validasi yang sama untuk DBMS target tertentu.
+// Pada MySQL, lock GET_LOCK menggantikan advisory lock PostgreSQL.
+func (s *Service) PrepareExecutionOn(ctx context.Context, tx *sql.Tx, dbms database.DBMS, request ExecutionRequest) (prepared PreparedExecution, activityErr error) {
 	ctx = request.ExecutionContext(ctx)
 	ctx, activity := telemetry.StartActivity(ctx, "migration_execution_prepare")
 	defer activity.End(&activityErr)
@@ -257,23 +281,19 @@ func (s *Service) PrepareExecution(ctx context.Context, tx *sql.Tx, request Exec
 	plan := request.Plan
 	if tx == nil || !validUUID(request.ExecutionID) || !validUUID(request.ApprovalID) || !validUUID(request.ActorID) ||
 		!validUUID(plan.DatabaseID) || !validUUID(plan.MigrationID) || plan.Revision < 1 ||
-		(plan.Action != Apply && plan.Action != Rollback && plan.Action != Forward) {
+		(plan.Action != Apply && plan.Action != Rollback && plan.Action != Forward) ||
+		(dbms != database.PostgreSQL && dbms != database.MySQL) ||
+		(dbms == database.MySQL && plan.Batch.Enabled()) {
 		return PreparedExecution{}, ErrInvalidMigration
 	}
-	key, _ := MigrationLockKey(plan.DatabaseID)
-	var locked bool
-	err := tx.QueryRowContext(ctx, `SELECT EXISTS (
-        SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()
-        AND mode = 'ExclusiveLock' AND granted AND classid::bigint = 0 AND objid::bigint = $1 AND objsubid = 1
-    ) AND current_setting('transaction_isolation') = 'read committed'
-      AND current_setting('transaction_read_only') = 'off'`, key).Scan(&locked)
+	locked, err := holdsMigrationLock(ctx, tx, dbms, plan.DatabaseID)
 	if err != nil {
 		return PreparedExecution{}, historyError("check migration lock", err)
 	}
 	if !locked {
 		return PreparedExecution{}, ErrConflict
 	}
-	existing, err := GetExecutionInTransaction(ctx, tx, plan.DatabaseID, request.ExecutionID)
+	existing, err := getExecutionInTransaction(ctx, tx, dbms, plan.DatabaseID, request.ExecutionID)
 	if err == nil {
 		if existing.MigrationID != plan.MigrationID || existing.Revision != plan.Revision || existing.Name != plan.Name ||
 			existing.Action != plan.Action || existing.SQL != plan.SQL || existing.ExecutedBy != request.ActorID ||
@@ -281,7 +301,7 @@ func (s *Service) PrepareExecution(ctx context.Context, tx *sql.Tx, request Exec
 			return PreparedExecution{}, ErrConflict
 		}
 		activity.SetAttributes(slog.Bool("commit_proof", true))
-		return PreparedExecution{tx: tx, request: request, committed: &existing}, nil
+		return PreparedExecution{tx: tx, dbms: dbms, request: request, committed: &existing}, nil
 	}
 	if !errors.Is(err, ErrNotFound) {
 		return PreparedExecution{}, err
@@ -293,7 +313,7 @@ func (s *Service) PrepareExecution(ctx context.Context, tx *sql.Tx, request Exec
 	if err := s.execution.Authorizer.AuthorizeDatabase(ctx, request.ActorID, plan.DatabaseID, access.ViewEdit); err != nil {
 		return PreparedExecution{}, err
 	}
-	history, err := ListExecutionsInTransaction(ctx, tx, plan.DatabaseID)
+	history, err := listExecutionsInTransaction(ctx, tx, dbms, plan.DatabaseID)
 	if err != nil {
 		return PreparedExecution{}, err
 	}
@@ -312,11 +332,17 @@ func (s *Service) PrepareExecution(ctx context.Context, tx *sql.Tx, request Exec
 	if fresh != plan {
 		return PreparedExecution{}, ErrConflict
 	}
-	if transactionControl(fresh.SQL) {
+	if transactionControlFor(dbms, fresh.SQL) {
 		return PreparedExecution{}, ErrInvalidMigration
 	}
 	if err := s.execution.Approvals.ValidateApproval(ctx, request); err != nil {
 		return PreparedExecution{}, err
+	}
+	if dbms == database.MySQL {
+		if err := definitions.FreezeRevision(ctx, plan.DatabaseID, plan.MigrationID, plan.Revision); err != nil {
+			return PreparedExecution{}, err
+		}
+		return PreparedExecution{tx: tx, dbms: dbms, request: request}, nil
 	}
 	// Lokasi metadata dicatat sebelum SQL mengubah pengaturan koneksi. Schema
 	// lama tetap digunakan, termasuk ketika tabel history berada di luar public.
@@ -329,7 +355,7 @@ func (s *Service) PrepareExecution(ctx context.Context, tx *sql.Tx, request Exec
 	if err := definitions.FreezeRevision(ctx, plan.DatabaseID, plan.MigrationID, plan.Revision); err != nil {
 		return PreparedExecution{}, err
 	}
-	return PreparedExecution{tx: tx, request: request, historySearchPath: "pg_catalog, " + historySchema}, nil
+	return PreparedExecution{tx: tx, dbms: dbms, request: request, historySearchPath: "pg_catalog, " + historySchema}, nil
 }
 
 // ReadExecutionHistory menyajikan commit dan attempt legacy sebagai dua koleksi.
@@ -368,7 +394,7 @@ func (s *Service) GetExecution(ctx context.Context, databaseID, executionID stri
 	return history.Get(ctx, databaseID, executionID)
 }
 
-// openHistory membuka pool milik operasi untuk menyiapkan history PostgreSQL.
+// openHistory membuka pool milik operasi untuk menyiapkan history target.
 // Pemanggil menutup pool yang dikembalikan setelah pembacaan selesai.
 func (s *Service) openHistory(ctx context.Context, databaseID string) (*sql.DB, *HistoryRepository, error) {
 	if !validUUID(databaseID) {
@@ -384,11 +410,7 @@ func (s *Service) openHistory(ctx context.Context, databaseID string) (*sql.DB, 
 	if db == nil {
 		return nil, nil, ErrStorage
 	}
-	if dbms != database.PostgreSQL {
-		_ = db.Close()
-		return nil, nil, fmt.Errorf("%w: execution history requires PostgreSQL", ErrInvalidMigration)
-	}
-	history, err := NewHistoryRepository(db)
+	history, err := newHistoryRepository(db, dbms)
 	if err == nil {
 		err = history.ensureInitialized(ctx, databaseID)
 	}
@@ -436,6 +458,25 @@ func (s *Service) Get(ctx context.Context, databaseID string, version int64) (Re
 	var row Record
 	err = db.QueryRowContext(ctx, `SELECT `+historyColumns(dbms)+` FROM platform_migrations WHERE version=`+placeholder(dbms, 1), version).Scan(&row.Version, &row.Name, &row.SQL, &row.Status, &row.ExecutedBy, &row.StartedAt, &row.FinishedAt)
 	return row, err
+}
+
+// holdsMigrationLock memastikan transaksi berjalan pada koneksi yang memegang
+// lock migration database fisik. PostgreSQL juga harus READ COMMITTED dan
+// read-write; MySQL tidak menyediakan level transaksi aktif untuk diperiksa.
+func holdsMigrationLock(ctx context.Context, tx *sql.Tx, dbms database.DBMS, databaseID string) (bool, error) {
+	if dbms == database.MySQL {
+		var holder sql.NullInt64
+		err := tx.QueryRowContext(ctx, `SELECT IS_USED_LOCK(`+MySQLMigrationLockName+`) = CONNECTION_ID()`).Scan(&holder)
+		return holder.Valid && holder.Int64 == 1, err
+	}
+	key, _ := MigrationLockKey(databaseID)
+	var locked bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+        SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()
+        AND mode = 'ExclusiveLock' AND granted AND classid::bigint = 0 AND objid::bigint = $1 AND objsubid = 1
+    ) AND current_setting('transaction_isolation') = 'read committed'
+      AND current_setting('transaction_read_only') = 'off'`, key).Scan(&locked)
+	return locked, err
 }
 
 // Kedua mode quoting diperiksa agar pengaturan backslash target tidak dapat

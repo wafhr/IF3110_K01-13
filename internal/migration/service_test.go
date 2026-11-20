@@ -172,7 +172,7 @@ func TestPrepareActionRejectsUnsupportedTarget(t *testing.T) {
 	reader := &actionDefinitionReader{t: t, definition: timelineDefinition(execution)}
 	target := testMigrationDatabase(t)
 	service := migration.NewServiceWithRepository(func(context.Context, string) (*sql.DB, database.DBMS, error) {
-		return target, database.MySQL, nil
+		return target, database.DBMS("oracle"), nil
 	}, reader)
 	if _, err := service.PrepareAction(context.Background(), repositoryDatabaseID, reader.definition.ID, migration.Apply); !errors.Is(err, migration.ErrInvalidMigration) {
 		t.Fatal("target di luar cakupan tindakan revisi diterima:", err)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/wafhr/IF3110_K01-13/internal/database"
@@ -24,10 +25,20 @@ type Preparer interface {
 	PrepareExecution(context.Context, *sql.Tx, migration.ExecutionRequest) (PreparedExecution, error)
 }
 
+// DialectPreparer revalidates a queued request on a target other than
+// PostgreSQL, such as MySQL.
+type DialectPreparer interface {
+	PrepareExecutionOn(context.Context, *sql.Tx, database.DBMS, migration.ExecutionRequest) (PreparedExecution, error)
+}
+
 type migrationPreparer struct{ service *migration.Service }
 
 func (p migrationPreparer) PrepareExecution(ctx context.Context, tx *sql.Tx, request migration.ExecutionRequest) (PreparedExecution, error) {
 	return p.service.PrepareExecution(ctx, tx, request)
+}
+
+func (p migrationPreparer) PrepareExecutionOn(ctx context.Context, tx *sql.Tx, dbms database.DBMS, request migration.ExecutionRequest) (PreparedExecution, error) {
+	return p.service.PrepareExecutionOn(ctx, tx, dbms, request)
 }
 
 // MigrationPreparer adapts the migration service hooks to the executor.
@@ -55,7 +66,7 @@ func NewExecutor(openTarget migration.TargetOpener, preparer Preparer) (*Executo
 // Batch migrations report their committed progress through report, and the
 // rollback of a batch migration reverts its batches in reverse order.
 func (e *Executor) Run(ctx context.Context, request migration.ExecutionRequest, report ProgressFunc) (migration.Execution, error) {
-	return e.locked(ctx, request, func(conn *sql.Conn) (migration.Execution, error) {
+	return e.locked(ctx, request, func(conn *sql.Conn, dbms database.DBMS) (migration.Execution, error) {
 		plan := request.Plan
 		switch {
 		case plan.Batch.Enabled() && plan.Action == migration.Rollback:
@@ -63,7 +74,7 @@ func (e *Executor) Run(ctx context.Context, request migration.ExecutionRequest, 
 		case plan.Batch.Enabled():
 			return e.runBatches(ctx, conn, request, report)
 		default:
-			return e.execute(ctx, conn, request)
+			return e.execute(ctx, conn, dbms, request)
 		}
 	})
 }
@@ -75,20 +86,21 @@ func (e *Executor) Compensate(ctx context.Context, request migration.ExecutionRe
 	if !plan.Batch.Enabled() || plan.Action == migration.Rollback || plan.CompensationSQL == "" {
 		return migration.Execution{}, ErrCompensationUnavailable
 	}
-	return e.locked(ctx, request, func(conn *sql.Conn) (migration.Execution, error) {
+	return e.locked(ctx, request, func(conn *sql.Conn, _ database.DBMS) (migration.Execution, error) {
 		return e.revertBatches(ctx, conn, request, cancelReversal(request), report)
 	})
 }
 
 // locked runs work on a dedicated target connection that holds the database
-// migration lock for the whole call.
-func (e *Executor) locked(ctx context.Context, request migration.ExecutionRequest, work func(*sql.Conn) (migration.Execution, error)) (migration.Execution, error) {
+// migration lock for the whole call. MySQL targets run regular migrations;
+// batch migrations and their compensation require PostgreSQL.
+func (e *Executor) locked(ctx context.Context, request migration.ExecutionRequest, work func(*sql.Conn, database.DBMS) (migration.Execution, error)) (migration.Execution, error) {
 	db, dbms, err := e.openTarget(ctx, request.Plan.DatabaseID)
 	if err != nil {
 		return migration.Execution{}, err
 	}
 	defer db.Close()
-	if dbms != database.PostgreSQL {
+	if !supportedTarget(dbms, request.Plan, e.preparer) {
 		return migration.Execution{}, ErrUnsupportedTarget
 	}
 	conn, err := db.Conn(ctx)
@@ -96,21 +108,40 @@ func (e *Executor) locked(ctx context.Context, request migration.ExecutionReques
 		return migration.Execution{}, err
 	}
 	defer conn.Close()
-	unlock, err := lockDatabase(ctx, conn, request.Plan.DatabaseID)
+	unlock, err := lockDatabase(ctx, conn, dbms, request.Plan.DatabaseID)
 	if err != nil {
 		return migration.Execution{}, err
 	}
 	defer unlock()
-	return work(conn)
+	return work(conn, dbms)
 }
 
-func (e *Executor) execute(ctx context.Context, conn *sql.Conn, request migration.ExecutionRequest) (migration.Execution, error) {
+func supportedTarget(dbms database.DBMS, plan migration.ActionPlan, preparer Preparer) bool {
+	switch dbms {
+	case database.PostgreSQL:
+		return true
+	case database.MySQL:
+		_, dialect := preparer.(DialectPreparer)
+		return dialect && !plan.Batch.Enabled()
+	}
+	return false
+}
+
+// execute runs one transaction. MySQL commits DDL implicitly, so a failed
+// statement after DDL cannot undo that DDL; the history row is only written
+// after every statement succeeds.
+func (e *Executor) execute(ctx context.Context, conn *sql.Conn, dbms database.DBMS, request migration.ExecutionRequest) (migration.Execution, error) {
 	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return migration.Execution{}, err
 	}
 	defer tx.Rollback()
-	prepared, err := e.preparer.PrepareExecution(ctx, tx, request)
+	var prepared PreparedExecution
+	if dbms == database.PostgreSQL {
+		prepared, err = e.preparer.PrepareExecution(ctx, tx, request)
+	} else {
+		prepared, err = e.preparer.(DialectPreparer).PrepareExecutionOn(ctx, tx, dbms, request)
+	}
 	if err != nil {
 		return migration.Execution{}, err
 	}
@@ -135,7 +166,8 @@ func (e *Executor) execute(ctx context.Context, conn *sql.Conn, request migratio
 // a commit whose response was lost and may have been applied.
 func commitError(err error) error {
 	var postgres *pgconn.PgError
-	if errors.As(err, &postgres) {
+	var mysqlError *mysql.MySQLError
+	if errors.As(err, &postgres) || errors.As(err, &mysqlError) {
 		return err
 	}
 	return fmt.Errorf("%w: %w", ErrCommitUncertain, err)
