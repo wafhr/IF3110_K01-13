@@ -9,13 +9,15 @@ apply/rollback/forward planning, PostgreSQL history, and integration contracts
 for approval and execution. The server initializes the definition repository
 at startup.
 
-Production wiring connects access checks through `access.Service` and the
-persistent queue through `job.Service` (see
-[Migration execution](migration-execution.md)). Production approval providers,
-the worker loop, and SPA integration are pending implementation in their
-respective modules. Action submissions with valid payloads return `503` while
-the approval provider is unavailable. The submission examples below apply once
-these dependencies are connected.
+Production wiring connects access checks through `access.Service`, leader
+approvals through the workflow service, and the persistent queue through
+`job.Service` (see [Migration execution](migration-execution.md) and
+[Migration workflow](migration-workflow.md)). The worker (`cmd/worker`) executes
+queued actions. The browser page at
+`/workspace/databases/{databaseID}/migrations` uses these APIs to save
+definitions, request reviews, record approvals, queue actions, and show the
+history. Failed attempts are shown from the job records, because the target
+history stores committed executions only.
 
 Integration tests use a dedicated test approval provider, the production job
 queue in the platform database, and a caller of the execution hooks. They
@@ -38,10 +40,14 @@ also require the session's `X-CSRF-Token` header and
 `Content-Type: application/json`. Platform Admins access targets through
 group-derived grants.
 
-Definitions can be saved for registered targets. Milestone 2 action planning
-and history currently support PostgreSQL. MySQL viewer, plan preview, and
-legacy history reads remain available. Historical test data is seeded by the
-integration fixture. Application execution uses the queue/worker contracts.
+Definitions can be saved for registered targets. Action planning, execution,
+and history support PostgreSQL and MySQL. On MySQL the worker serializes
+migrations with `GET_LOCK` on the physical database, stores history in a
+`platform_migration_executions` table created on the target, and rejects
+transaction control such as `COMMIT`, `SET autocommit`, `LOCK TABLES`, and
+executable `/*! ... */` comments. MySQL commits DDL implicitly, so a failure
+after a DDL statement cannot undo that DDL. Batch migrations require
+PostgreSQL.
 The PostgreSQL target account needs permission to create history metadata in the active
 schema and execute the approved SQL.
 
@@ -174,8 +180,8 @@ The submission API completes validation and queue persistence before returning.
 
 `POST /databases/{databaseID}/migrations` also accepts submissions with
 `migration_id`, `action`, and `approval_id`. Milestone 1 payloads containing
-`name` and `sql` return `400`. Frontend integration updates the editor to use
-definitions, review, action submission, and job monitoring.
+`name` and `sql` return `400`; the migration page uses definitions, review,
+action submission, and job monitoring instead.
 
 ### Ordering rules
 

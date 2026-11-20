@@ -10,10 +10,11 @@ migration yang tercatat. PostgreSQL tetap menyimpan data platform.
 - Pengelolaan user, group, dan grant database oleh Platform Admin.
 - Koneksi target PostgreSQL dan MySQL terenkripsi di platform registry.
 - Viewer untuk schema, table, column, constraint, index, dan data.
-- Definisi dan revisi SQL up/down, perencanaan rollback/forward linear, dan
-  history commit PostgreSQL melalui API Milestone 2.
-- Kontrak pengajuan berapproval dan eksekusi melalui antrean. Provider produksi
-  approval, queue/worker, serta integrasi SPA sedang dikembangkan.
+- Halaman migration untuk membuat dan merevisi SQL up/down, meminta review,
+  memberi approval leader group, dan mengeksekusi migration melalui worker.
+- Eksekusi dalam satu transaksi (commit saat berhasil, rollback saat gagal) dan
+  history linear per database yang mencatat versi, SQL, pelaksana, waktu, dan
+  status, termasuk attempt yang gagal. Berlaku untuk PostgreSQL dan MySQL.
 - Schema diff dari definisi JSON dan kandidat SQL untuk tabel/kolom yang belum
   ada; hasilnya dapat ditinjau dan diedit di editor sebelum dijalankan.
 - Structured log JSON, audit aktivitas, tracing HTTP/SQL, serta propagasi trace
@@ -73,12 +74,15 @@ Detail konfigurasi ada di [Panduan database management](docs/database-management
 [Access control](docs/access-control.md), dan [Migration](docs/migrations.md).
 Panduan atribut, redaction, contoh output, pengujian, dan status integrasi worker
 tersedia pada [Logging dan tracing](docs/logging-tracing.md).
-API definisi/revisi dan history Milestone 2 dapat digunakan setelah server
-berjalan. Antrean job persisten dan API status job sudah terpasang (lihat
-[Migration execution](docs/migration-execution.md)). Pengajuan tindakan saat ini
-menghasilkan `503` sampai provider approval dipasang. Editor frontend sedang disesuaikan dengan alur
-baru. Detail endpoint, payload, kontrak worker, dan status integrasi tersedia
-pada panduan migration.
+Migration dijalankan dari halaman **Migrations** pada workspace database:
+simpan migration, pilih **Review apply**, lalu setiap leader group yang memiliki
+akses ke database tersebut menekan **Approve** (termasuk leader group View Only).
+Setelah semua approval lengkap, user View + Edit menekan **Execute**. Worker
+(`go run ./cmd/worker`) harus berjalan; jalankan server lebih dulu pada database
+platform yang baru karena server membuat schema access control. Detail endpoint,
+payload, dan kontrak worker tersedia pada
+[panduan migration](docs/migrations.md) dan
+[Migration execution](docs/migration-execution.md).
 
 ## Test
 
@@ -143,7 +147,11 @@ paket tersebut. Modul migration menyimpan `migration_definitions` dan
 `platform_migration_executions` pada target, sedangkan history Milestone 1
 menggunakan `platform_migrations`. Metadata target disiapkan saat diperlukan.
 
-Bonus DBMS tambahan yang didukung dan diuji adalah MySQL 8.4. Preview execution
+Bonus DBMS tambahan yang didukung dan diuji adalah MySQL 8.4, mencakup access
+control, viewer, dan eksekusi migration apply/rollback/forward. MySQL melakukan
+commit implisit untuk DDL, sehingga kegagalan setelah DDL tidak dapat
+membatalkan DDL tersebut; perubahan data tetap di-rollback. Batch migration
+hanya tersedia untuk PostgreSQL. Preview execution
 plan memakai format native tiap DBMS; MySQL ANALYZE hanya berlaku untuk
 statement yang didukung MySQL. Mode ANALYZE menjalankan SQL dan me-rollback
 perubahan transaksional; sequence/auto-increment dan efek eksternal dapat tetap

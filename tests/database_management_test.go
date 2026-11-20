@@ -72,7 +72,7 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 			t.Fatal("database workspace did not render the schema browser")
 		}
 		migrationPage := string(viewer.page(t, "/workspace/databases/"+id+"/migrations"))
-		if !strings.Contains(migrationPage, "migrations.js") || !strings.Contains(migrationPage, "Run a migration") {
+		if !strings.Contains(migrationPage, "migrations.js") || !strings.Contains(migrationPage, "Migration history") || !strings.Contains(migrationPage, "Save migration") {
 			t.Fatal("migration page did not render history and editor shell")
 		}
 		viewerAdminPage := string(viewer.page(t, "/manage/databases"))
