@@ -18,14 +18,17 @@ CSRF token from `GET /auth/csrf` for state-changing requests.
   reasons, optional key-range batch settings, schema diff generation, and
   `EXPLAIN`/`EXPLAIN ANALYZE` preview.
 - Review and approval status for every group with database access, queued
-  apply/rollback/forward actions, committed migration history, Hide rollback,
+  apply/rollback/forward actions, migration history with committed executions
+  and failed or pending attempts, Hide rollback,
   job status, batch progress, resume, and compensation of partial jobs.
 
 Migration actions use the review workflow API before queue submission. The
 editor does not send raw SQL to the legacy migration submission endpoint. It
 saves an immutable revision, creates a review snapshot, waits for all current
 group leaders, then submits the approved workflow ID as `approval_id`. Job
-status is refreshed every three seconds while active jobs are present.
+status is refreshed every three seconds while active jobs are present, and the
+history refreshes when a job finishes. Leaders of View Only groups review and
+approve from the same page.
 
 The layout uses flexible forms and horizontally scrollable tables so the
 workspace remains usable on narrow screens. SQL editors keep their own scroll

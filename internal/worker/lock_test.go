@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/wafhr/IF3110_K01-13/internal/database"
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
 )
 
@@ -15,11 +16,11 @@ func TestLockDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	if _, err := lockDatabase(context.Background(), conn, "database"); !errors.Is(err, migration.ErrInvalidMigration) {
+	if _, err := lockDatabase(context.Background(), conn, database.PostgreSQL, "database"); !errors.Is(err, migration.ErrInvalidMigration) {
 		t.Fatalf("malformed database ID returned %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	unlock, err := lockDatabase(ctx, conn, testDatabaseID)
+	unlock, err := lockDatabase(ctx, conn, database.PostgreSQL, testDatabaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +37,7 @@ func TestLockDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer busyConn.Close()
-	if _, err := lockDatabase(context.Background(), busyConn, testDatabaseID); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := lockDatabase(context.Background(), busyConn, database.PostgreSQL, testDatabaseID); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("lock failure returned %v", err)
 	}
 }

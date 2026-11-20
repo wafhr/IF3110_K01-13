@@ -58,26 +58,33 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 	viewer := f.login(t, "viewer", memberPassword)
 	path := tableURL(id, quotedSchema, quotedTable)
 
-	t.Run("browser workspace pages respect authorization and render feature flows", func(t *testing.T) {
-		adminPage := string(admin.page(t, "/manage/databases"))
-		if !strings.Contains(adminPage, "Register database") || !strings.Contains(adminPage, "database-admin.js") {
-			t.Fatal("database admin page did not render its form and browser client")
+	t.Run("browser routes serve the SPA behind authentication", func(t *testing.T) {
+		for _, route := range []string{"/", "/workspace/databases/" + id, "/workspace/databases/" + id + "/migrations"} {
+			if page := string(viewer.page(t, route)); !strings.Contains(page, `<div id="app">`) || !strings.Contains(page, "/assets/js/spa.js") {
+				t.Fatalf("%s did not serve the SPA shell", route)
+			}
 		}
-		workspace := string(member.page(t, "/"))
-		if !strings.Contains(workspace, "workspace.js") || !strings.Contains(workspace, "Your workspaces") {
-			t.Fatal("home page did not render the accessible workspace client")
+		if page := string(admin.page(t, "/manage/databases")); !strings.Contains(page, "/assets/js/spa.js") {
+			t.Fatal("admin page did not serve the SPA shell")
 		}
-		viewerPage := string(member.page(t, "/workspace/databases/"+id))
-		if !strings.Contains(viewerPage, "database-viewer.js") || !strings.Contains(viewerPage, "SCHEMA EXPLORER") {
-			t.Fatal("database workspace did not render the schema browser")
+		for _, test := range []struct {
+			client          *apiClient
+			route, location string
+		}{
+			{client: viewer, route: "/manage/databases", location: "/"},
+			{client: f.anonymous(), route: "/workspace/databases/" + id + "/migrations", location: "/login"},
+		} {
+			if got := browserRedirect(t, test.client, test.route); got != test.location {
+				t.Fatalf("%s redirected to %q, want %q", test.route, got, test.location)
+			}
 		}
-		migrationPage := string(viewer.page(t, "/workspace/databases/"+id+"/migrations"))
-		if !strings.Contains(migrationPage, "migrations.js") || !strings.Contains(migrationPage, "Run a migration") {
-			t.Fatal("migration page did not render history and editor shell")
+		response, err := viewer.client.Get(viewer.baseURL + "/assets/js/spa.js")
+		if err != nil {
+			t.Fatal(err)
 		}
-		viewerAdminPage := string(viewer.page(t, "/manage/databases"))
-		if !strings.Contains(viewerAdminPage, "Good to see you, viewer") || strings.Contains(viewerAdminPage, "Register database") {
-			t.Fatal("non-admin was not redirected away from database administration")
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK || !strings.Contains(response.Header.Get("Content-Type"), "javascript") {
+			t.Fatalf("SPA script status/content-type = %d/%q", response.StatusCode, response.Header.Get("Content-Type"))
 		}
 	})
 
@@ -352,4 +359,25 @@ CREATE TRIGGER integration_reject_delete BEFORE DELETE ON access_group_database_
 		assertCount(t, f.target, `SELECT count(*) FROM "Sales / Data"."Order""Items"`, 3)
 		admin.do(t, "DELETE", "/admin/databases/"+hidden.Database.ID, nil, 204)
 	})
+}
+
+// browserRedirect returns the Location of a browser page request without following it.
+func browserRedirect(t *testing.T, client *apiClient, path string) string {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, client.baseURL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Accept", "text/html")
+	noFollow := *client.client
+	noFollow.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := noFollow.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("GET %s: status %d, want 303", path, response.StatusCode)
+	}
+	return response.Header.Get("Location")
 }

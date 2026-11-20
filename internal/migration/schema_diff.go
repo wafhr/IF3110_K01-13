@@ -100,7 +100,7 @@ func BuildSchemaDiff(dbms database.DBMS, current []database.TableDetails, desire
 		}
 	}
 	for key, table := range currentByName {
-		if !desiredTables[key] {
+		if !desiredTables[key] && !platformHistoryTable(table.Name) {
 			changes = append(changes, SchemaChange{Kind: "extra_table", Object: table.Schema + "." + table.Name, Detail: "Current table is omitted from desired definition; review manually", Destructive: true})
 		}
 	}
@@ -145,4 +145,10 @@ func nullableLabel(nullable bool) string {
 		return "NULL"
 	}
 	return "NOT NULL"
+}
+
+// platformHistoryTable reports the migration history tables the platform
+// creates on every target.
+func platformHistoryTable(name string) bool {
+	return name == "platform_migration_executions" || name == "platform_migrations"
 }
