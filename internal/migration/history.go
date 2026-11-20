@@ -21,14 +21,23 @@ const executionColumns = `id::text, sequence, database_id::text, migration_id::t
 // HistoryRepository menyimpan history commit pada database target PostgreSQL.
 // Pemanggil memeriksa permission dan menggunakan koneksi target yang sesuai.
 type HistoryRepository struct {
-	db *sql.DB
+	db   *sql.DB
+	dbms database.DBMS
 }
 
 func NewHistoryRepository(db *sql.DB) (*HistoryRepository, error) {
+	return newHistoryRepository(db, database.PostgreSQL)
+}
+
+// newHistoryRepository memilih dialek history sesuai DBMS target.
+func newHistoryRepository(db *sql.DB, dbms database.DBMS) (*HistoryRepository, error) {
 	if db == nil {
 		return nil, errors.New("migration history requires a target database")
 	}
-	return &HistoryRepository{db: db}, nil
+	if dbms != database.PostgreSQL && dbms != database.MySQL {
+		return nil, fmt.Errorf("%w: unsupported migration history target", ErrInvalidMigration)
+	}
+	return &HistoryRepository{db: db, dbms: dbms}, nil
 }
 
 // Initialize menyiapkan schema dan mengimpor history sukses Milestone 1 secara
@@ -36,6 +45,9 @@ func NewHistoryRepository(db *sql.DB) (*HistoryRepository, error) {
 func (r *HistoryRepository) Initialize(ctx context.Context, databaseID string) error {
 	if !validUUID(databaseID) {
 		return ErrInvalidMigration
+	}
+	if r.dbms == database.MySQL {
+		return r.initializeMySQL(ctx, databaseID)
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -62,6 +74,9 @@ type historyConnection interface {
 // ensureInitialized memakai schema yang sudah tersedia pada jalur pembacaan.
 // Schema baru disiapkan saat tabel history belum ada.
 func (r *HistoryRepository) ensureInitialized(ctx context.Context, databaseID string) error {
+	if r.dbms == database.MySQL {
+		return r.ensureMySQLInitialized(ctx, databaseID)
+	}
 	var exists bool
 	if err := r.db.QueryRowContext(ctx, `SELECT to_regclass('platform_migration_executions') IS NOT NULL`).Scan(&exists); err != nil {
 		return historyError("find execution history", err)
@@ -101,6 +116,10 @@ func importLegacyHistory(ctx context.Context, connection historyConnection, data
 
 // AppendExecution mencatat history melalui transaksi target milik worker.
 func AppendExecution(ctx context.Context, tx *sql.Tx, execution Execution) (Execution, error) {
+	return appendExecution(ctx, tx, database.PostgreSQL, execution)
+}
+
+func appendExecution(ctx context.Context, tx *sql.Tx, dbms database.DBMS, execution Execution) (Execution, error) {
 	if tx == nil {
 		return Execution{}, fmt.Errorf("%w: target transaction is required", ErrInvalidMigration)
 	}
@@ -108,6 +127,9 @@ func AppendExecution(ctx context.Context, tx *sql.Tx, execution Execution) (Exec
 	execution, err = normalizeCommittedExecution(execution)
 	if err != nil {
 		return Execution{}, err
+	}
+	if dbms == database.MySQL {
+		return appendMySQLExecution(ctx, tx, execution)
 	}
 	stored, err := scanExecution(tx.QueryRowContext(ctx, `
 		INSERT INTO platform_migration_executions
@@ -125,7 +147,7 @@ func (r *HistoryRepository) Get(ctx context.Context, databaseID, executionID str
 	if !validUUID(databaseID) || !validUUID(executionID) {
 		return Execution{}, ErrNotFound
 	}
-	return getExecution(ctx, r.db, databaseID, executionID)
+	return getExecution(ctx, r.db, r.dbms, databaseID, executionID)
 }
 
 // List mengurutkan history dari pencatatan terbaru. Filter hanya memengaruhi
@@ -134,7 +156,12 @@ func (r *HistoryRepository) List(ctx context.Context, databaseID string, hideRol
 	if !validUUID(databaseID) {
 		return nil, ErrNotFound
 	}
-	return listExecutions(ctx, r.db, databaseID, hideRollback)
+	return listExecutions(ctx, r.db, r.dbms, databaseID, hideRollback)
+}
+
+// listAll membaca history seluruh registrasi pada database fisik target.
+func (r *HistoryRepository) listAll(ctx context.Context) ([]Execution, error) {
+	return listExecutions(ctx, r.db, r.dbms, "", false)
 }
 
 type executionQueries interface {
@@ -145,23 +172,34 @@ type executionQueries interface {
 // ListExecutionsInTransaction membaca seluruh history database fisik untuk validasi
 // worker. Identitas registrasi divalidasi, sedangkan alias memakai urutan bersama.
 func ListExecutionsInTransaction(ctx context.Context, tx *sql.Tx, databaseID string) ([]Execution, error) {
+	return listExecutionsInTransaction(ctx, tx, database.PostgreSQL, databaseID)
+}
+
+func listExecutionsInTransaction(ctx context.Context, tx *sql.Tx, dbms database.DBMS, databaseID string) ([]Execution, error) {
 	if tx == nil || !validUUID(databaseID) {
 		return nil, ErrInvalidMigration
 	}
-	return listExecutions(ctx, tx, "", false)
+	return listExecutions(ctx, tx, dbms, "", false)
 }
 
 // GetExecutionInTransaction mencari bukti commit pada koneksi target yang dikunci.
 func GetExecutionInTransaction(ctx context.Context, tx *sql.Tx, databaseID, executionID string) (Execution, error) {
+	return getExecutionInTransaction(ctx, tx, database.PostgreSQL, databaseID, executionID)
+}
+
+func getExecutionInTransaction(ctx context.Context, tx *sql.Tx, dbms database.DBMS, databaseID, executionID string) (Execution, error) {
 	if tx == nil || !validUUID(databaseID) || !validUUID(executionID) {
 		return Execution{}, ErrInvalidMigration
 	}
-	return getExecution(ctx, tx, databaseID, executionID)
+	return getExecution(ctx, tx, dbms, databaseID, executionID)
 }
 
-func getExecution(ctx context.Context, connection executionQueries, databaseID, executionID string) (Execution, error) {
-	execution, err := scanExecution(connection.QueryRowContext(ctx, `SELECT `+executionColumns+`
-        FROM platform_migration_executions WHERE database_id = $1 AND id = $2`, databaseID, executionID))
+func getExecution(ctx context.Context, connection executionQueries, dbms database.DBMS, databaseID, executionID string) (Execution, error) {
+	statement := `SELECT ` + executionColumns + ` FROM platform_migration_executions WHERE database_id = $1 AND id = $2`
+	if dbms == database.MySQL {
+		statement = `SELECT ` + mysqlExecutionColumns + ` FROM platform_migration_executions WHERE database_id = ? AND id = ?`
+	}
+	execution, err := scanExecution(connection.QueryRowContext(ctx, statement, databaseID, executionID))
 	if err != nil {
 		return Execution{}, historyError("get committed execution", err)
 	}
@@ -170,14 +208,18 @@ func getExecution(ctx context.Context, connection executionQueries, databaseID, 
 
 // databaseID kosong hanya dipakai internal untuk memeriksa urutan seluruh target.
 // Pembacaan API memvalidasi ID registrasi sebelum meneruskan filter.
-func listExecutions(ctx context.Context, connection executionQueries, databaseID string, hideRollback bool) ([]Execution, error) {
-	statement := `SELECT ` + executionColumns + ` FROM platform_migration_executions`
+func listExecutions(ctx context.Context, connection executionQueries, dbms database.DBMS, databaseID string, hideRollback bool) ([]Execution, error) {
+	columns, filter, order := executionColumns, ` WHERE database_id = $1`, ` ORDER BY sequence DESC`
+	if dbms == database.MySQL {
+		columns, filter, order = mysqlExecutionColumns, ` WHERE database_id = ?`, " ORDER BY `sequence` DESC"
+	}
+	statement := `SELECT ` + columns + ` FROM platform_migration_executions`
 	var args []any
 	if databaseID != "" {
-		statement += ` WHERE database_id = $1`
+		statement += filter
 		args = append(args, databaseID)
 	}
-	rows, err := connection.QueryContext(ctx, statement+` ORDER BY sequence DESC`, args...)
+	rows, err := connection.QueryContext(ctx, statement+order, args...)
 	if err != nil {
 		return nil, historyError("list committed executions", err)
 	}
@@ -202,6 +244,9 @@ func listExecutions(ctx context.Context, connection executionQueries, databaseID
 // LegacyAttempts menyediakan attempt gagal/running Milestone 1 untuk tampilan
 // transisi. Catatan ini tetap terpisah dari history commit Milestone 2.
 func (r *HistoryRepository) LegacyAttempts(ctx context.Context) ([]Record, error) {
+	if r.dbms == database.MySQL {
+		return r.mysqlLegacyAttempts(ctx)
+	}
 	var exists bool
 	if err := r.db.QueryRowContext(ctx, `SELECT to_regclass('platform_migrations') IS NOT NULL`).Scan(&exists); err != nil {
 		return nil, historyError("find legacy attempts", err)
@@ -308,6 +353,9 @@ func scanExecution(row interface{ Scan(...any) error }) (Execution, error) {
 
 // historyError mengelompokkan kegagalan target tanpa membocorkan detail driver.
 func historyError(operation string, err error) error {
+	if mapped, ok := mysqlHistoryError(err); ok {
+		return mapped
+	}
 	var postgresError *pgconn.PgError
 	if errors.As(err, &postgresError) {
 		if postgresError.Code == "42501" {

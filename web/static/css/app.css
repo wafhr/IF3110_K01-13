@@ -711,3 +711,9 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; background:#f4f7f5; padding:
  .schema-diff-tool { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--line, #d8ddd9); }
  .schema-diff-tool summary { cursor: pointer; font-weight: 600; }
  .schema-example { white-space: pre-wrap; overflow-wrap: anywhere; padding: .8rem; background: #f3f6f4; border-radius: .5rem; }
+ .stack .checkbox-label { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+ .stack .checkbox-label input { min-height: auto; width: auto; }
+ .detail-list { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0 0 1rem; }
+ .detail-list dt { font-weight: 600; color: #53635c; }
+ .detail-list dd { margin: 0; overflow-wrap: anywhere; }
+ #migration-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: .8rem; background: #f3f6f4; border-radius: .5rem; }

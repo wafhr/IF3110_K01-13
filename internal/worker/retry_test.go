@@ -102,7 +102,7 @@ func TestFailureReasonHidesDetails(t *testing.T) {
 		"migration conflict":                                         fmt.Errorf("plan changed: %w", migration.ErrConflict),
 		"commit outcome is uncertain":                                fmt.Errorf("%w: write: broken pipe", ErrCommitUncertain),
 		"migration attempt failed":                                   errors.New("password=secret host=db.internal"),
-		"migration jobs support PostgreSQL targets only":             ErrUnsupportedTarget,
+		"migration target does not support this job":                 ErrUnsupportedTarget,
 		"migration execution dependencies unavailable":               migration.ErrExecutionUnavailable,
 		"migration conflict: approval is missing or no longer valid": migration.ErrApprovalRequired,
 	}

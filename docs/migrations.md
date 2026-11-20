@@ -9,11 +9,14 @@ apply/rollback/forward planning, PostgreSQL history, and integration contracts
 for approval and execution. The server initializes the definition repository
 at startup.
 
-Production wiring connects access checks through `access.Service`, approval
-reviews through `WorkflowService`, and the persistent queue through
-`job.Service` (see [Migration execution](migration-execution.md)). The SPA uses
-these APIs for definition editing, review and leader approval, submission, and
-job monitoring. The end-user screens are described in [Frontend SPA](spa.md).
+Production wiring connects access checks through `access.Service`, leader
+approvals through `WorkflowService`, and the persistent queue through
+`job.Service` (see [Migration execution](migration-execution.md) and
+[Migration workflow](migration-workflow.md)). The worker (`cmd/worker`) executes
+queued actions. The SPA uses these APIs for definition editing, review and
+leader approval, submission, job monitoring, and history. Failed attempts are
+shown from the job records, because the target history stores committed
+executions only. The end-user screens are described in [Frontend SPA](spa.md).
 
 Integration tests use a dedicated test approval provider, the production job
 queue in the platform database, and a caller of the execution hooks. They
@@ -36,10 +39,14 @@ also require the session's `X-CSRF-Token` header and
 `Content-Type: application/json`. Platform Admins access targets through
 group-derived grants.
 
-Definitions can be saved for registered targets. Milestone 2 action planning
-and history currently support PostgreSQL. MySQL viewer, plan preview, and
-legacy history reads remain available. Historical test data is seeded by the
-integration fixture. Application execution uses the queue/worker contracts.
+Definitions can be saved for registered targets. Action planning, execution,
+and history support PostgreSQL and MySQL. On MySQL the worker serializes
+migrations with `GET_LOCK` on the physical database, stores history in a
+`platform_migration_executions` table created on the target, and rejects
+transaction control such as `COMMIT`, `SET autocommit`, `LOCK TABLES`, and
+executable `/*! ... */` comments. MySQL commits DDL implicitly, so a failure
+after a DDL statement cannot undo that DDL. Batch migrations require
+PostgreSQL.
 The PostgreSQL target account needs permission to create history metadata in the active
 schema and execute the approved SQL.
 

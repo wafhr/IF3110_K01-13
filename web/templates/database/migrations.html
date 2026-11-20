@@ -3,16 +3,30 @@
   <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/">Workspace</a><span aria-hidden="true">/</span><a href="/workspace/databases/{{.DatabaseID}}">Database</a><span aria-hidden="true">/</span><span>Migrations</span></nav>
   <div class="page-heading"><div><p class="eyebrow">DATABASE WORKSPACE</p><h1 id="migration-database-title">Migrations</h1><p id="migration-permission" class="muted">Loading permissions…</p></div></div>
   <p id="migration-notice" class="notice" hidden role="status"></p>
-  <section class="panel"><div class="panel-heading"><div><p class="eyebrow">HISTORY</p><h2>Migration runs</h2></div></div><div class="table-wrap"><table><thead><tr><th>Version</th><th>Name</th><th>Status</th><th>Started</th><th>Finished</th></tr></thead><tbody id="migration-list"><tr><td colspan="5" class="empty-cell">Loading migrations…</td></tr></tbody></table></div></section>
-  <section id="migration-detail" class="panel" hidden></section>
+
+  <section class="panel">
+    <div class="panel-heading"><div><p class="eyebrow">HISTORY</p><h2>Migration history</h2><p class="muted">Every execution in order, including failed and queued attempts. Select a row to see its SQL.</p></div></div>
+    <div class="table-wrap"><table><thead><tr><th>#</th><th>Name</th><th>Action</th><th>Status</th><th>Revision</th><th>Executed by</th><th>Started</th><th>Finished</th></tr></thead><tbody id="history-list"><tr><td colspan="8" class="empty-cell">Loading history…</td></tr></tbody></table></div>
+  </section>
+  <section id="migration-detail" class="panel" hidden aria-live="polite"></section>
+
+  <section class="panel">
+    <div class="panel-heading"><div><p class="eyebrow">MIGRATIONS</p><h2>Migration definitions</h2><p class="muted" id="definition-help">Each edit is saved as a new revision. After a migration is executed it can no longer be edited; create a new migration for further changes.</p></div></div>
+    <div class="table-wrap"><table><thead><tr><th>Name</th><th>Revision</th><th>State</th><th>Actions</th></tr></thead><tbody id="definition-list"><tr><td colspan="4" class="empty-cell">Loading migrations…</td></tr></tbody></table></div>
+  </section>
+
   <section id="migration-editor" class="panel" hidden>
-    <div class="panel-heading"><div><p class="eyebrow">VIEW + EDIT ACCESS</p><h2>Run a migration</h2><p class="muted">SQL runs transactionally. Failed statements are rolled back and retained in history.</p></div></div>
+    <div class="panel-heading"><div><p class="eyebrow">VIEW + EDIT ACCESS</p><h2 id="editor-title">Create a migration</h2><p class="muted" id="editor-help">SQL runs in one transaction. A failed migration is rolled back and kept in the history.</p></div></div>
     <form id="migration-form" class="stack">
+      <input type="hidden" id="migration-id"><input type="hidden" id="migration-revision">
       <label for="migration-name">Name</label><input id="migration-name" maxlength="160" required>
-      <label for="migration-sql">SQL</label><textarea id="migration-sql" rows="12" required maxlength="1048576"></textarea>
-      <p class="muted">Preview one supported SQL statement before running a migration. Ordinary CREATE TABLE and ALTER TABLE statements have no execution plan. A name is only required when running a migration.</p>
+      <label for="migration-sql">SQL up (applied when the migration runs)</label><textarea id="migration-sql" rows="10" required maxlength="1048576" spellcheck="false"></textarea>
+      <label for="migration-sql-down">SQL down (undoes the change for rollback)</label><textarea id="migration-sql-down" rows="6" maxlength="1048576" spellcheck="false"></textarea>
+      <label class="checkbox-label"><input type="checkbox" id="migration-irreversible"> This migration cannot be rolled back</label>
+      <label for="migration-irreversible-reason" id="irreversible-reason-label" hidden>Reason</label><input id="migration-irreversible-reason" maxlength="500" hidden>
       <p class="notice" id="query-plan-warning" hidden>EXPLAIN ANALYZE executes SQL to measure actual performance. Transactional changes are rolled back, but sequence or auto-increment values, implicit DDL commits, and external effects from functions or triggers may persist.</p>
-      <div class="form-row"><label>Preview mode<select id="query-plan-mode"><option value="explain">EXPLAIN · estimates only</option><option value="explain_analyze">EXPLAIN ANALYZE · execute and roll back</option></select></label><button id="preview-query-plan" class="button" type="button">Preview execution plan</button><button class="button primary" type="submit">Run migration</button></div>
+      <div class="form-row"><label>Preview mode<select id="query-plan-mode"><option value="explain">EXPLAIN · estimates only</option><option value="explain_analyze">EXPLAIN ANALYZE · execute and roll back</option></select></label><button id="preview-query-plan" class="button" type="button">Preview execution plan</button><button id="reset-migration" class="button" type="button">New migration</button><button class="button primary" type="submit" id="save-migration">Save migration</button></div>
+      <p class="muted">Preview checks one statement from SQL up. Ordinary CREATE TABLE and ALTER TABLE statements have no execution plan.</p>
     </form>
     <details class="schema-diff-tool">
       <summary>Compare with desired schema and generate SQL</summary>
@@ -24,6 +38,13 @@
     </details>
   </section>
   <section id="query-plan" class="panel" hidden aria-live="polite"></section>
+
+  <section id="workflow-panel" class="panel" hidden aria-live="polite"></section>
+
+  <section class="panel">
+    <div class="panel-heading"><div><p class="eyebrow">EXECUTION</p><h2>Execution jobs</h2><p class="muted">Approved migrations run through the migration worker. Status refreshes while a job is active.</p></div></div>
+    <div class="table-wrap"><table><thead><tr><th>Migration</th><th>Action</th><th>Status</th><th>Attempts</th><th>Last error</th><th>Queued</th></tr></thead><tbody id="job-list"><tr><td colspan="6" class="empty-cell">Loading jobs…</td></tr></tbody></table></div>
+  </section>
 </main>
 <script src="/assets/js/platform.js" defer></script><script src="/assets/js/migrations.js" defer></script>
 {{end}}

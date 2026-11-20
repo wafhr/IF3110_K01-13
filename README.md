@@ -10,12 +10,16 @@ migration yang tercatat. PostgreSQL tetap menyimpan data platform.
 - Pengelolaan user, group, dan grant database oleh Platform Admin.
 - Koneksi target PostgreSQL dan MySQL terenkripsi di platform registry.
 - Viewer untuk schema, table, column, constraint, index, dan data.
-- Definisi dan revisi SQL up/down, perencanaan rollback/forward linear, dan
-  history commit PostgreSQL melalui API Milestone 2.
-- Review migration dan approval leader setiap group, antrean job persisten,
-  worker asynchronous, pemantauan progres, resume, dan kompensasi batch.
 - Frontend Single-Page Application yang merangkum login, administrasi,
   database viewer, editor migration, review/approval, history, dan job.
+- Migration dibuat dan direvisi sebagai SQL up/down, di-review, di-approve oleh
+  leader setiap group yang memiliki akses (termasuk group View Only), lalu
+  dieksekusi worker dalam satu transaksi: commit saat berhasil, rollback saat
+  gagal.
+- History linear per database mencatat versi, SQL, pelaksana, waktu, dan
+  status, termasuk attempt yang gagal. Berlaku untuk PostgreSQL dan MySQL.
+- Antrean job persisten, pemantauan progres, resume, dan kompensasi batch
+  (PostgreSQL).
 - Schema diff dari definisi JSON dan kandidat SQL untuk tabel/kolom yang belum
   ada; hasilnya dapat ditinjau dan diedit di editor sebelum dijalankan.
 - Structured log JSON, audit aktivitas, tracing HTTP/SQL, serta propagasi trace
@@ -75,11 +79,15 @@ Detail konfigurasi ada di [Panduan database management](docs/database-management
 [Access control](docs/access-control.md), dan [Migration](docs/migrations.md).
 Panduan atribut, redaction, contoh output, pengujian, dan status integrasi worker
 tersedia pada [Logging dan tracing](docs/logging-tracing.md).
-API definisi/revisi, review/approval, antrean, dan history Milestone 2 dapat
-digunakan setelah server dan worker berjalan. Detail kontrak backend tersedia
-pada [panduan migration](docs/migrations.md) dan [panduan eksekusi](docs/migration-execution.md).
-Panduan halaman SPA, navigasi, dan integrasi API tersedia di
-[docs/spa.md](docs/spa.md).
+Migration dijalankan dari halaman **Migrations** pada workspace database:
+simpan migration, pilih **Review apply**, lalu setiap leader group yang memiliki
+akses ke database tersebut menekan **Approve** (termasuk leader group View Only).
+Setelah semua approval lengkap, user View + Edit menekan **Execute**. Worker
+(`go run ./cmd/worker`) harus berjalan; jalankan server lebih dulu pada database
+platform yang baru karena server membuat schema access control. Detail kontrak
+backend tersedia pada [panduan migration](docs/migrations.md) dan
+[panduan eksekusi](docs/migration-execution.md). Panduan halaman SPA, navigasi,
+dan integrasi API tersedia di [docs/spa.md](docs/spa.md).
 
 ## Test
 
@@ -144,7 +152,11 @@ paket tersebut. Modul migration menyimpan `migration_definitions` dan
 `platform_migration_executions` pada target, sedangkan history Milestone 1
 menggunakan `platform_migrations`. Metadata target disiapkan saat diperlukan.
 
-Bonus DBMS tambahan yang didukung dan diuji adalah MySQL 8.4. Preview execution
+Bonus DBMS tambahan yang didukung dan diuji adalah MySQL 8.4, mencakup access
+control, viewer, dan eksekusi migration apply/rollback/forward. MySQL melakukan
+commit implisit untuk DDL, sehingga kegagalan setelah DDL tidak dapat
+membatalkan DDL tersebut; perubahan data tetap di-rollback. Batch migration
+hanya tersedia untuk PostgreSQL. Preview execution
 plan memakai format native tiap DBMS; MySQL ANALYZE hanya berlaku untuk
 statement yang didukung MySQL. Mode ANALYZE menjalankan SQL dan me-rollback
 perubahan transaksional; sequence/auto-increment dan efek eksternal dapat tetap

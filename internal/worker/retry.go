@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/wafhr/IF3110_K01-13/internal/access"
@@ -19,7 +21,7 @@ import (
 
 var (
 	ErrCommitUncertain   = errors.New("commit outcome is uncertain")
-	ErrUnsupportedTarget = errors.New("migration jobs support PostgreSQL targets only")
+	ErrUnsupportedTarget = errors.New("migration target does not support this job")
 )
 
 type failureKind int
@@ -126,7 +128,24 @@ func classify(err error) failureKind {
 		}
 		return permanentFailure
 	}
+	var mysqlError *mysql.MySQLError
+	if errors.As(err, &mysqlError) {
+		if transientMySQLError(mysqlError.Number) {
+			return transientFailure
+		}
+		return permanentFailure
+	}
 	return transientFailure
+}
+
+// transientMySQLError covers lock wait timeouts, deadlocks, too many
+// connections, and server shutdown.
+func transientMySQLError(number uint16) bool {
+	switch number {
+	case 1040, 1053, 1205, 1213:
+		return true
+	}
+	return false
 }
 
 // transientState covers connection loss, serialization and deadlock aborts,
@@ -149,6 +168,10 @@ func failureReason(err error) string {
 	var postgres *pgconn.PgError
 	if errors.As(err, &postgres) {
 		return "SQLSTATE " + postgres.Code + ": " + postgres.Message
+	}
+	var mysqlError *mysql.MySQLError
+	if errors.As(err, &mysqlError) {
+		return fmt.Sprintf("MySQL error %d: %s", mysqlError.Number, mysqlError.Message)
 	}
 	for _, known := range append(append([]error{ErrCommitUncertain}, permanentErrors...), transientErrors...) {
 		if errors.Is(err, known) {
