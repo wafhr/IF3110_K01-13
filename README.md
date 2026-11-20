@@ -10,11 +10,16 @@ migration yang tercatat. PostgreSQL tetap menyimpan data platform.
 - Pengelolaan user, group, dan grant database oleh Platform Admin.
 - Koneksi target PostgreSQL dan MySQL terenkripsi di platform registry.
 - Viewer untuk schema, table, column, constraint, index, dan data.
-- Halaman migration untuk membuat dan merevisi SQL up/down, meminta review,
-  memberi approval leader group, dan mengeksekusi migration melalui worker.
-- Eksekusi dalam satu transaksi (commit saat berhasil, rollback saat gagal) dan
-  history linear per database yang mencatat versi, SQL, pelaksana, waktu, dan
+- Frontend Single-Page Application yang merangkum login, administrasi,
+  database viewer, editor migration, review/approval, history, dan job.
+- Migration dibuat dan direvisi sebagai SQL up/down, di-review, di-approve oleh
+  leader setiap group yang memiliki akses (termasuk group View Only), lalu
+  dieksekusi worker dalam satu transaksi: commit saat berhasil, rollback saat
+  gagal.
+- History linear per database mencatat versi, SQL, pelaksana, waktu, dan
   status, termasuk attempt yang gagal. Berlaku untuk PostgreSQL dan MySQL.
+- Antrean job persisten, pemantauan progres, resume, dan kompensasi batch
+  (PostgreSQL).
 - Schema diff dari definisi JSON dan kandidat SQL untuk tabel/kolom yang belum
   ada; hasilnya dapat ditinjau dan diedit di editor sebelum dijalankan.
 - Structured log JSON, audit aktivitas, tracing HTTP/SQL, serta propagasi trace
@@ -79,10 +84,10 @@ simpan migration, pilih **Review apply**, lalu setiap leader group yang memiliki
 akses ke database tersebut menekan **Approve** (termasuk leader group View Only).
 Setelah semua approval lengkap, user View + Edit menekan **Execute**. Worker
 (`go run ./cmd/worker`) harus berjalan; jalankan server lebih dulu pada database
-platform yang baru karena server membuat schema access control. Detail endpoint,
-payload, dan kontrak worker tersedia pada
-[panduan migration](docs/migrations.md) dan
-[Migration execution](docs/migration-execution.md).
+platform yang baru karena server membuat schema access control. Detail kontrak
+backend tersedia pada [panduan migration](docs/migrations.md) dan
+[panduan eksekusi](docs/migration-execution.md). Panduan halaman SPA, navigasi,
+dan integrasi API tersedia di [docs/spa.md](docs/spa.md).
 
 ## Test
 

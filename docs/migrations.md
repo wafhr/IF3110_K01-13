@@ -10,14 +10,13 @@ for approval and execution. The server initializes the definition repository
 at startup.
 
 Production wiring connects access checks through `access.Service`, leader
-approvals through the workflow service, and the persistent queue through
+approvals through `WorkflowService`, and the persistent queue through
 `job.Service` (see [Migration execution](migration-execution.md) and
 [Migration workflow](migration-workflow.md)). The worker (`cmd/worker`) executes
-queued actions. The browser page at
-`/workspace/databases/{databaseID}/migrations` uses these APIs to save
-definitions, request reviews, record approvals, queue actions, and show the
-history. Failed attempts are shown from the job records, because the target
-history stores committed executions only.
+queued actions. The SPA uses these APIs for definition editing, review and
+leader approval, submission, job monitoring, and history. Failed attempts are
+shown from the job records, because the target history stores committed
+executions only. The end-user screens are described in [Frontend SPA](spa.md).
 
 Integration tests use a dedicated test approval provider, the production job
 queue in the platform database, and a caller of the execution hooks. They
@@ -175,13 +174,13 @@ persistent storage, the `202` response contains both identifiers.
 }
 ```
 
-SQL completion is monitored through the job module under development.
-The submission API completes validation and queue persistence before returning.
+SQL completion is monitored through the job status API. The submission API
+completes validation and queue persistence before returning.
 
 `POST /databases/{databaseID}/migrations` also accepts submissions with
 `migration_id`, `action`, and `approval_id`. Milestone 1 payloads containing
-`name` and `sql` return `400`; the migration page uses definitions, review,
-action submission, and job monitoring instead.
+`name` and `sql` return `400`. The SPA editor uses definitions, review, action
+submission, and job monitoring.
 
 ### Ordering rules
 
