@@ -55,7 +55,13 @@ func TestMigrationWorkerIntegration(t *testing.T) {
 			t.Fatalf("failed job = %+v", done)
 		}
 		if after := len(f.executionHistory(t, false).Executions); after != before {
-			t.Fatalf("history grew from %d to %d after a failed attempt", before, after)
+			t.Fatalf("committed history grew from %d to %d after a failed attempt", before, after)
+		}
+		attempts := f.attemptsOf(t, done.ID)
+		if len(attempts) != 1 || attempts[0].Status != "failed" || attempts[0].SQL != "CREATE TABLE worker_broken (" ||
+			!strings.HasPrefix(attempts[0].Error, "SQLSTATE 42601") || attempts[0].ActorID != f.actorID ||
+			attempts[0].ExecutionID != done.ExecutionID || attempts[0].MigrationID != definition.ID || attempts[0].Revision != 1 {
+			t.Fatalf("failed attempt record = %+v", attempts)
 		}
 	})
 
@@ -65,6 +71,10 @@ func TestMigrationWorkerIntegration(t *testing.T) {
 		done := f.processJob(t, runner, f.queueAction(t, definition, migration.Apply))
 		if done.Status != job.Succeeded || done.Attempts != 2 {
 			t.Fatalf("retried job = %+v", done)
+		}
+		if attempts := f.attemptsOf(t, done.ID); len(attempts) != 2 || attempts[0].Status != "retrying" || attempts[0].Attempt != 1 ||
+			attempts[1].Status != "succeeded" || attempts[1].Attempt != 2 || attempts[1].SQL != "CREATE TABLE worker_retry (id INT PRIMARY KEY)" {
+			t.Fatalf("retry attempt records = %+v", attempts)
 		}
 		assertCount(t, f.target, `SELECT count(*) FROM pg_tables WHERE tablename = 'worker_retry'`, 1)
 	})
@@ -94,6 +104,17 @@ func TestMigrationWorkerIntegration(t *testing.T) {
 		done := f.processJob(t, runner, request)
 		if done.Status != job.Succeeded || done.Attempts != 2 {
 			t.Fatalf("recovered job = %+v", done)
+		}
+		if attempts := f.attemptsOf(t, done.ID); len(attempts) != 2 || attempts[0].Status != "interrupted" || attempts[1].Status != "succeeded" {
+			t.Fatalf("recovered attempt records = %+v", attempts)
+		}
+	})
+
+	t.Run("attempt records are append-only", func(t *testing.T) {
+		for _, statement := range []string{`UPDATE migration_attempts SET status = 'succeeded'`, `DELETE FROM migration_attempts`, `TRUNCATE migration_attempts`} {
+			if _, err := f.platform.Exec(statement); err == nil || !strings.Contains(err.Error(), "append-only") {
+				t.Fatalf("%s returned %v", statement, err)
+			}
 		}
 	})
 
@@ -180,6 +201,22 @@ func (f *migrationFixture) jobFor(t *testing.T, executionID string) job.Job {
 		t.Fatal(err)
 	}
 	return queued
+}
+
+// attemptsOf reads the attempt history API as a View Only member, oldest first.
+func (f *migrationFixture) attemptsOf(t *testing.T, jobID string) []job.Attempt {
+	t.Helper()
+	var result struct {
+		Attempts []job.Attempt `json:"attempts"`
+	}
+	decode(t, f.reader.do(t, "GET", "/databases/"+f.databaseID+"/attempts?limit=100", nil, 200), &result)
+	attempts := make([]job.Attempt, 0)
+	for i := len(result.Attempts) - 1; i >= 0; i-- {
+		if result.Attempts[i].JobID == jobID {
+			attempts = append(attempts, result.Attempts[i])
+		}
+	}
+	return attempts
 }
 
 func assertExecutionRecorded(t *testing.T, f *migrationFixture, executionID string, action migration.Action) {

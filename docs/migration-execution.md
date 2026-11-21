@@ -236,6 +236,28 @@ The batch run takes longer in total because every batch revalidates the job
 and commits separately, but each transaction locks only 10,000 rows and keeps
 its progress if a later batch fails.
 
+## Attempt history
+
+Every attempt of a job is stored in the append-only `migration_attempts` table
+of the platform database, whether it succeeded or not. The queue transition that
+ends an attempt writes the row in the same statement, so only the worker that
+still holds the lease can record it. A claim of a job whose lease expired
+records the previous attempt as `interrupted`.
+
+| Column | Meaning |
+|---|---|
+| `job_id`, `execution_id`, `migration_id`, `revision`, `name`, `action`, `operation` | Identity of the attempt |
+| `attempt` | Attempt number within the job; a resume starts a new count |
+| `actor_id` | User who submitted the action |
+| `sql` | Exact SQL the attempt ran: SQL up, SQL down for rollback, or the compensation SQL |
+| `status` | `succeeded`, `reverted`, `failed`, `partial`, `partially_reverted`, `retrying`, `released`, or `interrupted` |
+| `error` | SQLSTATE and message for a failed attempt, without driver details |
+| `committed_batches`, `committed_rows` | Batch progress when the attempt ended |
+| `started_at`, `finished_at` | Attempt timing |
+
+The committed history on the target (`platform_migration_executions`) still
+decides the linear order; attempts never change it.
+
 ## Job status API
 
 Reading jobs requires at least View Only access to the database; resuming or
@@ -246,6 +268,7 @@ it was queued for.
 |---|---|
 | `GET /databases/{databaseID}/jobs?limit=50` | `{"jobs":[...]}`, newest first; `limit` is 1 to 100 |
 | `GET /databases/{databaseID}/jobs/{jobID}` | `{"job":{...}}` |
+| `GET /databases/{databaseID}/attempts?limit=50` | `{"attempts":[...]}`, newest first, with the SQL of each attempt; `limit` is 1 to 100 |
 | `POST /databases/{databaseID}/jobs/{jobID}/resume` | `202` with `{"job":{...}}`; requires View + Edit and the CSRF token |
 | `POST /databases/{databaseID}/jobs/{jobID}/cancel` | `202` with `{"job":{...}}`; requires View + Edit and the CSRF token |
 
