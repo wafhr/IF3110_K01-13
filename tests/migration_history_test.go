@@ -302,3 +302,16 @@ func TestMigrationAliasOrderIntegration(t *testing.T) {
 	f.databaseID = alias.ID
 	f.runAction(t, second, migration.Forward)
 }
+
+func TestMigrationLegacyHistoryClockSkewIntegration(t *testing.T) {
+	f := newMigrationFixture(t)
+	legacy, err := f.seedLegacyMigration(context.Background(), f.databaseID, f.actorID, "legacy skew", "CREATE TABLE migration_legacy_skew (id int)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	execFixture(t, f.target, `UPDATE platform_migrations SET finished_at = started_at - interval '1 second' WHERE version = $1`, legacy.Version)
+	history := f.executionHistory(t, false)
+	if len(history.Executions) != 1 || history.Executions[0].FinishedAt == nil || history.Executions[0].FinishedAt.Before(history.Executions[0].StartedAt) {
+		t.Fatalf("legacy row with an earlier finish time = %+v", history.Executions)
+	}
+}

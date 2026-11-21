@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/wafhr/IF3110_K01-13/internal/access"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
@@ -501,6 +502,8 @@ func migrationError(w http.ResponseWriter, ctx context.Context, err error) {
 		status, message = http.StatusBadRequest, "invalid migration request"
 	case errors.Is(err, ErrNotFound), errors.Is(err, database.ErrNotFound), errors.Is(err, sql.ErrNoRows):
 		status, message = http.StatusNotFound, "database or migration not found"
+	case errors.Is(err, ErrMigrationOrder):
+		status, message = http.StatusConflict, strings.TrimPrefix(err.Error(), ErrMigrationOrder.Error()+": ")
 	case errors.Is(err, ErrImmutableMigration):
 		status, message = http.StatusConflict, "executed migration definitions cannot be revised"
 	case errors.Is(err, ErrConflict):
