@@ -22,6 +22,7 @@ const (
 	testUsername     = "reader"
 
 	sessionLookup    = "FROM access_sessions s JOIN access_users u"
+	leadershipLock   = "FROM access_groups WHERE id = $1 FOR UPDATE"
 	permissionLookup = "bool_or(p.permission = 'view_edit')"
 )
 
@@ -58,6 +59,16 @@ type fakeDatabase struct {
 }
 
 func newFakeDatabase() *fakeDatabase { return &fakeDatabase{} }
+
+// withLeadership answers the group leadership lock with a leader ID, empty for
+// none, and whether the group holds database grants.
+func (f *fakeDatabase) withLeadership(leaderID string, hasGrants bool) *fakeDatabase {
+	var leader driver.Value
+	if leaderID != "" {
+		leader = leaderID
+	}
+	return f.onQuery(leadershipLock, []string{"leader_user_id", "has_grants"}, []driver.Value{leader, hasGrants})
+}
 
 func (f *fakeDatabase) onQuery(fragment string, columns []string, rows ...[]driver.Value) *fakeDatabase {
 	f.queries = append(f.queries, queryRule{fragment: fragment, columns: columns, rows: rows})

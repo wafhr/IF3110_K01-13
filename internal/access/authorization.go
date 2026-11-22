@@ -93,6 +93,13 @@ func (s *Service) SetDatabasePermission(ctx context.Context, groupID, databaseID
 	if err != nil {
 		return fmt.Errorf("check registered database before grant: %w", err)
 	}
+	leaderID, _, err := groupLeadership(ctx, tx, groupID)
+	if err != nil {
+		return err
+	}
+	if leaderID == "" {
+		return errLeaderRequired
+	}
 	var previous Permission
 	err = tx.QueryRowContext(ctx, `SELECT permission FROM access_group_database_permissions WHERE group_id = $1 AND database_id = $2 FOR UPDATE`, groupID, databaseID).Scan(&previous)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {

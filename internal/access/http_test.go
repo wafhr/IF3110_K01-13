@@ -2,6 +2,7 @@ package access
 
 import (
 	"bytes"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"io"
@@ -79,9 +80,9 @@ func TestRequireDatabaseAccess(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			handler := newTestHandler(t, signedInDatabase(test.platformAdmin).withPermission(test.permission), false)
-			var granted Permission
+			called := false
 			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				granted = DatabasePermissionFromContext(r.Context())
+				called = true
 				w.WriteHeader(http.StatusNoContent)
 			})
 			request := authenticatedRequest(http.MethodGet, "/databases/"+testDatabaseID+"/data", "")
@@ -93,8 +94,8 @@ func TestRequireDatabaseAccess(t *testing.T) {
 			if response.Code != test.wantStatus {
 				t.Fatalf("status = %d, want %d", response.Code, test.wantStatus)
 			}
-			if (granted != "") != (test.wantStatus == http.StatusNoContent) || (granted != "" && granted != test.permission) {
-				t.Fatalf("permission passed to handler = %q", granted)
+			if called != (test.wantStatus == http.StatusNoContent) {
+				t.Fatalf("handler called = %t", called)
 			}
 		})
 	}
@@ -454,7 +455,12 @@ func TestAdminHandlers(t *testing.T) {
 		},
 		{
 			name: "removing a non member", method: http.MethodDelete, path: "/admin/groups/" + testGroupID + "/members/" + unknownID,
-			database: signedInDatabase(true).onExec(memberDelete, 0), wantStatus: http.StatusNotFound, wantMessage: "not found",
+			database: signedInDatabase(true).withLeadership("", false).onExec(memberDelete, 0), wantStatus: http.StatusNotFound, wantMessage: "not found",
+		},
+		{
+			name: "grant explains the leader rule", method: http.MethodPut, path: "/admin/groups/" + testGroupID + "/databases/" + testDatabaseID, body: `{"permission":"view_only"}`,
+			database:   signedInDatabase(true).onQuery(registeredDatabase, []string{"id"}, []driver.Value{testDatabaseID}).withLeadership("", false),
+			wantStatus: http.StatusBadRequest, wantMessage: "assign a group leader before granting database access",
 		},
 		{
 			name: "unknown permission level", method: http.MethodPut, path: "/admin/groups/" + testGroupID + "/databases/" + testDatabaseID, body: `{"permission":"owner"}`,

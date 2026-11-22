@@ -9,8 +9,11 @@ reported as `draft` and cannot authorize the changed plan.
 Every group with a grant to the database must approve, including `view_only`
 groups. Each group has one leader. A leader must be an active user who is a
 member of that group. If one user leads several groups, one approval request by
-that user records approval for each of those groups. A group without a valid
-leader remains outstanding and prevents the workflow from becoming approved.
+that user records approval for each of those groups. A database grant can
+only be given to a group that has a leader, and that leader stays assigned while
+the group holds a grant. Deactivating a leader still clears the assignment so
+access can always be revoked; until another leader is set, that group's approval
+remains outstanding and the SPA marks the group as missing a leader.
 
 ## States and transitions
 
@@ -45,7 +48,7 @@ migration instead.
 
 Platform Admins set a group leader through the existing admin API. The selected
 user must be active and already belong to the group. Send an empty `user_id` to
-clear the assignment.
+clear the assignment of a group without database grants.
 
 ```http
 PUT /admin/groups/{groupID}/leader
@@ -55,9 +58,10 @@ X-CSRF-Token: <session token>
 {"user_id":"51e8..."}
 ```
 
-The group listing includes `leader_id`. Removing the leader from the group or
-deactivating that user clears the assignment. Attempts to assign a non-member
-or inactive user return `400`.
+The group listing includes `leader_id`. Attempts to assign a non-member or
+inactive user, to grant database access to a group without a leader, or to clear
+the leader of a group with grants or remove that leader from the group return
+`400` with the reason. Deactivating the leader clears the assignment.
 
 ## Review and approval API
 

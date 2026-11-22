@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
@@ -336,6 +337,13 @@ func addMember(ctx context.Context, tx *sql.Tx, groupID, userID string) error {
 }
 
 func removeMember(ctx context.Context, tx *sql.Tx, groupID, userID string) error {
+	leaderID, hasGrants, err := groupLeadership(ctx, tx, groupID)
+	if err != nil {
+		return err
+	}
+	if hasGrants && strings.EqualFold(leaderID, userID) {
+		return errLeaderNeeded
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE access_groups SET leader_user_id = NULL WHERE id = $1 AND leader_user_id = $2`, groupID, userID); err != nil {
 		return fmt.Errorf("clear group leader before membership removal: %w", err)
 	}

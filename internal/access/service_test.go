@@ -179,8 +179,10 @@ func TestSetMembership(t *testing.T) {
 		{name: "join rotates sessions", groupID: testGroupID, member: true, database: newFakeDatabase(), wantEffect: sessionsRotated},
 		{name: "existing member is unchanged", groupID: testGroupID, member: true, database: newFakeDatabase().onExec(memberInsert, 0)},
 		{name: "unknown user or group", groupID: testGroupID, member: true, database: newFakeDatabase().failExec(memberInsert, sqlStateError("23503")), wantErr: ErrNotFound},
-		{name: "leave revokes sessions", groupID: testGroupID, database: newFakeDatabase(), wantEffect: sessionsRevoked},
-		{name: "non member cannot leave", groupID: testGroupID, database: newFakeDatabase().onExec(memberDelete, 0), wantErr: ErrNotFound},
+		{name: "leave revokes sessions", groupID: testGroupID, database: newFakeDatabase().withLeadership("", true), wantEffect: sessionsRevoked},
+		{name: "non member cannot leave", groupID: testGroupID, database: newFakeDatabase().withLeadership("", false).onExec(memberDelete, 0), wantErr: ErrNotFound},
+		{name: "leader of a group with grants stays", groupID: testGroupID, database: newFakeDatabase().withLeadership(testUserID, true), wantErr: errLeaderNeeded},
+		{name: "leader of a group without grants may leave", groupID: testGroupID, database: newFakeDatabase().withLeadership(testUserID, false), wantEffect: sessionsRevoked},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

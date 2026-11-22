@@ -63,7 +63,7 @@ func TestAuthorizeDatabase(t *testing.T) {
 
 func TestSetDatabasePermission(t *testing.T) {
 	registered := func(previous Permission) *fakeDatabase {
-		database := newFakeDatabase().onQuery(registeredDatabase, []string{"id"}, []driver.Value{testDatabaseID})
+		database := newFakeDatabase().onQuery(registeredDatabase, []string{"id"}, []driver.Value{testDatabaseID}).withLeadership(testUserID, previous != "")
 		if previous == "" {
 			return database.onQuery(existingGrant, []string{"permission"})
 		}
@@ -85,6 +85,10 @@ func TestSetDatabasePermission(t *testing.T) {
 		{name: "upgrade rotates sessions", databaseID: testDatabaseID, permission: ViewEdit, database: registered(ViewOnly), wantEffect: sessionsRotated},
 		{name: "downgrade revokes sessions", databaseID: testDatabaseID, permission: ViewOnly, database: registered(ViewEdit), wantEffect: sessionsRevoked},
 		{name: "same grant keeps sessions", databaseID: testDatabaseID, permission: ViewEdit, database: registered(ViewEdit)},
+		{name: "group without leader", databaseID: testDatabaseID, permission: ViewOnly,
+			database: newFakeDatabase().onQuery(registeredDatabase, []string{"id"}, []driver.Value{testDatabaseID}).withLeadership("", false), wantErr: errLeaderRequired},
+		{name: "missing group", databaseID: testDatabaseID, permission: ViewOnly,
+			database: newFakeDatabase().onQuery(registeredDatabase, []string{"id"}, []driver.Value{testDatabaseID}).onQuery(leadershipLock, []string{"leader_user_id", "has_grants"}), wantErr: ErrNotFound},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -93,6 +97,9 @@ func TestSetDatabasePermission(t *testing.T) {
 				t.Fatalf("error = %v, want %v", err, test.wantErr)
 			}
 			assertSessionEffect(t, test.database, groupRotation, groupRevocation, test.wantEffect)
+			if errors.Is(test.wantErr, errLeaderRequired) && test.database.ran(grantUpsert) {
+				t.Fatal("grant without a leader was written")
+			}
 		})
 	}
 }

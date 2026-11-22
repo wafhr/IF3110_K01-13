@@ -141,8 +141,15 @@ func TestAccessControlAuthorizationIntegration(t *testing.T) {
 	analystID := createAccessUser(t, admin, "analyst", false)
 	readers := createAccessGroup(t, admin, "readers")
 	editors := createAccessGroup(t, admin, "editors")
+	leaderID := createAccessUser(t, admin, "groupleader", false)
+	admin.do(t, http.MethodPut, "/admin/groups/"+readers+"/databases/"+databaseID, map[string]access.Permission{"permission": access.ViewOnly}, http.StatusBadRequest)
+	admin.do(t, http.MethodPut, "/admin/groups/"+readers+"/members/"+leaderID, nil, http.StatusNoContent)
+	admin.do(t, http.MethodPut, "/admin/groups/"+readers+"/leader", map[string]string{"user_id": leaderID}, http.StatusNoContent)
+	leadGroup(t, admin, editors, leaderID)
 	grantAccess(t, admin, readers, databaseID, access.ViewOnly)
 	grantAccess(t, admin, editors, databaseID, access.ViewEdit)
+	admin.do(t, http.MethodPut, "/admin/groups/"+readers+"/leader", map[string]string{"user_id": ""}, http.StatusBadRequest)
+	admin.do(t, http.MethodDelete, "/admin/groups/"+readers+"/members/"+leaderID, nil, http.StatusBadRequest)
 	analyst := f.login(t, "analyst", memberPassword)
 
 	t.Run("effective access uses the strongest group grant", func(t *testing.T) {
