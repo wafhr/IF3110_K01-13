@@ -141,7 +141,7 @@ internal/targetdb/          pengelolaan koneksi target
 internal/targetdb/drivers/ komposisi dan pemilihan driver target
 internal/targetdb/mysql/    implementasi MySQL
 internal/targetdb/postgres/ implementasi PostgreSQL
-web/                        halaman, template, dan aset browser
+web/                        shell SPA dan aset browser
 tests/                      integration test database management dan migration
 docs/                       panduan konfigurasi dan fitur
 ```

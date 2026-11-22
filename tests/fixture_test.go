@@ -127,10 +127,13 @@ func newFixture(t *testing.T) *fixture {
 	}
 	migrations := migration.NewService(f.openTarget)
 	auth := access.NewHTTPHandler(authService, false)
-	f.server = httptest.NewServer(telemetry.HTTPHandler(app.RoutesWithModulesAndFrontend(auth,
-		databasehttp.NewHandler(f.registry, f.pools, auth),
-		databasehttp.NewViewerHandler(f.registry, f.inspector, auth),
-		migration.NewHTTPHandler(migrations, auth), web.NewHandler(authService, auth))))
+	f.server = httptest.NewServer(telemetry.HTTPHandler(app.RoutesWith(app.Modules{
+		Access:    auth,
+		Database:  databasehttp.NewHandler(f.registry, f.pools, auth),
+		Viewer:    databasehttp.NewViewerHandler(f.registry, f.inspector, auth),
+		Migration: migration.NewHTTPHandler(migrations, auth),
+		Frontend:  web.NewHandler(auth),
+	})))
 	f.settings = database.ConnectionConfig{Host: config.Host, Port: int(config.Port), DatabaseName: targetConfig.Database,
 		DBMS: database.PostgreSQL, Username: role, Password: targetPassword, SSLMode: "disable"}
 	return f
@@ -330,6 +333,14 @@ func (c *apiClient) page(t *testing.T, path string) []byte {
 	return content
 }
 
+// leadGroup adds userID to the group and makes it the leader, which a database
+// grant requires.
+func leadGroup(t *testing.T, admin *apiClient, groupID, userID string) {
+	t.Helper()
+	admin.do(t, "PUT", "/admin/groups/"+groupID+"/members/"+userID, nil, 204)
+	admin.do(t, "PUT", "/admin/groups/"+groupID+"/leader", map[string]string{"user_id": userID}, 204)
+}
+
 func decode(t *testing.T, body []byte, output any) {
 	t.Helper()
 	if err := json.Unmarshal(body, output); err != nil {
@@ -428,7 +439,7 @@ func newMigrationFixture(t *testing.T) *migrationFixture {
 			Group access.Group `json:"group"`
 		}
 		decode(t, result.platformAdmin.do(t, "POST", "/admin/groups", map[string]string{"name": username}, 201), &group)
-		result.platformAdmin.do(t, "PUT", "/admin/groups/"+group.Group.ID+"/members/"+user.User.ID, nil, 204)
+		leadGroup(t, result.platformAdmin, group.Group.ID, user.User.ID)
 		result.platformAdmin.do(t, "PUT", "/admin/groups/"+group.Group.ID+"/databases/"+result.databaseID, map[string]any{"permission": permission}, 204)
 		if permission == access.ViewEdit {
 			result.actorID, result.editorGroupID = user.User.ID, group.Group.ID

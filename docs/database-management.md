@@ -11,9 +11,8 @@ Each module owns and initializes its schema.
   session tables. The `internal/access` package embeds and executes this file.
 - `internal/database/schema.sql` creates the `managed_databases` registry
   table. The `internal/database` package embeds and executes this file.
-- Legacy migration history uses `platform_migrations` in each target database.
-  The `internal/migration` package creates this table when legacy history is
-  first read or written.
+- Milestone 1 migration history in `platform_migrations` on a target database is
+  imported once into `platform_migration_executions` when the history is read.
 
 The access-control and registry schema files define separate tables and have
 separate owners and initialization routines. Each module embeds its local

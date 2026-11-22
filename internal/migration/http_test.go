@@ -108,7 +108,7 @@ func migrationAPIHandler(t *testing.T, service *migration.Service, steps ...repo
 	t.Helper()
 	auth := access.NewHTTPHandler(access.NewService(testMigrationDatabase(t, steps...)), false)
 	viewer := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("API migration masuk ke viewer") })
-	return app.RoutesWithModulesAndFrontend(auth, nil, viewer, migration.NewHTTPHandler(service, auth), nil)
+	return app.RoutesWith(app.Modules{Access: auth, Viewer: viewer, Migration: migration.NewHTTPHandler(service, auth)})
 }
 
 func migrationRequest(method, path, body string) *http.Request {
@@ -405,17 +405,13 @@ func TestDefinitionUpdateRejectsMissingCSRFAndViewOnlyPermission(t *testing.T) {
 }
 
 func TestExecutionAPIQueuesAndFailsClosedThroughApplicationRoutes(t *testing.T) {
-	for _, alias := range []bool{false, true} {
+	{
 		store, request, dependencies := executionFixture(t)
 		target := testMigrationDatabase(t, actionHistorySteps(nil)...)
 		service := migration.NewServiceWithExecution(executionOpener(target), store, dependencies)
 		handler := migrationAPIHandler(t, service, migrationAuthorizationSteps(access.ViewEdit, false)...)
 		body := map[string]any{"action": request.Plan.Action, "approval_id": request.ApprovalID}
 		path := migrationAPIBase + "/definitions/" + repositoryMigrationID + "/actions"
-		if alias {
-			path = migrationAPIBase
-			body["migration_id"] = repositoryMigrationID
-		}
 		data, err := json.Marshal(body)
 		if err != nil {
 			t.Fatal(err)
@@ -430,7 +426,7 @@ func TestExecutionAPIQueuesAndFailsClosedThroughApplicationRoutes(t *testing.T) 
 			t.Fatalf("pengajuan API = %d %s", response.Code, response.Body.String())
 		}
 	}
-	for _, scenario := range []string{"unavailable", "legacy SQL", "view-only", "CSRF", "approval", "permission"} {
+	for _, scenario := range []string{"unavailable", "view-only", "CSRF", "approval", "permission"} {
 		t.Run(scenario, func(t *testing.T) {
 			store, request, dependencies := executionFixture(t)
 			path := migrationAPIBase + "/definitions/" + repositoryMigrationID + "/actions"
@@ -441,10 +437,6 @@ func TestExecutionAPIQueuesAndFailsClosedThroughApplicationRoutes(t *testing.T) 
 			switch scenario {
 			case "unavailable":
 				dependencies.Queue = nil
-			case "legacy SQL":
-				path = migrationAPIBase
-				body = `{"name":"direct","sql":"SELECT 1"}`
-				want = http.StatusBadRequest
 			case "view-only":
 				authSteps = migrationAuthorizationSteps(access.ViewOnly, false)
 				want = http.StatusForbidden

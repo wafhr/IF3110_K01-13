@@ -47,11 +47,8 @@ func NewHTTPHandler(service *Service, auth *access.HTTPHandler, readers ...Schem
 	if len(readers) > 0 {
 		h.schemas = readers[0]
 	}
-	h.routes.Handle("GET /databases/{databaseID}/migrations", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.list)))
-	h.routes.Handle("POST /databases/{databaseID}/migrations", auth.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(h.execute)))
 	h.routes.Handle("POST /databases/{databaseID}/migrations/schema-diff", auth.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(h.schemaDiff)))
 	h.routes.Handle("POST /databases/{databaseID}/migrations/explain", auth.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(h.explain)))
-	h.routes.Handle("GET /databases/{databaseID}/migrations/{version}", auth.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.detail)))
 	h.routes.Handle("GET /databases/{databaseID}/migrations/definitions", auth.RequireDatabaseAccess(access.ViewOnly, h.withDefinitions(h.listDefinitions)))
 	h.routes.Handle("POST /databases/{databaseID}/migrations/definitions", auth.RequireDatabaseAccess(access.ViewEdit, h.withDefinitions(h.createDefinition)))
 	h.routes.Handle("GET /databases/{databaseID}/migrations/definitions/{migrationID}", auth.RequireDatabaseAccess(access.ViewOnly, h.withDefinitions(h.getDefinition)))
@@ -311,41 +308,6 @@ func decodeDefinitionJSON(w http.ResponseWriter, r *http.Request, input any) boo
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	return decodeRequestJSON(w, r, input)
-}
-
-func (h *HTTPHandler) list(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.service.List(r.Context(), r.PathValue("databaseID"))
-	if err != nil {
-		migrationError(w, r.Context(), err)
-		return
-	}
-	jsonResponse(w, http.StatusOK, map[string]any{"migrations": rows})
-}
-func (h *HTTPHandler) detail(w http.ResponseWriter, r *http.Request) {
-	v, err := strconv.ParseInt(r.PathValue("version"), 10, 64)
-	if err != nil || v < 1 {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid version"})
-		return
-	}
-	row, err := h.service.Get(r.Context(), r.PathValue("databaseID"), v)
-	if err != nil {
-		migrationError(w, r.Context(), err)
-		return
-	}
-	jsonResponse(w, http.StatusOK, map[string]any{"migration": row})
-}
-
-// execute mempertahankan jalur pengajuan lama dengan payload tindakan berapproval.
-func (h *HTTPHandler) execute(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		MigrationID string `json:"migration_id"`
-		Action      Action `json:"action"`
-		ApprovalID  string `json:"approval_id"`
-	}
-	if !decodeDefinitionJSON(w, r, &input) {
-		return
-	}
-	h.enqueueAction(w, r, input.MigrationID, input.Action, input.ApprovalID)
 }
 
 func (h *HTTPHandler) submitAction(w http.ResponseWriter, r *http.Request) {

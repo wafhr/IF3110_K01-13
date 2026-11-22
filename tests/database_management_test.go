@@ -46,7 +46,7 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 			Group access.Group `json:"group"`
 		}
 		decode(t, admin.do(t, "POST", "/admin/groups", map[string]string{"name": permission}, 201), &group)
-		admin.do(t, "PUT", "/admin/groups/"+group.Group.ID+"/members/"+user.User.ID, nil, 204)
+		leadGroup(t, admin, group.Group.ID, user.User.ID)
 		admin.do(t, "PUT", "/admin/groups/"+group.Group.ID+"/databases/"+id, map[string]string{"permission": permission}, 204)
 		if permission == "view_only" {
 			readerGroupID = group.Group.ID
@@ -295,18 +295,18 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 	t.Run("migration uses registered encrypted credentials alongside viewer", func(t *testing.T) {
 		// Fixture history lama memerlukan hak DDL selain SELECT untuk viewer.
 		execFixture(t, f.target, `GRANT CREATE ON SCHEMA public TO `+pgx.Identifier{f.createdRole}.Sanitize())
-		migrationPath := "/databases/" + id + "/migrations"
-		admin.do(t, "GET", migrationPath, nil, 403)
-		outsider.do(t, "GET", migrationPath, nil, 403)
-		f.anonymous().do(t, "GET", migrationPath, nil, 401)
-		viewer.do(t, "GET", migrationPath, nil, 200)
+		historyPath := "/databases/" + id + "/migrations/history"
+		admin.do(t, "GET", historyPath, nil, 403)
+		outsider.do(t, "GET", historyPath, nil, 403)
+		f.anonymous().do(t, "GET", historyPath, nil, 401)
+		viewer.do(t, "GET", historyPath, nil, 200)
 		input := map[string]string{"name": "create integration table", "sql": "CREATE TABLE public.integration_created (id INTEGER PRIMARY KEY)"}
-		viewer.do(t, "POST", migrationPath, input, 403)
-		member.do(t, "POST", migrationPath, input, 403, func(r *http.Request) { r.Header.Del("X-CSRF-Token") })
+		definition := map[string]string{"name": input["name"], "sql_up": input["sql"], "sql_down": "DROP TABLE public.integration_created"}
+		viewer.do(t, "POST", "/databases/"+id+"/migrations/definitions", definition, 403)
+		member.do(t, "POST", "/databases/"+id+"/migrations/definitions", definition, 403, func(r *http.Request) { r.Header.Del("X-CSRF-Token") })
 		var created struct {
 			Migration migration.Record `json:"migration"`
 		}
-		member.do(t, "POST", migrationPath, input, 400)
 		var err error
 		created.Migration, err = f.seedLegacyMigration(context.Background(), id, user.User.ID, input["name"], input["sql"])
 		if err != nil {
@@ -314,13 +314,6 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 		}
 		if created.Migration.Status != migration.Success || created.Migration.Version != 1 || created.Migration.ExecutedBy != user.User.ID {
 			t.Fatalf("unexpected migration result: %+v", created.Migration)
-		}
-		var detail struct {
-			Migration migration.Record `json:"migration"`
-		}
-		decode(t, viewer.do(t, "GET", migrationPath+"/1", nil, 200), &detail)
-		if detail.Migration.SQL != input["sql"] {
-			t.Fatal("migration detail lost SQL text")
 		}
 		input = map[string]string{"name": "rollback integration insert", "sql": "INSERT INTO public.integration_created VALUES (1); SELECT * FROM public.integration_missing;"}
 		created.Migration, err = f.seedLegacyMigration(context.Background(), id, user.User.ID, input["name"], input["sql"])
@@ -331,12 +324,18 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 			t.Fatalf("unexpected failed migration: %+v", created.Migration)
 		}
 		assertCount(t, f.target, `SELECT count(*) FROM public.integration_created`, 0)
-		var history struct {
-			Migrations []migration.Record `json:"migrations"`
+		var history migration.ExecutionHistory
+		decode(t, viewer.do(t, "GET", historyPath, nil, 200), &history)
+		if len(history.Executions) != 1 || history.Executions[0].LegacyVersion == nil || *history.Executions[0].LegacyVersion != 1 ||
+			len(history.LegacyAttempts) != 1 || history.LegacyAttempts[0].Status != migration.Failed {
+			t.Fatalf("unexpected migration history: %+v", history)
 		}
-		decode(t, viewer.do(t, "GET", migrationPath, nil, 200), &history)
-		if len(history.Migrations) != 2 || history.Migrations[0].Status != migration.Failed || history.Migrations[1].Status != migration.Success {
-			t.Fatalf("unexpected migration history: %+v", history.Migrations)
+		var detail struct {
+			Execution migration.Execution `json:"execution"`
+		}
+		decode(t, viewer.do(t, "GET", historyPath+"/"+history.Executions[0].ID, nil, 200), &detail)
+		if detail.Execution.SQL != "CREATE TABLE public.integration_created (id INTEGER PRIMARY KEY)" || detail.Execution.ExecutedBy != user.User.ID {
+			t.Fatalf("migration detail = %+v", detail.Execution)
 		}
 		readPage(t, tableURL(id, "public", "integration_created")+"/data")
 		readPage(t, path+"/data") // Migration pool cleanup must not close the viewer pool.

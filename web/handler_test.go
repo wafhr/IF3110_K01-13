@@ -12,7 +12,7 @@ import (
 
 func TestLoginPageAndStylesheet(t *testing.T) {
 	auth := access.NewHTTPHandler(nil, false)
-	handler := web.NewHandler(nil, auth)
+	handler := web.NewHandler(auth)
 	for _, tc := range []struct {
 		path, contentType, contains string
 	}{
@@ -34,11 +34,8 @@ func TestLoginPageAndStylesheet(t *testing.T) {
 
 func TestFrontendAssetsAndProtectedWorkspaceRoutes(t *testing.T) {
 	auth := access.NewHTTPHandler(nil, false)
-	handler := web.NewHandler(nil, auth)
-	for _, path := range []string{
-		"/assets/js/platform.js", "/assets/js/workspace.js", "/assets/js/database-admin.js",
-		"/assets/js/database-viewer.js", "/assets/js/migrations.js", "/assets/js/spa.js",
-	} {
+	handler := web.NewHandler(auth)
+	for _, path := range []string{"/assets/js/spa.js"} {
 		t.Run(path, func(t *testing.T) {
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))

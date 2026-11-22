@@ -1,15 +1,23 @@
 package web
 
 import (
+	"embed"
 	"io/fs"
 	"net/http"
 
 	"github.com/wafhr/IF3110_K01-13/internal/access"
 )
 
-// NewHandler serves browser pages and static assets. Authentication and CSRF
-// checks remain in access.HTTPHandler so the UI uses the same policy as the API.
-func NewHandler(service *access.Service, auth *access.HTTPHandler) http.Handler {
+//go:embed static
+var assets embed.FS
+
+//go:embed index.html
+var shell []byte
+
+// NewHandler serves the single-page application shell and its static assets.
+// Authentication and CSRF checks remain in access.HTTPHandler so the UI uses
+// the same policy as the API.
+func NewHandler(auth *access.HTTPHandler) http.Handler {
 	mux := http.NewServeMux()
 	static, err := fs.Sub(assets, "static")
 	if err != nil {
@@ -27,8 +35,7 @@ func NewHandler(service *access.Service, auth *access.HTTPHandler) http.Handler 
 	})
 }
 
-func spaPage(w http.ResponseWriter, r *http.Request) {
+func spaPage(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Database Platform</title><link rel="stylesheet" href="/assets/css/app.css"></head><body><div id="app"><p>Loading…</p></div><script type="module" src="/assets/js/spa.js"></script></body></html>`))
+	_, _ = w.Write(shell)
 }

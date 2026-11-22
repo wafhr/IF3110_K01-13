@@ -123,9 +123,9 @@ and `/manage/groups`, and register target databases at `/manage/databases`.
 Users open a database workspace at `/workspace/databases/{databaseID}` and its
 migration page at `/workspace/databases/{databaseID}/migrations`.
 
-Browser forms send a session-bound CSRF token. The browser interface and JSON
-API use the same backend authorization checks. Page handlers, templates, and
-static assets live in `web/`.
+The single-page application sends the session-bound CSRF token in the
+`X-CSRF-Token` header. The browser interface and JSON API use the same backend
+authorization checks. The SPA shell and static assets live in `web/`.
 
 ## Tests
 

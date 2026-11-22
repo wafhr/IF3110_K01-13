@@ -421,45 +421,6 @@ func (s *Service) openHistory(ctx context.Context, databaseID string) (*sql.DB, 
 	return db, history, nil
 }
 
-func (s *Service) List(ctx context.Context, databaseID string) ([]Record, error) {
-	db, dbms, err := s.openTarget(ctx, databaseID)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-	if err := ensureHistory(ctx, db, dbms); err != nil {
-		return nil, err
-	}
-	rows, err := db.QueryContext(ctx, `SELECT `+historyColumns(dbms)+` FROM platform_migrations ORDER BY version DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	result := make([]Record, 0)
-	for rows.Next() {
-		var row Record
-		if err := rows.Scan(&row.Version, &row.Name, &row.SQL, &row.Status, &row.ExecutedBy, &row.StartedAt, &row.FinishedAt); err != nil {
-			return nil, err
-		}
-		result = append(result, row)
-	}
-	return result, rows.Err()
-}
-
-func (s *Service) Get(ctx context.Context, databaseID string, version int64) (Record, error) {
-	db, dbms, err := s.openTarget(ctx, databaseID)
-	if err != nil {
-		return Record{}, err
-	}
-	defer db.Close()
-	if err := ensureHistory(ctx, db, dbms); err != nil {
-		return Record{}, err
-	}
-	var row Record
-	err = db.QueryRowContext(ctx, `SELECT `+historyColumns(dbms)+` FROM platform_migrations WHERE version=`+placeholder(dbms, 1), version).Scan(&row.Version, &row.Name, &row.SQL, &row.Status, &row.ExecutedBy, &row.StartedAt, &row.FinishedAt)
-	return row, err
-}
-
 // holdsMigrationLock memastikan transaksi berjalan pada koneksi yang memegang
 // lock migration database fisik. PostgreSQL juga harus READ COMMITTED dan
 // read-write; MySQL tidak menyediakan level transaksi aktif untuk diperiksa.
@@ -638,27 +599,9 @@ func dollarQuoteEnd(statement string, position int) int {
 	return end + 1 + closing + len(delimiter)
 }
 
-func ensureHistory(ctx context.Context, db interface {
-	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, dbms database.DBMS) error {
-	statement := `CREATE TABLE IF NOT EXISTS platform_migrations (version BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,name TEXT NOT NULL,sql TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('running','success','failed')),executed_by UUID NOT NULL,started_at TIMESTAMPTZ NOT NULL DEFAULT now(),finished_at TIMESTAMPTZ)`
-	if dbms == database.MySQL {
-		statement = "CREATE TABLE IF NOT EXISTS platform_migrations (version BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,name VARCHAR(160) NOT NULL,`sql` LONGTEXT NOT NULL,status VARCHAR(16) NOT NULL CHECK(status IN ('running','success','failed')),executed_by CHAR(36) NOT NULL,started_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),finished_at DATETIME(6) NULL) ENGINE=InnoDB"
-	}
-	_, err := db.ExecContext(ctx, statement)
-	return err
-}
-
 func historyColumns(dbms database.DBMS) string {
 	if dbms == database.MySQL {
 		return "version,name,`sql`,status,executed_by,started_at,finished_at"
 	}
 	return "version,name,sql,status,executed_by::text,started_at,finished_at"
-}
-
-func placeholder(dbms database.DBMS, position int) string {
-	if dbms == database.MySQL {
-		return "?"
-	}
-	return fmt.Sprintf("$%d", position)
 }

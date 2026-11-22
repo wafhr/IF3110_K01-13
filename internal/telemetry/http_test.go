@@ -154,7 +154,7 @@ func TestHTTPHandlerStartsTraceWithoutValidIncomingParent(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, "/health", nil)
 			request.Header.Set("traceparent", header)
 			response := httptest.NewRecorder()
-			telemetry.HTTPHandler(app.Routes()).ServeHTTP(response, request)
+			telemetry.HTTPHandler(app.RoutesWith(app.Modules{})).ServeHTTP(response, request)
 			spans := recorder.Ended()
 			if response.Code != http.StatusOK || len(spans) != 1 || !spans[0].SpanContext().IsValid() || spans[0].Parent().IsValid() {
 				t.Fatal("request tanpa parent valid tidak memperoleh root span")
@@ -227,7 +227,7 @@ func TestHTTPHandlerCorrelatesUnsampledRequests(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/health", nil)
 	request.Header.Set("traceparent", "00-0123456789abcdef0123456789abcdef-0123456789abcdef-00")
 	response := httptest.NewRecorder()
-	telemetry.HTTPHandler(app.Routes()).ServeHTTP(response, request)
+	telemetry.HTTPHandler(app.RoutesWith(app.Modules{})).ServeHTTP(response, request)
 	record := decodeLog(t, logs.Bytes())
 	if response.Code != http.StatusOK || len(recorder.Ended()) != 0 || record["trace_id"] != "0123456789abcdef0123456789abcdef" || record["span_id"] == "0123456789abcdef" {
 		t.Fatal("request unsampled kehilangan korelasi atau mengubah keputusan sampling")

@@ -75,10 +75,12 @@ func run() (runErr error) {
 	if err != nil {
 		return err
 	}
+	retry := worker.DefaultRetryPolicy()
+	retry.MaxAttempts = workerCfg.MaxAttempts
 	consumer, err := worker.New(queue, runner, worker.Config{
 		ID: workerCfg.ID, Concurrency: workerCfg.Concurrency, PollInterval: workerCfg.PollInterval,
 		Lease: workerCfg.Lease, DrainTimeout: cfg.ShutdownTimeout,
-		Retry: worker.RetryPolicy{MaxAttempts: workerCfg.MaxAttempts, BaseDelay: time.Second, MaxDelay: time.Minute},
+		Retry: retry,
 	})
 	if err != nil {
 		return err

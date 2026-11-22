@@ -120,7 +120,7 @@ func run() (runErr error) {
 	migrationHandler := migration.NewHTTPHandler(migrationService, accessHandler, schemaInspector)
 	routes := app.RoutesWith(app.Modules{
 		Access: accessHandler, Database: databaseHandler, Viewer: viewerHandler, Migration: migrationHandler,
-		Job: job.NewHTTPHandler(jobService, accessHandler), Frontend: web.NewHandler(accessService, accessHandler),
+		Job: job.NewHTTPHandler(jobService, accessHandler), Frontend: web.NewHandler(accessHandler),
 	})
 	server := &http.Server{
 		Addr:              cfg.Address(),

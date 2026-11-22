@@ -179,11 +179,6 @@ persistent storage, the `202` response contains both identifiers.
 SQL completion is monitored through the job status API. The submission API
 completes validation and queue persistence before returning.
 
-`POST /databases/{databaseID}/migrations` also accepts submissions with
-`migration_id`, `action`, and `approval_id`. Milestone 1 payloads containing
-`name` and `sql` return `400`. The SPA editor uses definitions, review, action
-submission, and job monitoring.
-
 ### Ordering rules
 
 - Apply uses the current revision of a definition that has never been applied.
@@ -208,9 +203,8 @@ parameter with a value of `true` or `false`.
 appear separately in `legacy_attempts`. Telemetry records Milestone 2 attempt
 logs. Job status becomes available when its module is integrated.
 
-Milestone 1 history remains readable through `GET /migrations` and
-`GET /migrations/{version}`. Opening Milestone 2 history imports successful
-legacy records once, with a stable execution ID and `legacy_version`.
+Milestone 1 history remains readable through `GET /history`. Opening it imports
+successful legacy records once, with a stable execution ID and `legacy_version`.
 Imported records have an empty migration ID and revision zero because their
 original up/down definitions are unavailable.
 

@@ -13,15 +13,6 @@ type Modules struct {
 	Frontend  http.Handler
 }
 
-func Routes() http.Handler {
-	return RoutesWith(Modules{})
-}
-
-// RoutesWithModulesAndFrontend wires every API module and the browser UI.
-func RoutesWithModulesAndFrontend(accessHandler, databaseHandler, viewerHandler, migrationHandler, frontendHandler http.Handler) http.Handler {
-	return RoutesWith(Modules{Access: accessHandler, Database: databaseHandler, Viewer: viewerHandler, Migration: migrationHandler, Frontend: frontendHandler})
-}
-
 // RoutesWith mounts the frontend last; Go's ServeMux selects more-specific API routes.
 func RoutesWith(modules Modules) http.Handler {
 	mux := http.NewServeMux()
@@ -49,11 +40,9 @@ func RoutesWith(modules Modules) http.Handler {
 		mux.Handle("/databases/", modules.Viewer)
 	}
 	if modules.Migration != nil {
-		mux.Handle("/databases/{databaseID}/migrations", modules.Migration)
 		mux.Handle("/databases/{databaseID}/migrations/", modules.Migration)
 		mux.Handle("/databases/{databaseID}/migrations/explain", modules.Migration)
 		mux.Handle("/databases/{databaseID}/migrations/schema-diff", modules.Migration)
-		mux.Handle("/databases/{databaseID}/migrations/{version}", modules.Migration)
 	}
 	if modules.Job != nil {
 		mux.Handle("/databases/{databaseID}/jobs", modules.Job)

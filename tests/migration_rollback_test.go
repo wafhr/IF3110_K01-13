@@ -152,7 +152,6 @@ func TestMigrationDefinitionAccessAndIrreversibleIntegration(t *testing.T) {
 	f.platformAdmin.do(t, "GET", path, nil, 403)
 	f.reader.do(t, "POST", path, input, 403)
 	f.editor.do(t, "POST", path, input, 403, func(request *http.Request) { request.Header.Del("X-CSRF-Token") })
-	f.editor.do(t, "POST", f.migrationPath(), map[string]string{"name": "SQL langsung", "sql": "SELECT 1"}, 400)
 	var created struct {
 		Migration migration.Migration `json:"migration"`
 		Revision  migration.Revision  `json:"revision"`
