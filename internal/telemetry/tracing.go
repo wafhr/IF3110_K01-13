@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/url"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
@@ -25,12 +27,40 @@ func NewTracerProvider(output io.Writer, service string, secrets ...string) (*sd
 	if err != nil {
 		return nil, errors.New("initialize console trace exporter")
 	}
+
+	return tracerProvider(exporter, service, secrets...), nil
+}
+
+// NewRuntimeTracerProvider memakai OTLP/HTTP saat endpoint Collector diisi.
+func NewRuntimeTracerProvider(ctx context.Context, output io.Writer, service, endpoint string, secrets ...string) (*sdktrace.TracerProvider, error) {
+	if endpoint == "" {
+		return NewTracerProvider(output, service, secrets...)
+	}
+	target, err := url.Parse(endpoint)
+	if err != nil || target.Hostname() == "" || (target.Scheme != "http" && target.Scheme != "https") ||
+		target.User != nil || target.Fragment != "" || target.RawQuery != "" || target.ForceQuery {
+		return nil, errors.New("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT must be an HTTP(S) URL without credentials, query, or fragment")
+	}
+	if strings.TrimSpace(service) == "" {
+		return nil, errors.New("tracing requires a service name")
+	}
+	if target.Path == "" || target.Path == "/" {
+		target.Path = "/v1/traces"
+	}
+	exporter, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpointURL(target.String()))
+	if err != nil {
+		return nil, errors.New("initialize OTLP trace exporter")
+	}
+	return tracerProvider(exporter, service, secrets...), nil
+}
+
+func tracerProvider(exporter sdktrace.SpanExporter, service string, secrets ...string) *sdktrace.TracerProvider {
 	redactor := NewRedactor(secrets...)
 	return sdktrace.NewTracerProvider(
 		sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", service))),
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.AlwaysSample())),
 		sdktrace.WithBatcher(redactingExporter{SpanExporter: exporter, redactor: redactor}),
-	), nil
+	)
 }
 
 // Redaction dilakukan pada salinan tampilan span sebelum diteruskan ke exporter.

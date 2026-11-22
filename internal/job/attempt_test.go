@@ -63,7 +63,7 @@ func TestProgressAndHeartbeatDoNotEndTheAttempt(t *testing.T) {
 }
 
 func TestClaimRecordsTheInterruptedAttempt(t *testing.T) {
-	database := (&stubDatabase{}).onQuery(jobClaim, jobRow(t, testRequest(), Running, 2))
+	database := (&stubDatabase{}).onQuery(jobClaim, append(jobRow(t, testRequest(), Running, 2), float64(0)))
 	if _, err := database.repository(t).Claim(context.Background(), testWorkerID, time.Minute); err != nil {
 		t.Fatal(err)
 	}

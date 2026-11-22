@@ -50,7 +50,10 @@ func run() (runErr error) {
 	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
 		slog.Error("telemetry_failed", "actor", "system", "status", "failed", "error", err)
 	}))
-	tracerProvider, err := telemetry.NewTracerProvider(os.Stderr, "server",
+	metrics := telemetry.NewMetrics()
+	startupCtx, cancelStartup := context.WithTimeout(metrics.Context(context.Background()), 15*time.Second)
+	defer cancelStartup()
+	tracerProvider, err := telemetry.NewRuntimeTracerProvider(startupCtx, os.Stderr, "server", cfg.TraceEndpoint,
 		cfg.PlatformDatabaseURL, cfg.DatabaseEncryptionKey, cfg.BootstrapAdminPassword)
 	if err != nil {
 		return err
@@ -65,8 +68,6 @@ func run() (runErr error) {
 			runErr = errors.Join(runErr, fmt.Errorf("shutdown tracing: %w", err))
 		}
 	}()
-	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancelStartup()
 	db, err := platformdb.Open(startupCtx, cfg.PlatformDatabaseURL)
 	if err != nil {
 		return err
@@ -111,6 +112,12 @@ func run() (runErr error) {
 		return err
 	}
 	migrationService, _ := app.NewMigrationService(db, databaseRegistry, targetConnector, migrationRepository, jobService)
+	metrics.RegisterJobCounts(jobRepository.CountByStatus)
+	stopMetrics, err := metrics.Serve(cfg.MetricsAddress, cfg.ShutdownTimeout)
+	if err != nil {
+		return err
+	}
+	defer func() { runErr = errors.Join(runErr, stopMetrics()) }()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	accessHandler := access.NewHTTPHandler(accessService, cfg.SecureCookie)
@@ -124,7 +131,7 @@ func run() (runErr error) {
 	})
 	server := &http.Server{
 		Addr:              cfg.Address(),
-		Handler:           telemetry.HTTPHandler(routes),
+		Handler:           telemetry.HTTPHandler(metrics.Attach(routes)),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

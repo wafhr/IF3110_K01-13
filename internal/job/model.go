@@ -61,24 +61,25 @@ type Progress struct {
 // Job is one queued execution. Request holds the reviewed snapshot that the
 // worker executes, including the producer trace context.
 type Job struct {
-	ID          string                     `json:"id"`
-	ExecutionID string                     `json:"execution_id"`
-	DatabaseID  string                     `json:"database_id"`
-	MigrationID string                     `json:"migration_id"`
-	Name        string                     `json:"name"`
-	ActorID     string                     `json:"actor_id"`
-	Action      migration.Action           `json:"action"`
-	Revision    int64                      `json:"revision"`
-	Status      Status                     `json:"status"`
-	Operation   Operation                  `json:"operation"`
-	Attempts    int                        `json:"attempts"`
-	Progress    Progress                   `json:"progress"`
-	LastError   string                     `json:"last_error,omitempty"`
-	AvailableAt time.Time                  `json:"available_at"`
-	CreatedAt   time.Time                  `json:"created_at"`
-	StartedAt   *time.Time                 `json:"started_at,omitempty"`
-	FinishedAt  *time.Time                 `json:"finished_at,omitempty"`
-	Request     migration.ExecutionRequest `json:"-"`
+	ID               string                     `json:"id"`
+	ExecutionID      string                     `json:"execution_id"`
+	DatabaseID       string                     `json:"database_id"`
+	MigrationID      string                     `json:"migration_id"`
+	Name             string                     `json:"name"`
+	ActorID          string                     `json:"actor_id"`
+	Action           migration.Action           `json:"action"`
+	Revision         int64                      `json:"revision"`
+	Status           Status                     `json:"status"`
+	Operation        Operation                  `json:"operation"`
+	Attempts         int                        `json:"attempts"`
+	Progress         Progress                   `json:"progress"`
+	LastError        string                     `json:"last_error,omitempty"`
+	AvailableAt      time.Time                  `json:"available_at"`
+	CreatedAt        time.Time                  `json:"created_at"`
+	StartedAt        *time.Time                 `json:"started_at,omitempty"`
+	FinishedAt       *time.Time                 `json:"finished_at,omitempty"`
+	Request          migration.ExecutionRequest `json:"-"`
+	QueueWaitSeconds float64                    `json:"-"`
 }
 
 // Attempt is one run of a job by a worker. SQL is the exact statement the

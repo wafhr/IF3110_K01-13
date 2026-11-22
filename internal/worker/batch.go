@@ -157,19 +157,21 @@ func (e *Executor) commitBatch(ctx context.Context, tx *sql.Tx, statement, execu
 	ctx = telemetry.WithLogAttrs(ctx, slog.Int64("batch", batch.Number))
 	ctx, activity := telemetry.StartActivity(ctx, "migration_batch", slog.Int64("batch", batch.Number), slog.Int64("batch_rows", batch.Rows))
 	defer activity.End(&batchErr)
-	if _, err := tx.ExecContext(ctx, statement, batch.First, batch.Last); err != nil {
+	result, err := tx.ExecContext(ctx, statement, batch.First, batch.Last)
+	if err != nil {
 		return job.Progress{}, err
 	}
 	if err := store.saveBatch(ctx, tx, executionID, batch, e.now()); err != nil {
 		return job.Progress{}, err
 	}
-	progress, err := store.progress(ctx, tx, executionID)
+	progress, err = store.progress(ctx, tx, executionID)
 	if err != nil {
 		return job.Progress{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return job.Progress{}, commitError(err)
 	}
+	telemetry.MetricsFromContext(ctx).RecordBatch(result, false)
 	return progress, nil
 }
 

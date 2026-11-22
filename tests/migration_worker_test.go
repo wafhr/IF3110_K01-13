@@ -158,6 +158,11 @@ func (f *migrationFixture) processJob(t *testing.T, runner worker.Runner, reques
 
 func (f *migrationFixture) processJobWithin(t *testing.T, runner worker.Runner, request migration.ExecutionRequest, limit time.Duration) job.Job {
 	t.Helper()
+	return f.processJobContext(t, context.Background(), runner, request, limit)
+}
+
+func (f *migrationFixture) processJobContext(t *testing.T, parent context.Context, runner worker.Runner, request migration.ExecutionRequest, limit time.Duration) job.Job {
+	t.Helper()
 	consumer, err := worker.New(f.jobs, runner, worker.Config{
 		ID: "integration-worker", Concurrency: 2, PollInterval: 20 * time.Millisecond, Lease: 3 * time.Second,
 		DrainTimeout: 2 * time.Second, Retry: worker.RetryPolicy{MaxAttempts: 3, BaseDelay: 50 * time.Millisecond, MaxDelay: 200 * time.Millisecond},
@@ -165,7 +170,7 @@ func (f *migrationFixture) processJobWithin(t *testing.T, runner worker.Runner, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	stopped := make(chan error, 1)
 	go func() { stopped <- consumer.Run(ctx) }()
 	defer func() {

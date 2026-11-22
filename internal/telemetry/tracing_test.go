@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+	collectortrace "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
@@ -244,5 +248,71 @@ func TestTraceContextPreservesTraceStateAndSampling(t *testing.T) {
 		if restored.TraceState().String() != state.String() || restored.IsSampled() != sampled || restored.TraceID() != original.TraceID() {
 			t.Fatal("tracestate atau keputusan sampling berubah")
 		}
+	}
+}
+
+func TestRuntimeTracerProviderExportsRedactedOTLP(t *testing.T) {
+	received := make(chan []byte, 1)
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/traces" || r.Header.Get("Content-Type") != "application/x-protobuf" {
+			t.Errorf("permintaan OTLP tidak sesuai: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		received <- payload
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	provider, err := telemetry.NewRuntimeTracerProvider(ctx, io.Discard, "worker", collector.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, span := provider.Tracer("test").Start(ctx, "migration_attempt")
+	span.SetAttributes(attribute.String("password", "fixture-private-trace-value"))
+	id := span.SpanContext().TraceID()
+	span.End()
+	if err := provider.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var payload []byte
+	select {
+	case payload = <-received:
+	default:
+		t.Fatal("collector belum menerima span setelah shutdown")
+	}
+	var request collectortrace.ExportTraceServiceRequest
+	if err := proto.Unmarshal(payload, &request); err != nil {
+		t.Fatal(err)
+	}
+	resources := request.GetResourceSpans()
+	if len(resources) != 1 {
+		t.Fatalf("jumlah resource span = %d", len(resources))
+	}
+	resource := resources[0].GetResource().GetAttributes()
+	if len(resource) != 1 || resource[0].GetKey() != "service.name" || resource[0].GetValue().GetStringValue() != "worker" {
+		t.Fatalf("identitas resource OTLP salah: %v", resource)
+	}
+	scopes := resources[0].GetScopeSpans()
+	if len(scopes) != 1 || len(scopes[0].GetSpans()) != 1 {
+		t.Fatal("jumlah span OTLP salah")
+	}
+	exported := scopes[0].GetSpans()[0]
+	if !bytes.Equal(exported.GetTraceId(), id[:]) {
+		t.Fatal("trace ID berubah setelah ekspor")
+	}
+	attrs := exported.GetAttributes()
+	if len(attrs) != 1 || attrs[0].GetValue().GetStringValue() != telemetry.Redacted || bytes.Contains(payload, []byte("fixture-private-trace-value")) {
+		t.Fatal("nilai sensitif muncul di payload OTLP")
 	}
 }

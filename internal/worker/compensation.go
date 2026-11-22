@@ -120,19 +120,21 @@ func (e *Executor) revertCommittedBatch(ctx context.Context, tx *sql.Tx, plan re
 	ctx, activity := telemetry.StartActivity(ctx, "migration_batch_compensation", slog.Int64("batch", batch.Number),
 		slog.Int64("batch_rows", batch.Rows), slog.String("reverted_execution_id", plan.revertedID))
 	defer activity.End(&batchErr)
-	if _, err := tx.ExecContext(ctx, plan.statement, batch.First, batch.Last); err != nil {
+	result, err := tx.ExecContext(ctx, plan.statement, batch.First, batch.Last)
+	if err != nil {
 		return job.Progress{}, err
 	}
 	if err := store.markReverted(ctx, tx, plan.revertedID, batch.Number, e.now()); err != nil {
 		return job.Progress{}, err
 	}
-	progress, err := store.progress(ctx, tx, plan.revertedID)
+	progress, err = store.progress(ctx, tx, plan.revertedID)
 	if err != nil {
 		return job.Progress{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return job.Progress{}, commitError(err)
 	}
+	telemetry.MetricsFromContext(ctx).RecordBatch(result, true)
 	return progress, nil
 }
 

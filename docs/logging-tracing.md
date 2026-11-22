@@ -5,7 +5,7 @@
 `cmd/server/main.go` installs the JSON logger before loading configuration, then
 initializes the OpenTelemetry provider before opening database connections.
 Application logs use stdout, one JSON object per line, with minimum level INFO
-and UTC timestamps. Console spans use stderr through a batch exporter. The
+and UTC timestamps. The default console exporter writes spans to stderr in batches. The
 server resource has `service.name=server`.
 
 The provider uses parent-based sampling with sampling enabled for root spans.
@@ -21,6 +21,35 @@ root after configuring `.env`.
 go build -o server.exe ./cmd/server
 .\server.exe 1> application.jsonl 2> spans.jsonl
 ```
+
+## Prometheus and Collector integration points
+
+The server and worker accept an optional OTLP/HTTP trace endpoint through
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. The exporter uses the same redaction as the
+console exporter. Without an endpoint, spans go to the console. The JSON log
+stream on stdout remains the input for the Collector log receiver. Its
+`trace_id` and `span_id` fields carry the same trace context as the spans.
+
+`SERVER_METRICS_ADDR` and `WORKER_METRICS_ADDR` enable independent `GET /metrics`
+listeners. Each process reports its own pool statistics. The server reads job
+counts from the shared database. Each worker reports the activity it processes.
+
+| Metric | Meaning |
+|---|---|
+| `if3110_migration_jobs{status}` | Persisted job count by status, exported by the server |
+| `if3110_migration_retries_total` | Retries successfully requeued by this worker |
+| `if3110_migration_queue_wait_seconds` | Time from eligibility to claim, measured by the queue database clock |
+| `if3110_migration_lock_wait_seconds` | Time for successful target lock acquisitions |
+| `if3110_migration_duration_seconds{action,outcome}` | Duration of each worker attempt including lock acquisition and execution |
+| `if3110_migration_batches_total{operation}`, `if3110_migration_rows_total{operation}` | Batches and affected rows observed on successful commits, with `execute` or `revert` |
+| `if3110_db_pool_connections{role,db_system,state}` | Connections in use or idle, summed over live pools |
+| `if3110_db_pool_waits_total{role,db_system}`, `if3110_db_pool_wait_seconds_total{role,db_system}` | Cumulative connection wait count and time, including pools closed by the process |
+
+Worker counters measure commits observed by that process. The persisted job and
+checkpoint records remain the source of truth for committed progress. Duration
+histograms expose sampled trace IDs as exemplars when scraped as OpenMetrics.
+Metric labels use fixed categories so job, actor, and database IDs stay out of
+the time series.
 
 ## Log fields
 

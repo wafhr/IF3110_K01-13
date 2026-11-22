@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -534,4 +536,46 @@ func TestSQLCanceledReaderRecordsFailureWhenClosed(t *testing.T) {
 	if record["status"] != "failed" || record["error"] != "canceled" || record["rows_complete"] != false {
 		t.Fatal("reader yang dibatalkan tercatat sukses")
 	}
+}
+
+func TestMetricsTracksPoolConnectionsAndRetainsWaitCounters(t *testing.T) {
+	metrics := telemetry.NewMetrics()
+	ctx := metrics.Context(context.Background())
+	db := telemetry.OpenSQLPool(ctx, &sqlFixture{}, "postgresql", "target", "fixture-database-name")
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetMaxOpenConns(1)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	waiting, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	if _, err := db.Conn(waiting); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("koneksi kedua seharusnya menunggu lalu kedaluwarsa: %v", err)
+	}
+
+	scrape := func(expectedConnection, expectedValue string) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		metrics.Handler().ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
+		body := response.Body.String()
+		sample := `if3110_db_pool_connections{db_system="postgresql",role="target",state="` + expectedConnection + `"} ` + expectedValue + "\n"
+		if response.Code != 200 || !strings.Contains(body, sample) ||
+			!strings.Contains(body, `if3110_db_pool_waits_total{db_system="postgresql",role="target"} 1`) ||
+			strings.Contains(body, "fixture-database-name") {
+			t.Fatalf("metrik pool tidak sesuai, hasil scrape:\n%s", body)
+		}
+	}
+
+	scrape("in_use", "1")
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	scrape("idle", "1")
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	scrape("idle", "0")
 }

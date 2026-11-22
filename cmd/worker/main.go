@@ -50,7 +50,10 @@ func run() (runErr error) {
 	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
 		slog.Error("telemetry_failed", "actor", "system", "status", "failed", "error", err)
 	}))
-	tracerProvider, err := telemetry.NewTracerProvider(os.Stderr, "worker", cfg.PlatformDatabaseURL, cfg.DatabaseEncryptionKey)
+	metrics := telemetry.NewMetrics()
+	startupCtx, cancelStartup := context.WithTimeout(metrics.Context(context.Background()), 15*time.Second)
+	defer cancelStartup()
+	tracerProvider, err := telemetry.NewRuntimeTracerProvider(startupCtx, os.Stderr, "worker", cfg.TraceEndpoint, cfg.PlatformDatabaseURL, cfg.DatabaseEncryptionKey)
 	if err != nil {
 		return err
 	}
@@ -64,8 +67,6 @@ func run() (runErr error) {
 		}
 	}()
 
-	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancelStartup()
 	db, err := platformdb.Open(startupCtx, cfg.PlatformDatabaseURL)
 	if err != nil {
 		return err
@@ -85,7 +86,12 @@ func run() (runErr error) {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	stopMetrics, err := metrics.Serve(workerCfg.MetricsAddress, cfg.ShutdownTimeout)
+	if err != nil {
+		return err
+	}
+	defer func() { runErr = errors.Join(runErr, stopMetrics()) }()
+	ctx, stop := signal.NotifyContext(metrics.Context(context.Background()), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	slog.Info("worker_starting", "actor", "system", "status", "running", "worker_id", workerCfg.ID, "concurrency", workerCfg.Concurrency)
 	return consumer.Run(ctx)
