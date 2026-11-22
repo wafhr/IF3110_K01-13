@@ -134,6 +134,7 @@ func TestJobRoutesBelongToTheJobModule(t *testing.T) {
 		{"/databases/id/jobs", "job"},
 		{"/databases/id/jobs/job-id", "job"},
 		{"/databases/id/jobs/job-id/resume", "job"},
+		{"/databases/id/attempts", "job"},
 		{"/databases/id/migrations", "migration"},
 		{"/databases/id/schemas/jobs/tables", "viewer"},
 		{"/jobs", "frontend"},

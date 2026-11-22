@@ -28,6 +28,7 @@ func NewHTTPHandler(service *Service, guard DatabaseGuard) *HTTPHandler {
 	h := &HTTPHandler{service: service, routes: http.NewServeMux()}
 	h.routes.Handle("GET /databases/{databaseID}/jobs", guard.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.list)))
 	h.routes.Handle("GET /databases/{databaseID}/jobs/{jobID}", guard.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.get)))
+	h.routes.Handle("GET /databases/{databaseID}/attempts", guard.RequireDatabaseAccess(access.ViewOnly, http.HandlerFunc(h.attempts)))
 	h.routes.Handle("POST /databases/{databaseID}/jobs/{jobID}/resume", guard.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(h.resume)))
 	h.routes.Handle("POST /databases/{databaseID}/jobs/{jobID}/cancel", guard.RequireDatabaseAccess(access.ViewEdit, http.HandlerFunc(h.cancel)))
 	return h
@@ -51,6 +52,20 @@ func (h *HTTPHandler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
+}
+
+func (h *HTTPHandler) attempts(w http.ResponseWriter, r *http.Request) {
+	limit, ok := listLimit(r.URL.Query().Get("limit"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "limit must be between 1 and 100")
+		return
+	}
+	attempts, err := h.service.Attempts(r.Context(), r.PathValue("databaseID"), limit)
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"attempts": attempts})
 }
 
 func (h *HTTPHandler) get(w http.ResponseWriter, r *http.Request) {

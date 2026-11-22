@@ -14,9 +14,11 @@ approvals through `WorkflowService`, and the persistent queue through
 `job.Service` (see [Migration execution](migration-execution.md) and
 [Migration workflow](migration-workflow.md)). The worker (`cmd/worker`) executes
 queued actions. The SPA uses these APIs for definition editing, review and
-leader approval, submission, job monitoring, and history. Failed attempts are
-shown from the job records, because the target history stores committed
-executions only. The end-user screens are described in [Frontend SPA](spa.md).
+leader approval, submission, job monitoring, and history. Every attempt,
+including failures and retries, is recorded with its SQL in the platform
+database (see [Attempt history](migration-execution.md#attempt-history)); the
+target history keeps committed executions and decides the linear order. The
+end-user screens are described in [Frontend SPA](spa.md).
 
 Integration tests use a dedicated test approval provider, the production job
 queue in the platform database, and a caller of the execution hooks. They

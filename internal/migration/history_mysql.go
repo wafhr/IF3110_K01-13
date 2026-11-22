@@ -102,7 +102,7 @@ func importMySQLLegacyHistory(ctx context.Context, connection historyConnection,
 	}
 	_, err = connection.ExecContext(ctx, "INSERT INTO platform_migration_executions "+
 		"(id, database_id, name, `action`, `sql`, status, executed_by, started_at, finished_at, legacy_version) "+
-		"SELECT UUID(), ?, legacy.name, 'apply', legacy.`sql`, 'success', legacy.executed_by, legacy.started_at, legacy.finished_at, legacy.version "+
+		"SELECT UUID(), ?, legacy.name, 'apply', legacy.`sql`, 'success', legacy.executed_by, legacy.started_at, GREATEST(legacy.finished_at, legacy.started_at), legacy.version "+
 		"FROM platform_migrations legacy WHERE legacy.status = 'success' AND NOT EXISTS ("+
 		"SELECT 1 FROM platform_migration_executions history WHERE history.database_id = ? AND history.legacy_version = legacy.version"+
 		") ORDER BY legacy.version", databaseID, databaseID)

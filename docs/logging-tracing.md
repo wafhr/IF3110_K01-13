@@ -140,9 +140,8 @@ flowchart LR
 
 ### Current integration boundary
 
-The server's production approval provider awaits its module implementation.
-The job queue, polling loop, retry scheduler, and `cmd/worker` bootstrap are in
-place: the worker initializes the logger and tracer provider with
+The server wires the workflow approval provider and the job queue. The worker
+initializes the logger and tracer provider with
 `service.name=worker`, runs every attempt inside `TraceAttempt`, passes the
 attempt context to lock, SQL, history, and commit/rollback, and shuts the
 provider down on exit. Each batch runs inside a `migration_batch` activity, and

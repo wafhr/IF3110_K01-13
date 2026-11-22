@@ -81,6 +81,29 @@ type Job struct {
 	Request     migration.ExecutionRequest `json:"-"`
 }
 
+// Attempt is one run of a job by a worker. SQL is the exact statement the
+// attempt executed, kept even when the attempt failed.
+type Attempt struct {
+	ID               string           `json:"id"`
+	Sequence         int64            `json:"sequence"`
+	JobID            string           `json:"job_id"`
+	ExecutionID      string           `json:"execution_id"`
+	MigrationID      string           `json:"migration_id"`
+	Name             string           `json:"name"`
+	Revision         int64            `json:"revision"`
+	Action           migration.Action `json:"action"`
+	Operation        Operation        `json:"operation"`
+	Attempt          int              `json:"attempt"`
+	ActorID          string           `json:"actor_id"`
+	SQL              string           `json:"sql"`
+	Status           string           `json:"status"`
+	Error            string           `json:"error,omitempty"`
+	CommittedBatches int64            `json:"committed_batches"`
+	CommittedRows    int64            `json:"committed_rows"`
+	StartedAt        time.Time        `json:"started_at"`
+	FinishedAt       time.Time        `json:"finished_at"`
+}
+
 func (j *Job) describe() {
 	j.ExecutionID = j.Request.ExecutionID
 	j.DatabaseID = j.Request.Plan.DatabaseID

@@ -42,6 +42,8 @@ func newHistoryRepository(db *sql.DB, dbms database.DBMS) (*HistoryRepository, e
 
 // Initialize menyiapkan schema dan mengimpor history sukses Milestone 1 secara
 // atomik. Penanda legacy menyatakan bahwa definisi SQL down belum tersedia.
+// Waktu selesai legacy dicatat dengan jam aplikasi sedangkan waktu mulai dengan
+// jam database, sehingga impor tidak membiarkan waktu selesai mendahului mulai.
 func (r *HistoryRepository) Initialize(ctx context.Context, databaseID string) error {
 	if !validUUID(databaseID) {
 		return ErrInvalidMigration
@@ -108,7 +110,7 @@ func importLegacyHistory(ctx context.Context, connection historyConnection, data
 	_, err := connection.ExecContext(ctx, `
 		INSERT INTO platform_migration_executions
 		(database_id, name, action, sql, status, executed_by, started_at, finished_at, legacy_version)
-		SELECT $1, name, 'apply', sql, 'success', executed_by, started_at, finished_at, version
+		SELECT $1, name, 'apply', sql, 'success', executed_by, started_at, GREATEST(finished_at, started_at), version
 		FROM platform_migrations WHERE status = 'success' ORDER BY version
 		ON CONFLICT (database_id, legacy_version) DO NOTHING`, databaseID)
 	return historyError("import committed legacy history", err)

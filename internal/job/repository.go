@@ -100,9 +100,15 @@ func (r *Repository) Claim(ctx context.Context, workerID string, lease time.Dura
 			        AND earlier.status IN ('pending', 'running', 'partial', 'partially_reverted'))
 			ORDER BY next.queue_position
 			LIMIT 1
-			FOR UPDATE SKIP LOCKED)
+			FOR UPDATE SKIP LOCKED),
+		interrupted AS (
+			INSERT INTO migration_attempts (`+attemptColumns+`)
+			SELECT `+attemptValues("old", "'interrupted'", "'lease expired before the attempt finished'", "old.lease_expires_at")+`
+			FROM migration_jobs old JOIN candidate ON candidate.id = old.id
+			WHERE old.status = 'running')
 		UPDATE migration_jobs j
-		SET status = 'running', attempts = j.attempts + 1, lease_owner = $1,
+		SET status = 'running', attempts = j.attempts + 1, current_attempt = j.attempts + 1,
+		    attempt_started_at = now(), lease_owner = $1,
 		    lease_expires_at = now() + $2 * interval '1 millisecond',
 		    started_at = COALESCE(j.started_at, now()), updated_at = now()
 		FROM candidate
@@ -167,8 +173,8 @@ func (r *Repository) requeue(ctx context.Context, jobID, assignments, condition 
 // Complete finishes the job: a compensation ends as reverted, anything else
 // as succeeded.
 func (r *Repository) Complete(ctx context.Context, jobID, workerID string) error {
-	return r.updateLeased(ctx, jobID, workerID, `status = CASE WHEN operation = 'compensate' THEN 'reverted' ELSE 'succeeded' END,
-		last_error = '', `+finished)
+	return r.finishAttempt(ctx, jobID, workerID, `status = CASE WHEN operation = 'compensate' THEN 'reverted' ELSE 'succeeded' END,
+		last_error = '', `+finished, "updated.status", "''")
 }
 
 // Fail stops the job after a failure that will not be retried. committed tells
@@ -176,13 +182,13 @@ func (r *Repository) Complete(ctx context.Context, jobID, workerID string) error
 // changed the target fails. One that committed batches stops as partial, or as
 // partially reverted when it was reverting them, and keeps holding later jobs.
 func (r *Repository) Fail(ctx context.Context, jobID, workerID, reason string, committed bool) error {
-	return r.updateLeased(ctx, jobID, workerID, `touched = touched OR $4,
+	return r.finishAttempt(ctx, jobID, workerID, `touched = touched OR $4,
 		status = CASE
 			WHEN NOT (touched OR $4) THEN 'failed'
 			WHEN operation = 'compensate' OR payload #>> '{plan,action}' = 'rollback' THEN 'partially_reverted'
 			ELSE 'partial' END,
 		finished_at = CASE WHEN touched OR $4 THEN NULL ELSE now() END,
-		last_error = $3, `+unleased, reason, committed)
+		last_error = $3, `+unleased, "updated.status", "updated.last_error", reason, committed)
 }
 
 // Retry returns the job to the queue after delay. The attempt count is kept so
@@ -191,14 +197,15 @@ func (r *Repository) Retry(ctx context.Context, jobID, workerID, reason string, 
 	if delay < 0 {
 		return errors.New("retry delay must not be negative")
 	}
-	return r.updateLeased(ctx, jobID, workerID, `status = 'pending', last_error = $3,
-		available_at = now() + $4 * interval '1 millisecond', `+unleased, reason, delay.Milliseconds())
+	return r.finishAttempt(ctx, jobID, workerID, `status = 'pending', last_error = $3,
+		available_at = now() + $4 * interval '1 millisecond', `+unleased, "'retrying'", "updated.last_error", reason, delay.Milliseconds())
 }
 
 // Release returns a job whose attempt was interrupted by a stopping worker. The
 // attempt did not fail, so it is not counted against the retry budget.
 func (r *Repository) Release(ctx context.Context, jobID, workerID string) error {
-	return r.updateLeased(ctx, jobID, workerID, `status = 'pending', attempts = j.attempts - 1, available_at = now(), `+unleased)
+	return r.finishAttempt(ctx, jobID, workerID, `status = 'pending', attempts = j.attempts - 1, available_at = now(), `+unleased,
+		"'released'", "'worker stopped before the attempt finished'")
 }
 
 func (r *Repository) Get(ctx context.Context, jobID string) (Job, error) {
@@ -256,11 +263,15 @@ const (
 // updateLeased applies a change only while workerID still holds the lease, so
 // a worker that lost its lease cannot overwrite the job of its successor.
 func (r *Repository) updateLeased(ctx context.Context, jobID, workerID, assignments string, args ...any) error {
+	return r.updateLeasedStatement(ctx, jobID, `UPDATE migration_jobs j SET `+assignments+`, updated_at = now() WHERE `+leaseHolder,
+		append([]any{jobID, workerID}, args...)...)
+}
+
+func (r *Repository) updateLeasedStatement(ctx context.Context, jobID, statement string, args ...any) error {
 	if !validUUID(jobID) {
 		return ErrNotFound
 	}
-	result, err := r.db.ExecContext(ctx, `UPDATE migration_jobs j SET `+assignments+`, updated_at = now() WHERE `+leaseHolder,
-		append([]any{jobID, workerID}, args...)...)
+	result, err := r.db.ExecContext(ctx, statement, args...)
 	if err != nil {
 		return fmt.Errorf("update job %s: %w", jobID, err)
 	}
@@ -272,6 +283,56 @@ func (r *Repository) updateLeased(ctx context.Context, jobID, workerID, assignme
 		return ErrLeaseLost
 	}
 	return nil
+}
+
+// finishAttempt applies the transition that ends an attempt and records the
+// attempt in the same statement, so only the lease holder can write it.
+func (r *Repository) finishAttempt(ctx context.Context, jobID, workerID, assignments, status, reason string, args ...any) error {
+	return r.updateLeasedStatement(ctx, jobID, `WITH updated AS (UPDATE migration_jobs j SET `+assignments+`, updated_at = now() WHERE `+leaseHolder+` RETURNING j.*)
+		INSERT INTO migration_attempts (`+attemptColumns+`) SELECT `+attemptValues("updated", status, reason, "now()")+` FROM updated`,
+		append([]any{jobID, workerID}, args...)...)
+}
+
+const attemptColumns = `job_id, execution_id, database_id, migration_id, name, revision, action, operation, attempt, actor_id,
+	sql, status, error, committed_batches, committed_rows, started_at, finished_at`
+
+// attemptValues copies the identity and the exact SQL of an attempt from the
+// job row source.
+func attemptValues(source, status, reason, finishedAt string) string {
+	return fmt.Sprintf(`%[1]s.id, %[1]s.execution_id, %[1]s.database_id, (%[1]s.payload #>> '{plan,migration_id}')::uuid, %[1]s.payload #>> '{plan,name}',
+		(%[1]s.payload #>> '{plan,revision}')::bigint, %[1]s.payload #>> '{plan,action}', %[1]s.operation, %[1]s.current_attempt,
+		(%[1]s.payload ->> 'actor_id')::uuid,
+		COALESCE(CASE WHEN %[1]s.operation = 'compensate' THEN %[1]s.payload #>> '{plan,compensation_sql}' ELSE %[1]s.payload #>> '{plan,sql}' END, ''),
+		%[2]s, %[3]s, %[1]s.committed_batches, %[1]s.committed_rows, COALESCE(%[1]s.attempt_started_at, %[1]s.started_at, now()), %[4]s`,
+		source, status, reason, finishedAt)
+}
+
+const attemptListColumns = `a.id::text, a.sequence, a.job_id::text, a.execution_id::text, a.migration_id::text, a.name, a.revision, a.action,
+	a.operation, a.attempt, a.actor_id::text, a.sql, a.status, a.error, a.committed_batches, a.committed_rows, a.started_at, a.finished_at`
+
+// ListAttempts returns the most recent attempts of a database registration first.
+func (r *Repository) ListAttempts(ctx context.Context, databaseID string, limit int) ([]Attempt, error) {
+	if !validUUID(databaseID) {
+		return nil, ErrNotFound
+	}
+	if limit < 1 || limit > MaxListLimit {
+		return nil, invalid("limit")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT `+attemptListColumns+` FROM migration_attempts a WHERE a.database_id = $1 ORDER BY a.sequence DESC LIMIT $2`, databaseID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list attempts: %w", err)
+	}
+	defer rows.Close()
+	attempts := make([]Attempt, 0)
+	for rows.Next() {
+		var a Attempt
+		if err := rows.Scan(&a.ID, &a.Sequence, &a.JobID, &a.ExecutionID, &a.MigrationID, &a.Name, &a.Revision, &a.Action, &a.Operation,
+			&a.Attempt, &a.ActorID, &a.SQL, &a.Status, &a.Error, &a.CommittedBatches, &a.CommittedRows, &a.StartedAt, &a.FinishedAt); err != nil {
+			return nil, fmt.Errorf("read attempt: %w", err)
+		}
+		attempts = append(attempts, a)
+	}
+	return attempts, rows.Err()
 }
 
 type rowScanner interface{ Scan(...any) error }

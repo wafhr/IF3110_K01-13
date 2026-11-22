@@ -128,7 +128,7 @@ func (state MigrationState) actionRevision(definition Migration, action Action) 
 	switch action {
 	case Apply:
 		if state.appliedMigrations[strings.ToLower(definition.ID)] {
-			return 0, "", fmt.Errorf("%w: an applied migration requires forward", ErrConflict)
+			return 0, "", fmt.Errorf("%w: an applied migration requires forward", ErrMigrationOrder)
 		}
 		if definition.CurrentRevision < 1 {
 			return 0, "", ErrInvalidMigration
@@ -136,23 +136,23 @@ func (state MigrationState) actionRevision(definition Migration, action Action) 
 		return definition.CurrentRevision, "", nil
 	case Rollback:
 		if len(state.Active) == 0 {
-			return 0, "", fmt.Errorf("%w: no active migration to roll back", ErrConflict)
+			return 0, "", fmt.Errorf("%w: no active migration to roll back", ErrMigrationOrder)
 		}
 		original := state.Active[len(state.Active)-1]
 		if original.LegacyVersion != nil {
 			return 0, "", ErrIrreversibleMigration
 		}
 		if !strings.EqualFold(original.MigrationID, definition.ID) {
-			return 0, "", fmt.Errorf("%w: only the last active migration can be rolled back", ErrConflict)
+			return 0, "", fmt.Errorf("%w: only the last active migration can be rolled back", ErrMigrationOrder)
 		}
 		return original.Revision, original.ID, nil
 	case Forward:
 		if len(state.PendingForward) == 0 {
-			return 0, "", fmt.Errorf("%w: no migration awaiting forward", ErrConflict)
+			return 0, "", fmt.Errorf("%w: no migration awaiting forward", ErrMigrationOrder)
 		}
 		original := state.PendingForward[len(state.PendingForward)-1]
 		if !strings.EqualFold(original.MigrationID, definition.ID) {
-			return 0, "", fmt.Errorf("%w: forward must follow the original linear order", ErrConflict)
+			return 0, "", fmt.Errorf("%w: forward must follow the original linear order", ErrMigrationOrder)
 		}
 		return original.Revision, "", nil
 	default:

@@ -27,6 +27,7 @@ var (
 	ErrApprovalRequired      = fmt.Errorf("%w: approval is missing or no longer valid", ErrConflict)
 	ErrNotFound              = errors.New("migration not found")
 	ErrConflict              = errors.New("migration conflict")
+	ErrMigrationOrder        = fmt.Errorf("%w: migration order", ErrConflict)
 	ErrStorage               = errors.New("migration storage failure")
 	ErrInvalidHistory        = fmt.Errorf("%w: execution history is inconsistent", ErrStorage)
 	ErrImmutableMigration    = fmt.Errorf("%w: executed migration cannot be revised", ErrConflict)

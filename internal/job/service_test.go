@@ -18,6 +18,7 @@ type fakeStore struct {
 	listedFor   string
 	listedLimit int
 	resumed     []string
+	attempts    []Attempt
 }
 
 func newFakeStore(jobs ...Job) *fakeStore {
@@ -59,6 +60,14 @@ func (s *fakeStore) ListByDatabase(_ context.Context, databaseID string, limit i
 		}
 	}
 	return jobs, nil
+}
+
+func (s *fakeStore) ListAttempts(_ context.Context, databaseID string, limit int) ([]Attempt, error) {
+	s.listedFor, s.listedLimit = databaseID, limit
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.attempts, nil
 }
 
 func (s *fakeStore) Resume(_ context.Context, jobID string) error {
