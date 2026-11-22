@@ -35,7 +35,11 @@ func TestLoginPageAndStylesheet(t *testing.T) {
 func TestFrontendAssetsAndProtectedWorkspaceRoutes(t *testing.T) {
 	auth := access.NewHTTPHandler(nil, false)
 	handler := web.NewHandler(auth)
-	for _, path := range []string{"/assets/js/spa.js"} {
+	assets := []string{"/assets/js/spa.js", "/assets/js/core.js"}
+	for _, page := range []string{"login", "home", "users", "groups", "databases", "workspace", "migrations"} {
+		assets = append(assets, "/assets/js/pages/"+page+".js")
+	}
+	for _, path := range assets {
 		t.Run(path, func(t *testing.T) {
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
