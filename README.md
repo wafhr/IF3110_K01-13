@@ -89,6 +89,31 @@ backend tersedia pada [panduan migration](docs/migrations.md) dan
 [panduan eksekusi](docs/migration-execution.md). Panduan halaman SPA, navigasi,
 dan integrasi API tersedia di [docs/spa.md](docs/spa.md).
 
+## Bonus Observability
+
+Jalankan dari root repository dengan Docker Desktop aktif.
+
+```sh
+docker compose -f compose.observability.yaml up --build -d --wait
+```
+
+Compose menjalankan server, worker, PostgreSQL demo, OpenTelemetry Collector,
+Prometheus, Loki, Tempo, dan Grafana. Database dan akun demo dibuat saat pertama
+kali berjalan. Datasource dan dashboard Grafana dimuat otomatis, sehingga
+tidak perlu menyiapkan `.env` atau mengimpor dashboard secara manual.
+
+| Halaman | Username | Password demo |
+| --- | --- | --- |
+| [Aplikasi](http://localhost:8080/login) | `demo_admin` | `if3110-admin-demo` |
+| [Dashboard IF3110 Observability](http://localhost:3000/d/if3110-observability) | `admin` | `if3110-grafana-demo` |
+
+Untuk mencoba migration batch dan mengikuti trace-nya dari log atau metrik,
+ikuti [skenario demo Observability](docs/logging-tracing.md#demo-migration-and-signal-correlation).
+Jika port terpakai, atur `OBS_APP_PORT` atau `OBS_GRAFANA_PORT` sebelum menjalankan Compose.
+
+Hentikan stack dengan `docker compose -f compose.observability.yaml down`.
+Volume demo tetap tersedia untuk sesi berikutnya.
+
 ## Test
 
 Unit test (`*_test.go`) berada satu folder dengan package yang diuji.

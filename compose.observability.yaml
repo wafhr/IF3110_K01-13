@@ -1,0 +1,149 @@
+name: if3110-observability
+
+x-app-build: &app-build
+  context: .
+  dockerfile: Dockerfile.observability
+
+x-app-environment: &app-environment
+  PLATFORM_DATABASE_URL: postgres://if3110_platform:if3110-platform-demo@postgres:5432/if3110_platform?sslmode=disable
+  DATABASE_ENCRYPTION_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://collector:4318/v1/traces
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: if3110_platform
+      POSTGRES_USER: if3110_platform
+      POSTGRES_PASSWORD: if3110-platform-demo
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./observability/postgres-init.sql:/docker-entrypoint-initdb.d/10-target.sql:ro
+    healthcheck:
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, if3110_platform, -d, if3110_platform]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  init-volumes:
+    image: busybox:1.37.0
+    command:
+      - sh
+      - -ec
+      - |
+        mkdir -p /logs/offsets
+        chown 65532:65532 /logs /logs/offsets
+        chown 10001:10001 /loki /tempo
+    volumes:
+      - application-logs:/logs
+      - loki-data:/loki
+      - tempo-data:/tempo
+
+  server:
+    build: *app-build
+    command: [sh, -ec, 'exec /app/server >> /var/log/if3110/server.jsonl']
+    environment:
+      <<: *app-environment
+      BOOTSTRAP_ADMIN_USERNAME: demo_admin
+      BOOTSTRAP_ADMIN_PASSWORD: if3110-admin-demo
+      SERVER_METRICS_ADDR: 0.0.0.0:9464
+    depends_on:
+      postgres:
+        condition: service_healthy
+      collector:
+        condition: service_started
+    ports:
+      - '127.0.0.1:${OBS_APP_PORT:-8080}:8080'
+    volumes:
+      - application-logs:/var/log/if3110
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:8080/health']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    build: *app-build
+    command: [sh, -ec, 'exec /app/worker >> /var/log/if3110/worker.jsonl']
+    environment:
+      <<: *app-environment
+      WORKER_METRICS_ADDR: 0.0.0.0:9465
+    depends_on:
+      server:
+        condition: service_healthy
+    volumes:
+      - application-logs:/var/log/if3110
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.139.0
+    user: '65532:65532'
+    command: [--config=/etc/otelcol-contrib/config.yaml]
+    depends_on:
+      init-volumes:
+        condition: service_completed_successfully
+      loki:
+        condition: service_started
+      tempo:
+        condition: service_started
+    volumes:
+      - ./observability/collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - application-logs:/var/log/if3110
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --enable-feature=exemplar-storage
+    volumes:
+      - ./observability/prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  loki:
+    image: grafana/loki:3.6.4
+    command: [-config.file=/etc/loki/config.yaml]
+    depends_on:
+      init-volumes:
+        condition: service_completed_successfully
+    volumes:
+      - ./observability/loki.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+
+  tempo:
+    image: grafana/tempo:2.9.0
+    command: [-config.file=/etc/tempo/config.yaml]
+    depends_on:
+      init-volumes:
+        condition: service_completed_successfully
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo/config.yaml:ro
+      - tempo-data:/var/tempo
+
+  grafana:
+    image: grafana/grafana:12.4.3
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: if3110-grafana-demo
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    ports:
+      - '127.0.0.1:${OBS_GRAFANA_PORT:-3000}:3000'
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/if3110-dashboards:ro
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:3000/api/health']
+      interval: 2s
+      timeout: 3s
+      retries: 25
+
+volumes:
+  postgres-data:
+  application-logs:
+  prometheus-data:
+  loki-data:
+  tempo-data:
+  grafana-data:

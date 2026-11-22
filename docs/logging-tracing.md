@@ -51,6 +51,74 @@ histograms expose sampled trace IDs as exemplars when scraped as OpenMetrics.
 Metric labels use fixed categories so job, actor, and database IDs stay out of
 the time series.
 
+## Local observability stack
+
+Start the demo using the [README](../README.md#bonus-observability). Compose
+provides a separate PostgreSQL instance for the platform and a sample target.
+The server and worker write JSON lines to a shared Docker volume. The Collector
+forwards those logs to Loki, persists its read offsets, and forwards OTLP
+traces to Tempo. Prometheus scrapes the server and worker metrics endpoints
+using OpenMetrics and stores exemplars. Grafana provisions the three data
+sources and the IF3110 Observability dashboard from the files under
+[`observability/`](../observability/).
+
+### Demo migration and signal correlation
+
+1. Sign in to the platform as `demo_admin`. Open **Target databases** and
+   register a PostgreSQL connection with the following values.
+
+   | Field | Value |
+   | --- | --- |
+   | Name | `Observability demo` |
+   | Host / port | `postgres` / `5432` |
+   | Database / username | `if3110_target` / `if3110_target` |
+   | Password | `if3110-target-demo` |
+   | SSL/TLS | `disable` |
+
+2. In **Groups & access**, create a group, add `demo_admin` as a member,
+   make that user the group leader, and grant **View and edit** access to the
+   demo database.
+3. Open the demo database workspace and select **Migrations**. Create a
+   definition with the SQL below. In **Batch configuration**, set Table to
+   `public.observability_demo`, Key column to `id`, and Batch size to `2`.
+
+   SQL up
+
+   ```sql
+   UPDATE public.observability_demo SET visits = visits + 1 WHERE id BETWEEN $1 AND $2;
+   ```
+
+   SQL down
+
+   ```sql
+   UPDATE public.observability_demo SET visits = visits - 1 WHERE id BETWEEN $1 AND $2;
+   ```
+
+4. Select **Save definition → Review apply → Approve → Queue approved action**.
+   The job should reach `succeeded` after committing four batches and eight rows.
+5. In Grafana **Explore**, select **Loki** and run the query below. Expand
+   the log for your job and select **View trace** to open the same attempt in
+   Tempo. The trace contains the server submission and the `worker_attempt` span.
+
+   ```logql
+   {service_name="worker"} |= "worker_attempt_completed"
+   ```
+
+6. On the dashboard, hover over an exemplar marker in **Migration attempt
+   duration (p95)** and follow its Tempo link. The exemplar and worker log
+   carry the same trace ID. The **Committed batches and affected rows**
+   panel shows the worker counters. Allow a few seconds for scraping and export.
+
+An end-to-end demo run produced the following results.
+
+| Signal | Observed result |
+| --- | --- |
+| Job | `11cf6919-215d-4fb0-851e-65d9aa7f4276`, status `succeeded` |
+| Loki | `worker_attempt_completed` with trace ID `9b0776294ee6ccb2fa634ef695d734f6` |
+| Tempo | The same trace ID contains the `worker_attempt` span `b95a92931c0d73ee` |
+| Prometheus | A migration-duration histogram exemplar with the same `trace_id`; the single observed attempt took 0.259 seconds |
+| Worker counters | Four committed batches and eight affected rows for `operation="execute"` |
+
 ## Log fields
 
 | Field | Meaning |
