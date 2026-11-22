@@ -1,16 +1,16 @@
 package access
 
 import (
-	"context"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/wafhr/IF3110_K01-13/internal/testsql"
 )
 
 const (
@@ -119,37 +119,28 @@ func (f *fakeDatabase) executed(fragment string) []statement {
 
 func (f *fakeDatabase) ran(fragment string) bool { return len(f.executed(fragment)) > 0 }
 
-func (f *fakeDatabase) open(t *testing.T) *sql.DB {
-	t.Helper()
-	db := sql.OpenDB(fakeConnector{database: f})
-	t.Cleanup(func() { _ = db.Close() })
-	return db
-}
+func (f *fakeDatabase) open(t *testing.T) *sql.DB { return testsql.Open(t, f) }
 
 func (f *fakeDatabase) record(query string, args []driver.NamedValue) {
-	values := make([]driver.Value, len(args))
-	for i, arg := range args {
-		values[i] = arg.Value
-	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.statements = append(f.statements, statement{query: query, args: values})
+	f.statements = append(f.statements, statement{query: query, args: testsql.Values(args)})
 }
 
-func (f *fakeDatabase) query(query string, args []driver.NamedValue) (driver.Rows, error) {
+func (f *fakeDatabase) Query(query string, args []driver.NamedValue) (driver.Rows, error) {
 	f.record(query, args)
 	for _, rule := range f.queries {
 		if strings.Contains(query, rule.fragment) {
 			if rule.err != nil {
 				return nil, rule.err
 			}
-			return &fakeRows{columns: rule.columns, rows: rule.rows}, nil
+			return &testsql.Rows{Names: rule.columns, Values: rule.rows}, nil
 		}
 	}
 	return nil, fmt.Errorf("unexpected query: %s", query)
 }
 
-func (f *fakeDatabase) exec(query string, args []driver.NamedValue) (driver.Result, error) {
+func (f *fakeDatabase) Exec(query string, args []driver.NamedValue) (driver.Result, error) {
 	f.record(query, args)
 	for _, rule := range f.execs {
 		if strings.Contains(query, rule.fragment) {
@@ -195,56 +186,6 @@ func (e sqlStateError) Error() string    { return "sql state " + string(e) }
 func (e sqlStateError) SQLState() string { return string(e) }
 
 var errDatabaseDown = errors.New("connection refused by db.internal:5432")
-
-type fakeConnector struct{ database *fakeDatabase }
-
-func (c fakeConnector) Connect(context.Context) (driver.Conn, error) { return fakeConn(c), nil }
-func (c fakeConnector) Driver() driver.Driver                        { return fakeDriver(c) }
-
-type fakeDriver struct{ database *fakeDatabase }
-
-func (d fakeDriver) Open(string) (driver.Conn, error) { return fakeConn(d), nil }
-
-type fakeConn struct{ database *fakeDatabase }
-
-func (fakeConn) Prepare(string) (driver.Stmt, error) {
-	return nil, errors.New("prepared statements are not supported")
-}
-func (fakeConn) Close() error              { return nil }
-func (fakeConn) Begin() (driver.Tx, error) { return fakeTx{}, nil }
-func (fakeConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
-	return fakeTx{}, nil
-}
-
-func (c fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	return c.database.query(query, args)
-}
-
-func (c fakeConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	return c.database.exec(query, args)
-}
-
-type fakeTx struct{}
-
-func (fakeTx) Commit() error   { return nil }
-func (fakeTx) Rollback() error { return nil }
-
-type fakeRows struct {
-	columns []string
-	rows    [][]driver.Value
-	index   int
-}
-
-func (r *fakeRows) Columns() []string { return r.columns }
-func (r *fakeRows) Close() error      { return nil }
-func (r *fakeRows) Next(destination []driver.Value) error {
-	if r.index >= len(r.rows) {
-		return io.EOF
-	}
-	copy(destination, r.rows[r.index])
-	r.index++
-	return nil
-}
 
 func newTestService(t *testing.T, database *fakeDatabase, now time.Time) *Service {
 	t.Helper()

@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
+	"github.com/wafhr/IF3110_K01-13/internal/uuid"
 )
 
 //go:embed target_schema.sql
@@ -45,7 +46,7 @@ func newHistoryRepository(db *sql.DB, dbms database.DBMS) (*HistoryRepository, e
 // Waktu selesai legacy dicatat dengan jam aplikasi sedangkan waktu mulai dengan
 // jam database, sehingga impor tidak membiarkan waktu selesai mendahului mulai.
 func (r *HistoryRepository) Initialize(ctx context.Context, databaseID string) error {
-	if !validUUID(databaseID) {
+	if !uuid.Valid(databaseID) {
 		return ErrInvalidMigration
 	}
 	if r.dbms == database.MySQL {
@@ -146,7 +147,7 @@ func appendExecution(ctx context.Context, tx *sql.Tx, dbms database.DBMS, execut
 }
 
 func (r *HistoryRepository) Get(ctx context.Context, databaseID, executionID string) (Execution, error) {
-	if !validUUID(databaseID) || !validUUID(executionID) {
+	if !uuid.Valid(databaseID) || !uuid.Valid(executionID) {
 		return Execution{}, ErrNotFound
 	}
 	return getExecution(ctx, r.db, r.dbms, databaseID, executionID)
@@ -155,7 +156,7 @@ func (r *HistoryRepository) Get(ctx context.Context, databaseID, executionID str
 // List mengurutkan history dari pencatatan terbaru. Filter hanya memengaruhi
 // hasil pembacaan dan mempertahankan seluruh catatan yang sudah tersimpan.
 func (r *HistoryRepository) List(ctx context.Context, databaseID string, hideRollback bool) ([]Execution, error) {
-	if !validUUID(databaseID) {
+	if !uuid.Valid(databaseID) {
 		return nil, ErrNotFound
 	}
 	return listExecutions(ctx, r.db, r.dbms, databaseID, hideRollback)
@@ -178,7 +179,7 @@ func ListExecutionsInTransaction(ctx context.Context, tx *sql.Tx, databaseID str
 }
 
 func listExecutionsInTransaction(ctx context.Context, tx *sql.Tx, dbms database.DBMS, databaseID string) ([]Execution, error) {
-	if tx == nil || !validUUID(databaseID) {
+	if tx == nil || !uuid.Valid(databaseID) {
 		return nil, ErrInvalidMigration
 	}
 	return listExecutions(ctx, tx, dbms, "", false)
@@ -190,7 +191,7 @@ func GetExecutionInTransaction(ctx context.Context, tx *sql.Tx, databaseID, exec
 }
 
 func getExecutionInTransaction(ctx context.Context, tx *sql.Tx, dbms database.DBMS, databaseID, executionID string) (Execution, error) {
-	if tx == nil || !validUUID(databaseID) || !validUUID(executionID) {
+	if tx == nil || !uuid.Valid(databaseID) || !uuid.Valid(executionID) {
 		return Execution{}, ErrInvalidMigration
 	}
 	return getExecution(ctx, tx, dbms, databaseID, executionID)
@@ -305,7 +306,7 @@ func HideRollback(executions []Execution) []Execution {
 }
 
 func normalizeCommittedExecution(execution Execution) (Execution, error) {
-	if !validUUID(execution.ID) || !validUUID(execution.DatabaseID) || !validUUID(execution.MigrationID) || !validUUID(execution.ExecutedBy) || execution.Revision < 1 {
+	if !uuid.Valid(execution.ID) || !uuid.Valid(execution.DatabaseID) || !uuid.Valid(execution.MigrationID) || !uuid.Valid(execution.ExecutedBy) || execution.Revision < 1 {
 		return Execution{}, fmt.Errorf("%w: execution identities and revision are required", ErrInvalidMigration)
 	}
 	if execution.Status != Success || execution.LegacyVersion != nil {
@@ -328,7 +329,7 @@ func normalizeCommittedExecution(execution Execution) (Execution, error) {
 			return Execution{}, fmt.Errorf("%w: only rollback can reference a reverted execution", ErrInvalidMigration)
 		}
 	case Rollback:
-		if !validUUID(execution.RevertsExecutionID) || strings.EqualFold(execution.ID, execution.RevertsExecutionID) {
+		if !uuid.Valid(execution.RevertsExecutionID) || strings.EqualFold(execution.ID, execution.RevertsExecutionID) {
 			return Execution{}, fmt.Errorf("%w: rollback must reference another execution", ErrInvalidMigration)
 		}
 	default:

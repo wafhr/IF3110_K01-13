@@ -8,6 +8,7 @@ import (
 	"log/slog"
 
 	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
+	"github.com/wafhr/IF3110_K01-13/internal/uuid"
 )
 
 var (
@@ -59,7 +60,7 @@ func bumpLeaderApprovalEpochs(ctx context.Context, tx *sql.Tx, userID string) er
 func (s *Service) SetGroupLeader(ctx context.Context, groupID, userID string) (activityErr error) {
 	ctx, activity := telemetry.StartActivity(ctx, "group_leader_set", slog.String("group_id", groupID), slog.String("user_id", userID))
 	defer activity.End(&activityErr)
-	if !validUUID(groupID) || (userID != "" && !validUUID(userID)) {
+	if !uuid.Valid(groupID) || (userID != "" && !uuid.Valid(userID)) {
 		return ErrNotFound
 	}
 	tx, err := s.db.BeginTx(ctx, nil)

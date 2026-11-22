@@ -2,7 +2,6 @@ package migration
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -202,14 +201,6 @@ type Record struct {
 	ExecutedBy string     `json:"executed_by"`
 	StartedAt  time.Time  `json:"started_at"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
-}
-
-func validUUID(value string) bool {
-	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-		return false
-	}
-	decoded, err := hex.DecodeString(strings.ReplaceAll(value, "-", ""))
-	return err == nil && len(decoded) == 16
 }
 
 func NormalizeMigrationName(name string) (string, error) {

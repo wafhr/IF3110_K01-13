@@ -15,9 +15,12 @@ Principal identification and permission rules live in separate files of
 | `session.go` | Login, session validation, idle and absolute expiry, rotation, logout, and session revocation scopes |
 | `authorization.go` | Permission levels, group database grants, effective permission, and `AuthorizeDatabase` |
 | `service.go` | Users, groups, memberships, and the bootstrap Platform Admin |
+| `leader.go` | Group leaders and the rule that a group with database grants needs one |
 | `password.go` | PBKDF2 password hashing and verification |
 | `validate.go` | Input normalization and validation errors |
-| `http.go` | JSON API, authentication middleware, CSRF and origin checks |
+| `http.go` | Routes, authentication middleware, CSRF and origin checks |
+| `http_session.go` | Login, logout, current user, CSRF token, and session cookies |
+| `http_admin.go` | User, group, membership, leader, and grant administration API |
 
 ## Configuration and bootstrap
 

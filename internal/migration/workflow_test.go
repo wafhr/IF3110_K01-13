@@ -1,6 +1,10 @@
 package migration
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/wafhr/IF3110_K01-13/internal/uuid"
+)
 
 func TestWorkflowSnapshotIsStableAndBindsAction(t *testing.T) {
 	plan := ActionPlan{DatabaseID: "8f000000-0000-4000-8000-000000000001", MigrationID: "8f000000-0000-4000-8000-000000000002", Revision: 3, Name: "add index", Action: Apply, SQL: "CREATE INDEX x ON t(id)"}
@@ -26,11 +30,11 @@ func TestWorkflowSnapshotIsStableAndBindsAction(t *testing.T) {
 }
 
 func TestWorkflowIDIsUUID(t *testing.T) {
-	id, err := workflowID()
+	id, err := uuid.New()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !validUUID(id) {
-		t.Fatalf("workflowID() = %q, not a UUID", id)
+	if !uuid.Valid(id) {
+		t.Fatalf("uuid.New() = %q, not a UUID", id)
 	}
 }

@@ -2,13 +2,13 @@ package job
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
 
 	"github.com/wafhr/IF3110_K01-13/internal/access"
+	"github.com/wafhr/IF3110_K01-13/internal/httpjson"
 )
 
 const defaultListLimit = 50
@@ -43,7 +43,7 @@ func (h *HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *HTTPHandler) list(w http.ResponseWriter, r *http.Request) {
 	limit, ok := listLimit(r.URL.Query().Get("limit"))
 	if !ok {
-		writeError(w, http.StatusBadRequest, "limit must be between 1 and 100")
+		httpjson.Error(w, http.StatusBadRequest, "limit must be between 1 and 100")
 		return
 	}
 	jobs, err := h.service.Jobs(r.Context(), r.PathValue("databaseID"), limit)
@@ -51,13 +51,13 @@ func (h *HTTPHandler) list(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
+	httpjson.Write(w, http.StatusOK, map[string]any{"jobs": jobs})
 }
 
 func (h *HTTPHandler) attempts(w http.ResponseWriter, r *http.Request) {
 	limit, ok := listLimit(r.URL.Query().Get("limit"))
 	if !ok {
-		writeError(w, http.StatusBadRequest, "limit must be between 1 and 100")
+		httpjson.Error(w, http.StatusBadRequest, "limit must be between 1 and 100")
 		return
 	}
 	attempts, err := h.service.Attempts(r.Context(), r.PathValue("databaseID"), limit)
@@ -65,7 +65,7 @@ func (h *HTTPHandler) attempts(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"attempts": attempts})
+	httpjson.Write(w, http.StatusOK, map[string]any{"attempts": attempts})
 }
 
 func (h *HTTPHandler) get(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +74,7 @@ func (h *HTTPHandler) get(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"job": job})
+	httpjson.Write(w, http.StatusOK, map[string]any{"job": job})
 }
 
 func (h *HTTPHandler) resume(w http.ResponseWriter, r *http.Request) {
@@ -91,7 +91,7 @@ func (h *HTTPHandler) requeue(w http.ResponseWriter, r *http.Request, action fun
 		writeServiceError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
+	httpjson.Write(w, http.StatusAccepted, map[string]any{"job": job})
 }
 
 func listLimit(value string) (int, bool) {
@@ -105,23 +105,13 @@ func listLimit(value string) (int, bool) {
 func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, ErrNotFound):
-		writeError(w, http.StatusNotFound, "job not found")
+		httpjson.Error(w, http.StatusNotFound, "job not found")
 	case errors.Is(err, ErrInvalidJob):
-		writeError(w, http.StatusBadRequest, "invalid job request")
+		httpjson.Error(w, http.StatusBadRequest, "invalid job request")
 	case errors.Is(err, ErrNotResumable), errors.Is(err, ErrNotCancelable), errors.Is(err, ErrIrreversible):
-		writeError(w, http.StatusConflict, err.Error())
+		httpjson.Error(w, http.StatusConflict, err.Error())
 	default:
 		slog.ErrorContext(r.Context(), "job_request_failed", "status", "failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
+		httpjson.Error(w, http.StatusInternalServerError, "internal error")
 	}
-}
-
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
-}
-
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
 }

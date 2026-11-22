@@ -3,11 +3,8 @@ package migration
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
-	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -15,6 +12,7 @@ import (
 
 	"github.com/wafhr/IF3110_K01-13/internal/access"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
+	"github.com/wafhr/IF3110_K01-13/internal/httpjson"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 )
 
@@ -64,80 +62,6 @@ func NewHTTPHandler(service *Service, auth *access.HTTPHandler, readers ...Schem
 	return h
 }
 
-func (h *HTTPHandler) workflowService() *WorkflowService {
-	if h.service == nil {
-		return nil
-	}
-	workflow, _ := h.service.execution.Approvals.(*WorkflowService)
-	return workflow
-}
-
-func (h *HTTPHandler) submitReview(w http.ResponseWriter, r *http.Request) {
-	workflow := h.workflowService()
-	if workflow == nil {
-		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "workflow unavailable"})
-		return
-	}
-	var input struct {
-		Action Action `json:"action"`
-	}
-	if !decodeRequestJSON(w, r, &input) {
-		return
-	}
-	plan, err := h.service.PrepareAction(r.Context(), r.PathValue("databaseID"), r.PathValue("migrationID"), input.Action)
-	if err != nil {
-		migrationError(w, r.Context(), err)
-		return
-	}
-	result, err := workflow.SubmitReview(r.Context(), access.CurrentUser(r.Context()).ID, plan)
-	if err != nil {
-		migrationError(w, r.Context(), err)
-		return
-	}
-	jsonResponse(w, http.StatusCreated, map[string]Workflow{"workflow": result})
-}
-
-func (h *HTTPHandler) getWorkflow(w http.ResponseWriter, r *http.Request) {
-	workflow := h.workflowService()
-	if workflow == nil {
-		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "workflow unavailable"})
-		return
-	}
-	result, err := workflow.GetWorkflow(r.Context(), access.CurrentUser(r.Context()).ID, r.PathValue("databaseID"), r.PathValue("workflowID"))
-	if err != nil {
-		migrationError(w, r.Context(), err)
-		return
-	}
-	jsonResponse(w, http.StatusOK, map[string]Workflow{"workflow": result})
-}
-
-func (h *HTTPHandler) getLatestWorkflow(w http.ResponseWriter, r *http.Request) {
-	workflow := h.workflowService()
-	if workflow == nil {
-		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "workflow unavailable"})
-		return
-	}
-	result, err := workflow.GetLatestWorkflow(r.Context(), access.CurrentUser(r.Context()).ID, r.PathValue("databaseID"), r.PathValue("migrationID"))
-	if err != nil {
-		migrationError(w, r.Context(), err)
-		return
-	}
-	jsonResponse(w, http.StatusOK, map[string]Workflow{"workflow": result})
-}
-
-func (h *HTTPHandler) approveWorkflow(w http.ResponseWriter, r *http.Request) {
-	workflow := h.workflowService()
-	if workflow == nil {
-		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "workflow unavailable"})
-		return
-	}
-	result, err := workflow.Approve(r.Context(), access.CurrentUser(r.Context()).ID, r.PathValue("databaseID"), r.PathValue("workflowID"))
-	if err != nil {
-		migrationError(w, r.Context(), err)
-		return
-	}
-	jsonResponse(w, http.StatusOK, map[string]Workflow{"workflow": result})
-}
 func (h *HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -148,7 +72,7 @@ func (h *HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *HTTPHandler) withDefinitions(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if h.definitions == nil {
-			jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "migration definitions unavailable"})
+			httpjson.Error(w, http.StatusServiceUnavailable, "migration definitions unavailable")
 			return
 		}
 		next(w, r)
@@ -183,12 +107,12 @@ func (h *HTTPHandler) listDefinitions(w http.ResponseWriter, r *http.Request) {
 	if definitions == nil {
 		definitions = []Migration{}
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"migrations": definitions})
+	httpjson.Write(w, http.StatusOK, map[string]any{"migrations": definitions})
 }
 
 func (h *HTTPHandler) createDefinition(w http.ResponseWriter, r *http.Request) {
 	var input definitionInput
-	if !decodeDefinitionJSON(w, r, &input) {
+	if !httpjson.Decode(w, r, &input) {
 		return
 	}
 	name, revision, err := input.normalized(1)
@@ -203,7 +127,7 @@ func (h *HTTPHandler) createDefinition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Location", "/databases/"+databaseID+"/migrations/definitions/"+definition.ID)
-	jsonResponse(w, http.StatusCreated, map[string]any{"migration": definition, "revision": stored})
+	httpjson.Write(w, http.StatusCreated, map[string]any{"migration": definition, "revision": stored})
 }
 
 func (h *HTTPHandler) getDefinition(w http.ResponseWriter, r *http.Request) {
@@ -218,7 +142,7 @@ func (h *HTTPHandler) getDefinition(w http.ResponseWriter, r *http.Request) {
 		migrationError(w, r.Context(), err)
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"migration": definition, "revision": revision})
+	httpjson.Write(w, http.StatusOK, map[string]any{"migration": definition, "revision": revision})
 }
 
 func (h *HTTPHandler) reviseDefinition(w http.ResponseWriter, r *http.Request) {
@@ -226,7 +150,7 @@ func (h *HTTPHandler) reviseDefinition(w http.ResponseWriter, r *http.Request) {
 		definitionInput
 		ExpectedRevision int64 `json:"expected_revision"`
 	}
-	if !decodeDefinitionJSON(w, r, &input) {
+	if !httpjson.Decode(w, r, &input) {
 		return
 	}
 	if input.ExpectedRevision < 1 {
@@ -244,7 +168,7 @@ func (h *HTTPHandler) reviseDefinition(w http.ResponseWriter, r *http.Request) {
 		migrationError(w, r.Context(), err)
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"migration": definition, "revision": stored})
+	httpjson.Write(w, http.StatusOK, map[string]any{"migration": definition, "revision": stored})
 }
 
 func (h *HTTPHandler) getDefinitionRevision(w http.ResponseWriter, r *http.Request) {
@@ -258,7 +182,7 @@ func (h *HTTPHandler) getDefinitionRevision(w http.ResponseWriter, r *http.Reque
 		migrationError(w, r.Context(), err)
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"revision": revision})
+	httpjson.Write(w, http.StatusOK, map[string]any{"revision": revision})
 }
 
 func (h *HTTPHandler) executionHistory(w http.ResponseWriter, r *http.Request) {
@@ -284,7 +208,7 @@ func (h *HTTPHandler) executionHistory(w http.ResponseWriter, r *http.Request) {
 		migrationError(w, r.Context(), err)
 		return
 	}
-	jsonResponse(w, http.StatusOK, history)
+	httpjson.Write(w, http.StatusOK, history)
 }
 
 func (h *HTTPHandler) executionDetail(w http.ResponseWriter, r *http.Request) {
@@ -297,17 +221,7 @@ func (h *HTTPHandler) executionDetail(w http.ResponseWriter, r *http.Request) {
 		migrationError(w, r.Context(), err)
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"execution": execution})
-}
-
-func decodeDefinitionJSON(w http.ResponseWriter, r *http.Request, input any) bool {
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		jsonResponse(w, http.StatusUnsupportedMediaType, map[string]string{"error": "content type must be application/json"})
-		return false
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	return decodeRequestJSON(w, r, input)
+	httpjson.Write(w, http.StatusOK, map[string]any{"execution": execution})
 }
 
 func (h *HTTPHandler) submitAction(w http.ResponseWriter, r *http.Request) {
@@ -315,7 +229,7 @@ func (h *HTTPHandler) submitAction(w http.ResponseWriter, r *http.Request) {
 		Action     Action `json:"action"`
 		ApprovalID string `json:"approval_id"`
 	}
-	if !decodeDefinitionJSON(w, r, &input) {
+	if !httpjson.Decode(w, r, &input) {
 		return
 	}
 	h.enqueueAction(w, r, r.PathValue("migrationID"), input.Action, input.ApprovalID)
@@ -328,129 +242,7 @@ func (h *HTTPHandler) enqueueAction(w http.ResponseWriter, r *http.Request, migr
 		migrationError(w, r.Context(), err)
 		return
 	}
-	jsonResponse(w, http.StatusAccepted, result)
-}
-
-func (h *HTTPHandler) schemaDiff(w http.ResponseWriter, r *http.Request) {
-	if h.schemas == nil {
-		jsonResponse(w, http.StatusNotImplemented, map[string]string{"error": "schema diff is unavailable"})
-		return
-	}
-	var input struct {
-		Desired json.RawMessage `json:"desired_schema"`
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if !decodeRequestJSON(w, r, &input) {
-		return
-	}
-	desired, err := parseDesiredSchema(input.Desired)
-	if err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid desired schema JSON"})
-		return
-	}
-	databaseID := r.PathValue("databaseID")
-	probe, dbms, err := h.service.openTarget(r.Context(), databaseID)
-	if err != nil {
-		migrationError(w, r.Context(), err)
-		return
-	}
-	_ = probe.Close()
-	schemas := map[string]bool{}
-	for _, table := range desired.Tables {
-		schemas[table.Schema] = true
-	}
-	current := []database.TableDetails{}
-	for schema := range schemas {
-		tables, err := h.schemas.Tables(r.Context(), databaseID, schema)
-		if err != nil {
-			writeViewerSchemaError(w, r.Context(), err)
-			return
-		}
-		for _, table := range tables {
-			if table.Type != "table" && table.Type != "partitioned_table" {
-				continue
-			}
-			detail, err := h.schemas.Table(r.Context(), databaseID, schema, table.Name)
-			if err != nil {
-				writeViewerSchemaError(w, r.Context(), err)
-				return
-			}
-			current = append(current, detail)
-		}
-	}
-	diff, err := BuildSchemaDiff(dbms, current, desired)
-	if err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid desired schema"})
-		return
-	}
-	jsonResponse(w, http.StatusOK, map[string]any{"schema_diff": diff})
-}
-
-func writeViewerSchemaError(w http.ResponseWriter, ctx context.Context, err error) {
-	if errors.Is(err, targetdb.ErrPermissionDenied) {
-		jsonResponse(w, http.StatusForbidden, map[string]string{"error": "target database access denied"})
-		return
-	}
-	if errors.Is(err, database.ErrInvalidInput) {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid desired schema"})
-		return
-	}
-	migrationError(w, ctx, err)
-}
-
-func (h *HTTPHandler) explain(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		SQL     string `json:"sql"`
-		Analyze bool   `json:"analyze"`
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if !decodeRequestJSON(w, r, &input) {
-		return
-	}
-	plan, err := h.service.Explain(r.Context(), r.PathValue("databaseID"), input.SQL, input.Analyze)
-	if err != nil {
-		status, message := http.StatusInternalServerError, "query plan preview failed"
-		switch {
-		case errors.Is(err, errInvalidPlanQuery):
-			status, message = http.StatusBadRequest, "Cannot plan this SQL. Use one supported statement, such as SELECT, INSERT, UPDATE, or DELETE, and check syntax and object names."
-		case errors.Is(err, context.DeadlineExceeded):
-			status, message = http.StatusGatewayTimeout, "query plan preview timed out"
-		case errors.Is(err, context.Canceled):
-			status, message = http.StatusRequestTimeout, "query plan preview canceled"
-		case errors.Is(err, database.ErrNotFound):
-			status, message = http.StatusNotFound, "database not found"
-		case errors.Is(err, targetdb.ErrPermissionDenied):
-			status, message = http.StatusForbidden, "target database permission denied"
-		case errors.Is(err, targetdb.ErrAuthentication), errors.Is(err, targetdb.ErrConnection):
-			status, message = http.StatusBadGateway, "could not connect to the target database"
-		}
-		jsonResponse(w, status, map[string]string{"error": message})
-		return
-	}
-	jsonResponse(w, http.StatusOK, map[string]any{"query_plan": plan})
-}
-
-func decodeRequestJSON(w http.ResponseWriter, r *http.Request, target any) bool {
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		writeJSONDecodeError(w, err)
-		return false
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeJSONDecodeError(w, err)
-		return false
-	}
-	return true
-}
-
-func writeJSONDecodeError(w http.ResponseWriter, err error) {
-	var sizeError *http.MaxBytesError
-	if errors.As(err, &sizeError) {
-		jsonResponse(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
-		return
-	}
-	jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "request must contain one valid JSON object"})
+	httpjson.Write(w, http.StatusAccepted, result)
 }
 
 func migrationError(w http.ResponseWriter, ctx context.Context, err error) {
@@ -483,11 +275,5 @@ func migrationError(w http.ResponseWriter, ctx context.Context, err error) {
 	default:
 		slog.ErrorContext(ctx, "migration_operation_failed", "status", "failed")
 	}
-	jsonResponse(w, status, map[string]string{"error": message})
-}
-func jsonResponse(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	httpjson.Error(w, status, message)
 }

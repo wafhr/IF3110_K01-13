@@ -1,15 +1,13 @@
 package job
 
 import (
-	"context"
-	"database/sql"
 	"database/sql/driver"
-	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/wafhr/IF3110_K01-13/internal/testsql"
 )
 
 type statement struct {
@@ -66,9 +64,7 @@ func (s *stubDatabase) executed(fragment string) []statement {
 
 func (s *stubDatabase) repository(t *testing.T) *Repository {
 	t.Helper()
-	db := sql.OpenDB(stubConnector{database: s})
-	t.Cleanup(func() { _ = db.Close() })
-	repository, err := NewRepository(db)
+	repository, err := NewRepository(testsql.Open(t, s))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,29 +72,25 @@ func (s *stubDatabase) repository(t *testing.T) *Repository {
 }
 
 func (s *stubDatabase) record(query string, args []driver.NamedValue) {
-	values := make([]driver.Value, len(args))
-	for i, arg := range args {
-		values[i] = arg.Value
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.statements = append(s.statements, statement{query: query, args: values})
+	s.statements = append(s.statements, statement{query: query, args: testsql.Values(args)})
 }
 
-func (s *stubDatabase) query(query string, args []driver.NamedValue) (driver.Rows, error) {
+func (s *stubDatabase) Query(query string, args []driver.NamedValue) (driver.Rows, error) {
 	s.record(query, args)
 	for _, rule := range s.queries {
 		if strings.Contains(query, rule.fragment) {
 			if rule.err != nil {
 				return nil, rule.err
 			}
-			return &stubRows{rows: rule.rows}, nil
+			return &testsql.Rows{Names: jobColumnNames, Values: rule.rows}, nil
 		}
 	}
 	return nil, fmt.Errorf("unexpected query: %s", query)
 }
 
-func (s *stubDatabase) exec(query string, args []driver.NamedValue) (driver.Result, error) {
+func (s *stubDatabase) Exec(query string, args []driver.NamedValue) (driver.Result, error) {
 	s.record(query, args)
 	for _, rule := range s.execs {
 		if strings.Contains(query, rule.fragment) {
@@ -116,51 +108,3 @@ var jobColumnNames = []string{
 	"total_rows", "last_error", "available_at", "created_at", "started_at", "finished_at",
 }
 
-type stubConnector struct{ database *stubDatabase }
-
-func (c stubConnector) Connect(context.Context) (driver.Conn, error) { return stubConn(c), nil }
-func (c stubConnector) Driver() driver.Driver                        { return stubDriver(c) }
-
-type stubDriver struct{ database *stubDatabase }
-
-func (d stubDriver) Open(string) (driver.Conn, error) { return stubConn(d), nil }
-
-type stubConn struct{ database *stubDatabase }
-
-func (stubConn) Prepare(string) (driver.Stmt, error) {
-	return nil, errors.New("prepared statements are not supported")
-}
-func (stubConn) Close() error              { return nil }
-func (stubConn) Begin() (driver.Tx, error) { return stubTx{}, nil }
-func (stubConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
-	return stubTx{}, nil
-}
-
-func (c stubConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	return c.database.query(query, args)
-}
-
-func (c stubConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	return c.database.exec(query, args)
-}
-
-type stubTx struct{}
-
-func (stubTx) Commit() error   { return nil }
-func (stubTx) Rollback() error { return nil }
-
-type stubRows struct {
-	rows  [][]driver.Value
-	index int
-}
-
-func (r *stubRows) Columns() []string { return jobColumnNames }
-func (r *stubRows) Close() error      { return nil }
-func (r *stubRows) Next(destination []driver.Value) error {
-	if r.index >= len(r.rows) {
-		return io.EOF
-	}
-	copy(destination, r.rows[r.index])
-	r.index++
-	return nil
-}

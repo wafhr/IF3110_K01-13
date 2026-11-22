@@ -21,6 +21,7 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/job"
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
+	"github.com/wafhr/IF3110_K01-13/internal/testsql"
 	"github.com/wafhr/IF3110_K01-13/internal/worker"
 )
 
@@ -44,25 +45,13 @@ func setupWorkerTracing(t *testing.T) (*tracetest.SpanRecorder, *bytes.Buffer) {
 	return recorder, &logs
 }
 
-type workerSQLConnector struct{}
+// execOnly accepts every statement and rejects queries.
+type execOnly struct{}
 
-func (workerSQLConnector) Connect(context.Context) (driver.Conn, error) { return workerSQLConn{}, nil }
-func (workerSQLConnector) Driver() driver.Driver                        { return workerSQLDriver{} }
-
-type workerSQLDriver struct{}
-
-func (workerSQLDriver) Open(string) (driver.Conn, error) { return workerSQLConn{}, nil }
-
-type workerSQLConn struct{}
-
-func (workerSQLConn) Prepare(string) (driver.Stmt, error) {
-	return nil, errors.New("unsupported prepare")
+func (execOnly) Query(string, []driver.NamedValue) (driver.Rows, error) {
+	return nil, errors.New("unsupported query")
 }
-func (workerSQLConn) Begin() (driver.Tx, error) { return nil, errors.New("unsupported transaction") }
-func (workerSQLConn) Close() error              { return nil }
-func (workerSQLConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
-	return driver.RowsAffected(1), nil
-}
+func (execOnly) Exec(string, []driver.NamedValue) (driver.Result, error) { return driver.RowsAffected(1), nil }
 
 func TestTraceAttemptPreservesProducerParentAcrossRetryAndSQLScopes(t *testing.T) {
 	recorder, logs := setupWorkerTracing(t)
@@ -87,7 +76,7 @@ func TestTraceAttemptPreservesProducerParentAcrossRetryAndSQLScopes(t *testing.T
 		t.Fatal(err)
 	}
 	cancelRequest()
-	db := sql.OpenDB(telemetry.SQLConnector(workerSQLConnector{}, "postgresql", "target", "target-db"))
+	db := sql.OpenDB(telemetry.SQLConnector(testsql.Connector(execOnly{}), "postgresql", "target", "target-db"))
 	defer db.Close()
 	failure := errors.New("fixture-private-error")
 	for attempt := 1; attempt <= 2; attempt++ {

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 
 	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
+	"github.com/wafhr/IF3110_K01-13/internal/uuid"
 )
 
 type Permission string
@@ -43,7 +44,7 @@ func (s *Service) ListDatabaseGrants(ctx context.Context, groupID string) (resul
 	ctx, activity := telemetry.StartActivity(ctx, "database_permissions_list", slog.String("group_id", groupID))
 	defer activity.End(&activityErr)
 
-	if !validUUID(groupID) {
+	if !uuid.Valid(groupID) {
 		return nil, ErrNotFound
 	}
 	if err := s.requireGroup(ctx, groupID); err != nil {
@@ -71,7 +72,7 @@ func (s *Service) SetDatabasePermission(ctx context.Context, groupID, databaseID
 	ctx, activity := telemetry.StartActivity(ctx, "database_permission_set", slog.String("group_id", groupID), slog.String("database_id", databaseID))
 	defer activity.End(&activityErr)
 
-	if !validUUID(groupID) || !validUUID(databaseID) {
+	if !uuid.Valid(groupID) || !uuid.Valid(databaseID) {
 		return ErrNotFound
 	}
 	if !permission.valid() {
@@ -130,7 +131,7 @@ func (s *Service) DeleteDatabasePermission(ctx context.Context, groupID, databas
 	ctx, activity := telemetry.StartActivity(ctx, "database_permission_delete", slog.String("group_id", groupID), slog.String("database_id", databaseID))
 	defer activity.End(&activityErr)
 
-	if !validUUID(groupID) || !validUUID(databaseID) {
+	if !uuid.Valid(groupID) || !uuid.Valid(databaseID) {
 		return ErrNotFound
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -157,7 +158,7 @@ func (s *Service) DeleteDatabasePermission(ctx context.Context, groupID, databas
 // EffectivePermission returns the strongest grant among the active user's
 // groups, or an empty permission when no group grants the database.
 func (s *Service) EffectivePermission(ctx context.Context, userID, databaseID string) (Permission, error) {
-	if !validUUID(userID) || !validUUID(databaseID) {
+	if !uuid.Valid(userID) || !uuid.Valid(databaseID) {
 		return "", ErrNotFound
 	}
 	var permission sql.NullString

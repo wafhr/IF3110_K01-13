@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
+	"github.com/wafhr/IF3110_K01-13/internal/uuid"
 )
 
 //go:embed schema.sql
@@ -149,7 +150,7 @@ func (r *Repository) Cancel(ctx context.Context, jobID string) error {
 }
 
 func (r *Repository) requeue(ctx context.Context, jobID, assignments, condition string, rejected error) error {
-	if !validUUID(jobID) {
+	if !uuid.Valid(jobID) {
 		return ErrNotFound
 	}
 	result, err := r.db.ExecContext(ctx, `UPDATE migration_jobs SET `+assignments+`status = 'pending', attempts = 0,
@@ -209,7 +210,7 @@ func (r *Repository) Release(ctx context.Context, jobID, workerID string) error 
 }
 
 func (r *Repository) Get(ctx context.Context, jobID string) (Job, error) {
-	if !validUUID(jobID) {
+	if !uuid.Valid(jobID) {
 		return Job{}, ErrNotFound
 	}
 	job, err := scanJob(r.db.QueryRowContext(ctx, `SELECT `+jobColumns+` FROM migration_jobs j WHERE j.id = $1`, jobID))
@@ -225,7 +226,7 @@ var listColumns = strings.Replace(jobColumns, "j.payload", `j.payload #- '{plan,
 
 // ListByDatabase returns the most recent jobs of a database registration first.
 func (r *Repository) ListByDatabase(ctx context.Context, databaseID string, limit int) ([]Job, error) {
-	if !validUUID(databaseID) {
+	if !uuid.Valid(databaseID) {
 		return nil, ErrNotFound
 	}
 	if limit < 1 || limit > MaxListLimit {
@@ -268,7 +269,7 @@ func (r *Repository) updateLeased(ctx context.Context, jobID, workerID, assignme
 }
 
 func (r *Repository) updateLeasedStatement(ctx context.Context, jobID, statement string, args ...any) error {
-	if !validUUID(jobID) {
+	if !uuid.Valid(jobID) {
 		return ErrNotFound
 	}
 	result, err := r.db.ExecContext(ctx, statement, args...)
@@ -312,7 +313,7 @@ const attemptListColumns = `a.id::text, a.sequence, a.job_id::text, a.execution_
 
 // ListAttempts returns the most recent attempts of a database registration first.
 func (r *Repository) ListAttempts(ctx context.Context, databaseID string, limit int) ([]Attempt, error) {
-	if !validUUID(databaseID) {
+	if !uuid.Valid(databaseID) {
 		return nil, ErrNotFound
 	}
 	if limit < 1 || limit > MaxListLimit {

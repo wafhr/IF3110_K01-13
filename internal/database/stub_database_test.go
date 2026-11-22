@@ -1,17 +1,16 @@
 package database_test
 
 import (
-	"context"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/base64"
 	"errors"
-	"io"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/wafhr/IF3110_K01-13/internal/database"
+	"github.com/wafhr/IF3110_K01-13/internal/testsql"
 )
 
 const testDatabaseID = "00000000-0000-4000-8000-000000000001"
@@ -53,29 +52,16 @@ func (s *databaseScript) take(query string, exec bool, args []driver.NamedValue)
 	return step, step.err
 }
 
-func (s *databaseScript) Connect(context.Context) (driver.Conn, error) { return scriptConn{s}, nil }
-func (s *databaseScript) Driver() driver.Driver                        { return scriptDriver{s} }
-
-type scriptDriver struct{ script *databaseScript }
-
-func (d scriptDriver) Open(string) (driver.Conn, error) { return scriptConn(d), nil }
-
-type scriptConn struct{ script *databaseScript }
-
-func (scriptConn) Prepare(string) (driver.Stmt, error) { return nil, errors.New("unsupported") }
-func (scriptConn) Close() error                        { return nil }
-func (scriptConn) Begin() (driver.Tx, error)           { return nil, errors.New("unsupported") }
-
-func (c scriptConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	step, err := c.script.take(query, false, args)
+func (s *databaseScript) Query(query string, args []driver.NamedValue) (driver.Rows, error) {
+	step, err := s.take(query, false, args)
 	if err != nil {
 		return nil, err
 	}
-	return &scriptRows{columns: step.columns, values: step.rows, nextErr: step.nextErr}, nil
+	return &testsql.Rows{Names: step.columns, Values: step.rows, Err: step.nextErr}, nil
 }
 
-func (c scriptConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	step, err := c.script.take(query, true, args)
+func (s *databaseScript) Exec(query string, args []driver.NamedValue) (driver.Result, error) {
+	step, err := s.take(query, true, args)
 	if err != nil {
 		return nil, err
 	}
@@ -83,27 +69,6 @@ func (c scriptConn) ExecContext(_ context.Context, query string, args []driver.N
 		return driver.RowsAffected(1), nil
 	}
 	return step.result, nil
-}
-
-type scriptRows struct {
-	columns []string
-	values  [][]driver.Value
-	next    int
-	nextErr error
-}
-
-func (r *scriptRows) Columns() []string { return r.columns }
-func (*scriptRows) Close() error        { return nil }
-func (r *scriptRows) Next(values []driver.Value) error {
-	if r.next == len(r.values) {
-		if r.nextErr != nil {
-			return r.nextErr
-		}
-		return io.EOF
-	}
-	copy(values, r.values[r.next])
-	r.next++
-	return nil
 }
 
 func testRepository(t *testing.T, steps ...databaseStep) *database.Repository {
@@ -123,7 +88,7 @@ func testRepositoryWithKey(t *testing.T, key string, steps ...databaseStep) *dat
 func testDatabase(t *testing.T, steps ...databaseStep) *sql.DB {
 	t.Helper()
 	script := &databaseScript{t: t, steps: steps}
-	db := sql.OpenDB(script)
+	db := sql.OpenDB(testsql.Connector(script))
 	t.Cleanup(func() {
 		if err := db.Close(); err != nil {
 			t.Errorf("close database: %v", err)

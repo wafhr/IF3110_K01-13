@@ -1,17 +1,16 @@
 package migration_test
 
 import (
-	"context"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
-	"io"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
+	"github.com/wafhr/IF3110_K01-13/internal/testsql"
 )
 
 const (
@@ -55,74 +54,35 @@ func (s *repositoryScript) take(operation, query string, args []driver.NamedValu
 	return step, step.err
 }
 
-func (s *repositoryScript) Connect(context.Context) (driver.Conn, error) {
-	return repositoryConn{s}, nil
+func (s *repositoryScript) Query(query string, args []driver.NamedValue) (driver.Rows, error) {
+	step, err := s.take("query", query, args)
+	return &testsql.Rows{Values: step.rows, Err: step.nextErr}, err
 }
-func (s *repositoryScript) Driver() driver.Driver { return repositoryDriver{s} }
 
-type repositoryDriver struct{ script *repositoryScript }
-
-func (d repositoryDriver) Open(string) (driver.Conn, error) { return repositoryConn(d), nil }
-
-type repositoryConn struct{ script *repositoryScript }
-
-func (repositoryConn) Prepare(string) (driver.Stmt, error) { return nil, errors.New("unsupported") }
-func (repositoryConn) Close() error                        { return nil }
-func (c repositoryConn) Begin() (driver.Tx, error) {
-	_, err := c.script.take("begin", "", nil)
-	return repositoryTx(c), err
-}
-func (c repositoryConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
-	return c.Begin()
-}
-func (c repositoryConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	_, err := c.script.take("exec", query, args)
+func (s *repositoryScript) Exec(query string, args []driver.NamedValue) (driver.Result, error) {
+	_, err := s.take("exec", query, args)
 	return driver.RowsAffected(1), err
 }
-func (c repositoryConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	step, err := c.script.take("query", query, args)
-	return &repositoryRows{step: step}, err
-}
 
-type repositoryTx struct{ script *repositoryScript }
-
-func (tx repositoryTx) Commit() error {
-	_, err := tx.script.take("commit", "", nil)
-	return err
-}
-func (tx repositoryTx) Rollback() error {
-	_, err := tx.script.take("rollback", "", nil)
+func (s *repositoryScript) Begin(driver.TxOptions) error {
+	_, err := s.take("begin", "", nil)
 	return err
 }
 
-type repositoryRows struct {
-	step repositoryStep
-	next int
+func (s *repositoryScript) Commit() error {
+	_, err := s.take("commit", "", nil)
+	return err
 }
 
-func (r *repositoryRows) Columns() []string {
-	if len(r.step.rows) == 0 {
-		return nil
-	}
-	return make([]string, len(r.step.rows[0]))
-}
-func (*repositoryRows) Close() error { return nil }
-func (r *repositoryRows) Next(values []driver.Value) error {
-	if r.next == len(r.step.rows) {
-		if r.step.nextErr != nil {
-			return r.step.nextErr
-		}
-		return io.EOF
-	}
-	copy(values, r.step.rows[r.next])
-	r.next++
-	return nil
+func (s *repositoryScript) Rollback() error {
+	_, err := s.take("rollback", "", nil)
+	return err
 }
 
 func testMigrationDatabase(t *testing.T, steps ...repositoryStep) *sql.DB {
 	t.Helper()
 	script := &repositoryScript{t: t, steps: steps}
-	db := sql.OpenDB(script)
+	db := sql.OpenDB(testsql.Connector(script))
 	t.Cleanup(func() {
 		if err := db.Close(); err != nil {
 			t.Error(err)

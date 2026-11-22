@@ -77,22 +77,6 @@ func TestNormalizeGroupName(t *testing.T) {
 	}
 }
 
-func TestValidUUID(t *testing.T) {
-	tests := map[string]bool{
-		testUserID:                              true,
-		"00000000-0000-4000-8000-00000000000Z":  false,
-		"00000000000040008000000000000001":      false,
-		"00000000-0000-4000-8000-0000000000011": false,
-		"":                                      false,
-		"../admin":                              false,
-	}
-	for value, want := range tests {
-		if got := validUUID(value); got != want {
-			t.Errorf("validUUID(%q) = %t, want %t", value, got, want)
-		}
-	}
-}
-
 func TestInputErrorKeepsReasonAndMatchesSentinel(t *testing.T) {
 	err := fmt.Errorf("create user: %w", invalidInput("username is taken"))
 	if !errors.Is(err, ErrInvalidInput) {

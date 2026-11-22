@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
+	"github.com/wafhr/IF3110_K01-13/internal/uuid"
 )
 
 //go:embed schema.sql
@@ -148,7 +149,7 @@ func (s *Service) UpdateUser(ctx context.Context, id string, active, platformAdm
 	ctx, activity := telemetry.StartActivity(ctx, "user_update", slog.String("user_id", id), slog.Bool("active", active), slog.Bool("platform_admin", platformAdmin))
 	defer activity.End(&activityErr)
 
-	if !validUUID(id) {
+	if !uuid.Valid(id) {
 		return ErrNotFound
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -243,7 +244,7 @@ func (s *Service) ListGroupMembers(ctx context.Context, groupID string) (result 
 	ctx, activity := telemetry.StartActivity(ctx, "group_members_list", slog.String("group_id", groupID))
 	defer activity.End(&activityErr)
 
-	if !validUUID(groupID) {
+	if !uuid.Valid(groupID) {
 		return nil, ErrNotFound
 	}
 	if err := s.requireGroup(ctx, groupID); err != nil {
@@ -269,7 +270,7 @@ func (s *Service) DeleteGroup(ctx context.Context, groupID string) (activityErr 
 	ctx, activity := telemetry.StartActivity(ctx, "group_delete", slog.String("group_id", groupID))
 	defer activity.End(&activityErr)
 
-	if !validUUID(groupID) {
+	if !uuid.Valid(groupID) {
 		return ErrNotFound
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -299,7 +300,7 @@ func (s *Service) SetMembership(ctx context.Context, groupID, userID string, mem
 	ctx, activity := telemetry.StartActivity(ctx, "group_membership_set", slog.String("group_id", groupID), slog.String("user_id", userID), slog.Bool("member", member))
 	defer activity.End(&activityErr)
 
-	if !validUUID(groupID) || !validUUID(userID) {
+	if !uuid.Valid(groupID) || !uuid.Valid(userID) {
 		return ErrNotFound
 	}
 	tx, err := s.db.BeginTx(ctx, nil)

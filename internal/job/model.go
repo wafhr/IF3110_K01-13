@@ -1,7 +1,6 @@
 package job
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +8,7 @@ import (
 
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
+	"github.com/wafhr/IF3110_K01-13/internal/uuid"
 )
 
 type Status string
@@ -117,15 +117,15 @@ func (j *Job) describe() {
 func validateRequest(request migration.ExecutionRequest) error {
 	plan := request.Plan
 	switch {
-	case !validUUID(request.ExecutionID):
+	case !uuid.Valid(request.ExecutionID):
 		return invalid("execution ID")
-	case !validUUID(request.ApprovalID):
+	case !uuid.Valid(request.ApprovalID):
 		return invalid("approval ID")
-	case !validUUID(request.ActorID):
+	case !uuid.Valid(request.ActorID):
 		return invalid("actor ID")
-	case !validUUID(plan.DatabaseID):
+	case !uuid.Valid(plan.DatabaseID):
 		return invalid("database ID")
-	case !validUUID(plan.MigrationID):
+	case !uuid.Valid(plan.MigrationID):
 		return invalid("migration ID")
 	case plan.Action != migration.Apply && plan.Action != migration.Rollback && plan.Action != migration.Forward:
 		return invalid("action")
@@ -145,11 +145,3 @@ func sameExecution(stored, submitted migration.ExecutionRequest) bool {
 }
 
 func invalid(field string) error { return fmt.Errorf("%w: %s", ErrInvalidJob, field) }
-
-func validUUID(value string) bool {
-	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-		return false
-	}
-	decoded, err := hex.DecodeString(strings.ReplaceAll(value, "-", ""))
-	return err == nil && len(decoded) == 16
-}

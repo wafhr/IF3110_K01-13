@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/wafhr/IF3110_K01-13/internal/access"
+	"github.com/wafhr/IF3110_K01-13/internal/httpjson"
 )
 
 type guardFunc func(access.Permission, http.Handler) http.Handler
@@ -35,7 +36,7 @@ func allowGuard(t *testing.T) DatabaseGuard {
 func denyGuard() DatabaseGuard {
 	return guardFunc(func(access.Permission, http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			writeError(w, http.StatusForbidden, "forbidden")
+			httpjson.Error(w, http.StatusForbidden, "forbidden")
 		})
 	})
 }

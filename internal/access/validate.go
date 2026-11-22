@@ -1,7 +1,6 @@
 package access
 
 import (
-	"encoding/hex"
 	"errors"
 	"strings"
 	"unicode/utf8"
@@ -41,14 +40,6 @@ func normalizeGroupName(name string) (string, error) {
 		return "", invalidInput("group name must contain 1 to 100 characters")
 	}
 	return name, nil
-}
-
-func validUUID(value string) bool {
-	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-		return false
-	}
-	decoded, err := hex.DecodeString(strings.ReplaceAll(value, "-", ""))
-	return err == nil && len(decoded) == 16
 }
 
 func isUniqueViolation(err error) bool {

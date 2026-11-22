@@ -225,8 +225,8 @@ original up/down definitions are unavailable.
 
 ## Worker transaction contract
 
-`internal/migration/service.go` provides submission contracts and transaction
-hooks. Request and receipt types are in `internal/migration/model.go`.
+`internal/migration/service.go` provides the submission contracts and
+`internal/migration/execution.go` the transaction hooks. Request and receipt types are in `internal/migration/model.go`.
 `ActionQueue` persists the complete `ExecutionRequest` and preserves its
 execution ID when a job is redelivered.
 

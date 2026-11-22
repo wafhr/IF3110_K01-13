@@ -3,16 +3,14 @@ package databasehttp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
-	"mime"
 	"net/http"
 	"time"
 
 	"github.com/wafhr/IF3110_K01-13/internal/access"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
+	"github.com/wafhr/IF3110_K01-13/internal/httpjson"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 )
 
@@ -102,7 +100,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	if databases == nil {
 		databases = []database.Database{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"databases": databases})
+	httpjson.Write(w, http.StatusOK, map[string]any{"databases": databases})
 }
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
@@ -111,12 +109,12 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, r.Context(), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"database": metadata})
+	httpjson.Write(w, http.StatusOK, map[string]any{"database": metadata})
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var input databaseInput
-	if !decodeJSON(w, r, &input) {
+	if !httpjson.Decode(w, r, &input) {
 		return
 	}
 	config, err := input.config()
@@ -130,12 +128,12 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Location", "/admin/databases/"+metadata.ID)
-	writeJSON(w, http.StatusCreated, map[string]any{"database": metadata})
+	httpjson.Write(w, http.StatusCreated, map[string]any{"database": metadata})
 }
 
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	var input databaseInput
-	if !decodeJSON(w, r, &input) {
+	if !httpjson.Decode(w, r, &input) {
 		return
 	}
 	config, err := input.config()
@@ -150,7 +148,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.invalidate(r.Context(), id)
-	writeJSON(w, http.StatusOK, map[string]any{"database": metadata})
+	httpjson.Write(w, http.StatusOK, map[string]any{"database": metadata})
 }
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
@@ -176,12 +174,12 @@ func (h *Handler) checkConnection(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, r.Context(), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	httpjson.Write(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) testConnection(w http.ResponseWriter, r *http.Request) {
 	var input connectionInput
-	if !decodeJSON(w, r, &input) {
+	if !httpjson.Decode(w, r, &input) {
 		return
 	}
 	config, err := input.config()
@@ -193,73 +191,33 @@ func (h *Handler) testConnection(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, r.Context(), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		writeError(w, http.StatusUnsupportedMediaType, "content type must be application/json")
-		return false
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		var sizeError *http.MaxBytesError
-		if errors.As(err, &sizeError) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
-		} else {
-			writeError(w, http.StatusBadRequest, "invalid JSON request")
-		}
-		return false
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		var sizeError *http.MaxBytesError
-		if errors.As(err, &sizeError) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
-		} else {
-			writeError(w, http.StatusBadRequest, "request must contain one JSON value")
-		}
-		return false
-	}
-	return true
-}
-
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
-}
-
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+	httpjson.Write(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func writeServiceError(w http.ResponseWriter, ctx context.Context, err error) {
 	switch {
 	case errors.Is(err, database.ErrInvalidInput):
-		writeError(w, http.StatusBadRequest, "invalid database configuration")
+		httpjson.Error(w, http.StatusBadRequest, "invalid database configuration")
 	case errors.Is(err, database.ErrNotFound):
-		writeError(w, http.StatusNotFound, "database not found")
+		httpjson.Error(w, http.StatusNotFound, "database not found")
 	case errors.Is(err, database.ErrObjectNotFound):
-		writeError(w, http.StatusNotFound, "schema or table not found")
+		httpjson.Error(w, http.StatusNotFound, "schema or table not found")
 	case errors.Is(err, database.ErrConflict):
-		writeError(w, http.StatusConflict, "database name already exists")
+		httpjson.Error(w, http.StatusConflict, "database name already exists")
 	case errors.Is(err, context.DeadlineExceeded):
-		writeError(w, http.StatusGatewayTimeout, "database operation timed out")
+		httpjson.Error(w, http.StatusGatewayTimeout, "database operation timed out")
 	case errors.Is(err, context.Canceled):
-		writeError(w, http.StatusRequestTimeout, "request canceled")
+		httpjson.Error(w, http.StatusRequestTimeout, "request canceled")
 	case errors.Is(err, targetdb.ErrAuthentication):
-		writeError(w, http.StatusBadGateway, "target database authentication failed")
+		httpjson.Error(w, http.StatusBadGateway, "target database authentication failed")
 	case errors.Is(err, targetdb.ErrPermissionDenied):
-		writeError(w, http.StatusBadGateway, "target database access denied")
+		httpjson.Error(w, http.StatusBadGateway, "target database access denied")
 	case errors.Is(err, targetdb.ErrConnection):
-		writeError(w, http.StatusBadGateway, "target database connection failed")
+		httpjson.Error(w, http.StatusBadGateway, "target database connection failed")
 	case errors.Is(err, targetdb.ErrClosed):
-		writeError(w, http.StatusServiceUnavailable, "database connections unavailable")
+		httpjson.Error(w, http.StatusServiceUnavailable, "database connections unavailable")
 	default:
 		slog.ErrorContext(ctx, "database_management_failed", "status", "failed")
-		writeError(w, http.StatusInternalServerError, "internal error")
+		httpjson.Error(w, http.StatusInternalServerError, "internal error")
 	}
 }

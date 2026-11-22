@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/wafhr/IF3110_K01-13/internal/uuid"
 )
 
 // MigrationState menunjukkan posisi aktif berdasarkan history commit lengkap.
@@ -22,7 +24,7 @@ type MigrationState struct {
 // disembunyikan UI dan commit lewat alias registrasi pada target fisik yang sama.
 // Attempt gagal/running tidak mengubah posisi migration.
 func BuildMigrationState(databaseID string, history []Execution) (MigrationState, error) {
-	if !validUUID(databaseID) {
+	if !uuid.Valid(databaseID) {
 		return MigrationState{}, ErrInvalidMigration
 	}
 	committed := make([]Execution, 0, len(history))
@@ -46,7 +48,7 @@ func BuildMigrationState(databaseID string, history []Execution) (MigrationState
 	var previousSequence int64
 	for _, execution := range committed {
 		key := strings.ToLower(execution.ID)
-		if !validUUID(execution.ID) || !validUUID(execution.DatabaseID) ||
+		if !uuid.Valid(execution.ID) || !uuid.Valid(execution.DatabaseID) ||
 			execution.Sequence <= previousSequence || seenExecutions[key] {
 			return MigrationState{}, ErrInvalidHistory
 		}
@@ -64,7 +66,7 @@ func BuildMigrationState(databaseID string, history []Execution) (MigrationState
 				continue
 			}
 			seenLegacy[*execution.LegacyVersion] = execution
-		} else if !validUUID(execution.MigrationID) || execution.Revision < 1 {
+		} else if !uuid.Valid(execution.MigrationID) || execution.Revision < 1 {
 			return MigrationState{}, ErrInvalidHistory
 		}
 		switch execution.Action {
@@ -122,7 +124,7 @@ func PlanAction(databaseID string, history []Execution, definition Migration, re
 }
 
 func (state MigrationState) actionRevision(definition Migration, action Action) (int64, string, error) {
-	if !validUUID(definition.ID) || !strings.EqualFold(definition.DatabaseID, state.DatabaseID) {
+	if !uuid.Valid(definition.ID) || !strings.EqualFold(definition.DatabaseID, state.DatabaseID) {
 		return 0, "", ErrInvalidMigration
 	}
 	switch action {

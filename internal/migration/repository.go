@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
+	"github.com/wafhr/IF3110_K01-13/internal/uuid"
 )
 
 //go:embed schema.sql
@@ -53,10 +54,10 @@ func (r *Repository) Create(ctx context.Context, databaseID, actorID, name strin
 	ctx, activity := telemetry.StartActivity(ctx, "migration_define", slog.String("database_id", databaseID), slog.String("actor", actorID))
 	defer activity.End(&activityErr)
 
-	if !validUUID(databaseID) {
+	if !uuid.Valid(databaseID) {
 		return Migration{}, Revision{}, ErrNotFound
 	}
-	if !validUUID(actorID) {
+	if !uuid.Valid(actorID) {
 		return Migration{}, Revision{}, ErrInvalidMigration
 	}
 	name, err := NormalizeMigrationName(name)
@@ -101,7 +102,7 @@ func (r *Repository) Get(ctx context.Context, databaseID, migrationID string) (r
 	ctx, activity := telemetry.StartActivity(ctx, "migration_definition_read", slog.String("database_id", databaseID), slog.String("migration_id", migrationID))
 	defer activity.End(&activityErr)
 
-	if !validUUID(databaseID) || !validUUID(migrationID) {
+	if !uuid.Valid(databaseID) || !uuid.Valid(migrationID) {
 		return Migration{}, ErrNotFound
 	}
 	definition, err := scanDefinition(r.db.QueryRowContext(ctx, `SELECT `+definitionColumns+`
@@ -113,7 +114,7 @@ func (r *Repository) List(ctx context.Context, databaseID string) (result []Migr
 	ctx, activity := telemetry.StartActivity(ctx, "migration_definitions_list", slog.String("database_id", databaseID))
 	defer activity.End(&activityErr)
 
-	if !validUUID(databaseID) {
+	if !uuid.Valid(databaseID) {
 		return nil, ErrNotFound
 	}
 	rows, err := r.db.QueryContext(ctx, `SELECT `+definitionColumns+`
@@ -140,7 +141,7 @@ func (r *Repository) GetRevision(ctx context.Context, databaseID, migrationID st
 	ctx, activity := telemetry.StartActivity(ctx, "migration_revision_read", slog.String("database_id", databaseID), slog.String("migration_id", migrationID), slog.Int64("revision", number))
 	defer activity.End(&activityErr)
 
-	if !validUUID(databaseID) || !validUUID(migrationID) {
+	if !uuid.Valid(databaseID) || !uuid.Valid(migrationID) {
 		return Revision{}, ErrNotFound
 	}
 	if number < 1 {
@@ -159,10 +160,10 @@ func (r *Repository) Revise(ctx context.Context, databaseID, migrationID, actorI
 	ctx, activity := telemetry.StartActivity(ctx, "migration_revise", slog.String("database_id", databaseID), slog.String("migration_id", migrationID), slog.String("actor", actorID))
 	defer activity.End(&activityErr)
 
-	if !validUUID(databaseID) || !validUUID(migrationID) {
+	if !uuid.Valid(databaseID) || !uuid.Valid(migrationID) {
 		return Migration{}, Revision{}, ErrNotFound
 	}
-	if !validUUID(actorID) || expectedRevision < 1 {
+	if !uuid.Valid(actorID) || expectedRevision < 1 {
 		return Migration{}, Revision{}, ErrInvalidMigration
 	}
 	name, err := NormalizeMigrationName(name)
@@ -212,7 +213,7 @@ func (r *Repository) Revise(ctx context.Context, databaseID, migrationID, actorI
 // mencoba menjalankan SQL target. Lock definisinya digunakan bersama Revise untuk
 // menolak revisi usang dan menjaga immutability meskipun eksekusi kemudian gagal.
 func (r *Repository) FreezeRevision(ctx context.Context, databaseID, migrationID string, number int64) error {
-	if !validUUID(databaseID) || !validUUID(migrationID) {
+	if !uuid.Valid(databaseID) || !uuid.Valid(migrationID) {
 		return ErrNotFound
 	}
 	if number < 1 {

@@ -2,7 +2,6 @@ package migration
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wafhr/IF3110_K01-13/internal/access"
+	"github.com/wafhr/IF3110_K01-13/internal/uuid"
 )
 
 type WorkflowStatus string
@@ -55,15 +55,6 @@ func NewWorkflowService(db *sql.DB) (*WorkflowService, error) {
 	return &WorkflowService{db: db}, nil
 }
 
-func workflowID() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	b[6], b[8] = (b[6]&0x0f)|0x40, (b[8]&0x3f)|0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[:4], b[4:6], b[6:8], b[8:10], b[10:]), nil
-}
-
 func planSnapshot(plan ActionPlan) ([]byte, string, error) {
 	data, err := json.Marshal(plan)
 	if err != nil {
@@ -74,7 +65,7 @@ func planSnapshot(plan ActionPlan) ([]byte, string, error) {
 }
 
 func (s *WorkflowService) SubmitReview(ctx context.Context, actorID string, plan ActionPlan) (Workflow, error) {
-	if !validUUID(actorID) || !validUUID(plan.DatabaseID) || !validUUID(plan.MigrationID) || plan.Revision < 1 ||
+	if !uuid.Valid(actorID) || !uuid.Valid(plan.DatabaseID) || !uuid.Valid(plan.MigrationID) || plan.Revision < 1 ||
 		(plan.Action != Apply && plan.Action != Rollback && plan.Action != Forward) {
 		return Workflow{}, ErrInvalidMigration
 	}
@@ -82,7 +73,7 @@ func (s *WorkflowService) SubmitReview(ctx context.Context, actorID string, plan
 	if err != nil {
 		return Workflow{}, fmt.Errorf("encode approval snapshot: %w", err)
 	}
-	id, err := workflowID()
+	id, err := uuid.New()
 	if err != nil {
 		return Workflow{}, fmt.Errorf("create workflow ID: %w", err)
 	}
@@ -119,7 +110,7 @@ func (s *WorkflowService) SubmitReview(ctx context.Context, actorID string, plan
 }
 
 func (s *WorkflowService) GetWorkflow(ctx context.Context, actorID, databaseID, id string) (Workflow, error) {
-	if !validUUID(actorID) || !validUUID(databaseID) || !validUUID(id) {
+	if !uuid.Valid(actorID) || !uuid.Valid(databaseID) || !uuid.Valid(id) {
 		return Workflow{}, ErrNotFound
 	}
 	var result Workflow
@@ -199,7 +190,7 @@ func (s *WorkflowService) GetWorkflow(ctx context.Context, actorID, databaseID, 
 // GetLatestWorkflow reports the newest review request, or the current
 // definition as a draft when no review exists or the definition has advanced.
 func (s *WorkflowService) GetLatestWorkflow(ctx context.Context, actorID, databaseID, migrationID string) (Workflow, error) {
-	if !validUUID(actorID) || !validUUID(databaseID) || !validUUID(migrationID) {
+	if !uuid.Valid(actorID) || !uuid.Valid(databaseID) || !uuid.Valid(migrationID) {
 		return Workflow{}, ErrNotFound
 	}
 	var id string
@@ -227,7 +218,7 @@ func (s *WorkflowService) GetLatestWorkflow(ctx context.Context, actorID, databa
 }
 
 func (s *WorkflowService) Approve(ctx context.Context, actorID, databaseID, workflowID string) (Workflow, error) {
-	if !validUUID(actorID) || !validUUID(databaseID) || !validUUID(workflowID) {
+	if !uuid.Valid(actorID) || !uuid.Valid(databaseID) || !uuid.Valid(workflowID) {
 		return Workflow{}, ErrNotFound
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -246,7 +237,9 @@ func (s *WorkflowService) Approve(ctx context.Context, actorID, databaseID, work
 		}
 		return Workflow{}, workflowStorage("lock workflow for approval", err)
 	}
-	if workflowRevision != currentRevision { return Workflow{}, ErrApprovalRequired }
+	if workflowRevision != currentRevision {
+		return Workflow{}, ErrApprovalRequired
+	}
 	if err := tx.QueryRowContext(ctx, `SELECT epoch FROM access_database_approval_epochs WHERE database_id = $1 FOR SHARE`, databaseID).Scan(&epoch); err != nil {
 		return Workflow{}, workflowStorage("read approval policy epoch", err)
 	}
@@ -301,7 +294,7 @@ func (s *WorkflowService) Approve(ctx context.Context, actorID, databaseID, work
 }
 
 func (s *WorkflowService) ValidateApproval(ctx context.Context, request ExecutionRequest) error {
-	if !validUUID(request.ApprovalID) {
+	if !uuid.Valid(request.ApprovalID) {
 		return ErrApprovalRequired
 	}
 	var data []byte
