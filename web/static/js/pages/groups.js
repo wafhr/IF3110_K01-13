@@ -103,9 +103,11 @@ export async function groupsPage() {
   const group = groups.find((g) => g.id === selectedID);
   let detail = panel('Group details', '<p class="muted">Select a group to manage its access.</p>');
   if (group) {
+    // Request paths use the ID returned by the API, never the raw query value.
+    const base = `/admin/groups/${encodeURIComponent(group.id)}`;
     const [{ members = [] }, { databases = [] }] = await Promise.all([
-      api(`/admin/groups/${selectedID}/members`),
-      api(`/admin/groups/${selectedID}/databases`),
+      api(`${base}/members`),
+      api(`${base}/databases`),
     ]);
     detail = groupDetail(group, users, members, databases, registered);
   }
@@ -140,5 +142,5 @@ export async function groupsPage() {
       run(() => api(`/admin/groups/${button.dataset.id}`, 'DELETE'));
     };
   });
-  if (selectedID) bindGroup(selectedID);
+  if (group) bindGroup(group.id);
 }
