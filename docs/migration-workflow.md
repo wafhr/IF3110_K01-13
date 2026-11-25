@@ -87,4 +87,20 @@ The API returns `202` with a job ID. The worker repeats all approval checks; app
 
 ## Verification
 
-Unit tests cover stable snapshot hashing and unique workflow IDs. PostgreSQL integration coverage exercises leader assignment, view-only group approval, workflow state changes, action submission through the queue, and invalidation after a grant changes.
+Unit tests run against a stubbed platform database and cover 88% of the statements in `workflow.go`, `http_workflow.go`, and `internal/access/leader.go`.
+
+| Test file | Covers |
+|---|---|
+| `internal/migration/workflow_service_test.go` | Review submission stores the snapshot, its hash, and the current policy epoch, and is refused when no group has access. Status reads report `approved` only when every current leader approved, and report `draft` after a revision or access policy change. A leader of several groups approves all of them at once, while non-leaders and stale reviews are rejected. Approval validation rejects a changed plan or history position, a corrupt snapshot, a policy or revision change, and a missing leader approval. Storage failures are reported without their details |
+| `internal/migration/http_workflow_test.go` | The review, workflow, and approval endpoints through the application routes, including session, CSRF, and permission checks. View Only members read workflows and their leaders approve; View Only members cannot submit reviews (`403`); non-leaders and users without a grant get `403`; stale reviews get `409`; unknown workflows get `404`; and the endpoints return `503` without a workflow provider |
+| `internal/migration/workflow_test.go` | Stable snapshot hashing that binds the action |
+| `internal/access/leader_test.go` | Leader assignment requires an active member and stays while the group holds a grant |
+
+The PostgreSQL integration test `tests/migration_workflow_test.go` exercises the same flow on a real database. It assigns leaders, rejects a leader who is not a member, collects approvals from an editor group and a View Only group, and submits the approved action to the queue. It also checks that removing a grant or revising the definition invalidates the approval, and that a fresh review can be approved again.
+
+Run them with:
+
+```sh
+go test ./internal/migration ./internal/access -run 'Workflow|Review|Approv|Leader'
+go test -tags=integration -count=1 ./tests -run '^TestMigrationWorkflow'
+```
