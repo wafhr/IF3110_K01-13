@@ -205,6 +205,32 @@ terakhir target. Saat job sebelumnya commit, rencana job lain pada target yang
 sama dapat menjadi kedaluwarsa saat worker memvalidasi ulang. Kedua run tidak
 menjatuhkan iterasi k6, dan semua job yang diterima mencapai status akhir.
 
+## Bonus Security: SAST dengan CodeQL
+
+[Workflow CodeQL](.github/workflows/codeql.yml) menganalisis repository setiap
+push dan pull request ke `main` atau `develop`, setiap Senin, dan saat
+dijalankan manual dari tab **Actions**. Hasilnya tampil di **Security → Code
+scanning**. Ketiga bahasa memakai query suite `security-extended`.
+
+| Bahasa | Cakupan |
+| --- | --- |
+| Go | 69 file non-test di `cmd/`, `internal/`, dan `web/` (dibangun dengan `go build ./...`) |
+| JavaScript | 10 modul SPA di `web/static/js/`, `web/index.html`, dan `k6/stress.js` |
+| GitHub Actions | Workflow di `.github/workflows/` |
+
+Scan CodeQL 2.27.6 dengan konfigurasi yang sama menghasilkan dua temuan:
+
+| Rule | Severity | Lokasi | Keputusan |
+| --- | --- | --- | --- |
+| `go/sql-injection` | High | `internal/migration/explain.go:69` | Risiko diterima. Preview `EXPLAIN` memang menjalankan SQL milik editor, dengan syarat View + Edit dan CSRF, satu statement, transaksi read-only atau selalu di-rollback, serta timeout 5 detik. Di GitHub, alert ini di-dismiss dengan alasan *Won't fix* |
+| `js/client-side-request-forgery` | Medium | `web/static/js/pages/groups.js:107` | Diperbaiki di `451e33d`. Path request memakai ID group dari API yang di-encode, bukan nilai mentah `?group=`. Scan ulang tidak lagi melaporkan temuan JavaScript |
+
+Analisis GitHub Actions tidak menghasilkan temuan. Hasil yang bersih atau
+sedikit tidak berarti aplikasi pasti aman, karena CodeQL hanya mendeteksi pola
+yang dicakup query-nya. Rincian alur data, dampak, alasan keputusan, teks
+dismissal, dan cara menjalankan scan secara lokal ada di
+[panduan CodeQL](docs/security-codeql.md).
+
 ## Test
 
 Unit test (`*_test.go`) berada satu folder dengan package yang diuji.
@@ -241,6 +267,7 @@ go test -tags=integration -count=1 ./tests -run '^TestMigration.*Integration$'
 ## Struktur repo
 
 ```text
+.github/workflows/          workflow CodeQL code scanning
 cmd/server/                 entry point dan wiring aplikasi
 cmd/worker/                 entry point worker eksekusi migration
 internal/access/            autentikasi, session, group, dan authorization
