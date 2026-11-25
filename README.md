@@ -158,11 +158,15 @@ Analisis GitHub Actions tidak menghasilkan temuan. Hasil yang bersih atau sediki
 
 Unit test (`*_test.go`) berada satu folder dengan package yang diuji. Folder `tests/` hanya berisi integration test.
 
-Jalankan unit dan test tanpa database:
+### Unit test
+
+Unit test tidak membutuhkan database. Dependency di luar unit yang diuji, seperti database platform, database target, dan antrean, diganti dengan stub.
 
 ```sh
 go test ./...
 ```
+
+### Integration test
 
 Integration test menggunakan PostgreSQL dan MySQL disposable. Jalankan service test dan test (perintah environment berikut untuk PowerShell):
 
@@ -181,6 +185,48 @@ Untuk menjalankan integration test rollback/forward dan history PostgreSQL secar
 ```powershell
 go test -tags=integration -count=1 ./tests -run '^TestMigration.*Integration$'
 ```
+
+### Mengukur coverage
+
+Coverage unit test seluruh package:
+
+```sh
+go test "-coverprofile=coverage.out" ./...
+go tool cover -func=coverage.out
+go tool cover -html=coverage.out
+```
+
+Perintah kedua mencetak coverage tiap fungsi beserta totalnya, sedangkan perintah ketiga membuka laporan HTML per baris. Tanda kutip pada argumen `-coverprofile` dan `-coverpkg` diperlukan di PowerShell. File `*.out` sudah diabaikan oleh Git.
+
+Coverage integration test dihitung terhadap package aplikasi melalui `-coverpkg`, karena kode yang diuji berada di luar folder `tests/`. Jalankan setelah service test dan environment di atas tersedia:
+
+```sh
+go test -tags=integration -count=1 "-coverpkg=./internal/...,./web/..." "-coverprofile=integration.out" ./tests
+go tool cover -func=integration.out
+```
+
+### Cakupan test per modul
+
+Coverage unit test di bawah diukur pada 25 November 2026 dari `develop` (`802c8a7`). Persentase adalah statement yang dijalankan unit test, dihitung per kelompok file dari `coverage.out`. Total seluruh repository adalah **65,5%**.
+
+| Modul | Unit test | Coverage unit | Integration test (`tests/`) |
+| --- | --- | ---: | --- |
+| 1. Frontend SPA | `web/handler_test.go`: shell SPA, aset statis, dan redirect halaman terlindungi ke login | 93,3% (handler Go) | Rute halaman SPA dan pembatasan halaman admin di `database_management_test.go` |
+| 2. Rollback/forward dan history | `internal/migration`: `model`, `repository`, `rollback`, `history`, `service`, `http`, `order_error`, `sqlcontrol_mysql` | 86,1% | `migration_rollback_test.go` (4 test), `migration_history_test.go` (7), `mysql_migration_test.go` (1) |
+| 3. Workflow dan approval | `internal/migration/workflow_service_test.go`, `http_workflow_test.go`, `workflow_test.go`, `internal/access/leader_test.go` | 88,3% | `migration_workflow_test.go` (1) |
+| 4. Queue dan worker | `internal/job`: `model`, `repository`, `service`, `http`, `attempt`; `internal/worker`: `worker`, `executor`, `batch`, `checkpoint`, `compensation`, `lock`, `retry`, `mysql` | 83,0% | `job_queue_test.go`, `job_api_test.go`, `migration_worker_test.go`, `migration_batch_test.go`, `migration_recovery_test.go`, `migration_batch_benchmark_test.go` (dengan `BATCH_BENCHMARK=1`) |
+| 5. Logging dan tracing | `internal/telemetry`: `logger`, `tracing`, `http`, `sql`, `redaction` | 84,8% | `telemetry_test.go` (4) |
+| Access control (Milestone 1) | `internal/access`: `authorization`, `session`, `service`, `http`, `password`, `validate` | 72,1% | `access_control_test.go` (3) |
+| Database management dan viewer (Milestone 1) | `internal/database`, `internal/database/http` | 71,3% | `database_management_test.go`, `mysql_test.go` |
+| Preview `EXPLAIN` dan schema diff | `internal/migration/schema_diff_test.go` | 32,0% | `query_plan_test.go` |
+
+Unit test mencakup alur berhasil, kegagalan, dan penolakan akses sesuai kebutuhan fitur masing-masing. Untuk modul 3, contohnya meliputi approval semua leader termasuk group View Only, approval yang kedaluwarsa setelah revisi atau perubahan akses, serta penolakan review oleh user View Only dan approval oleh non-leader.
+
+Beberapa bagian memang hanya diuji melalui integration test, sehingga menurunkan total coverage unit:
+
+- Driver target PostgreSQL dan MySQL (`internal/targetdb`, 2,1%) membutuhkan database sungguhan.
+- Entry point `cmd/server` dan `cmd/worker` (0%) hanya merakit dependency.
+- Logika JavaScript SPA belum memiliki test otomatis. API yang dipanggil SPA diuji melalui unit dan integration test backend.
 
 ## Struktur repo
 
