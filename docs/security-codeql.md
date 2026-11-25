@@ -53,8 +53,8 @@ above), High (7.0–8.9), Medium (4.0–6.9), or Low (below 4.0).
 
 | # | Rule | Severity | Location | Decision | Status |
 |---|---|---|---|---|---|
-| 1 | `go/sql-injection` (CWE-89) | High (8.8) | `internal/migration/explain.go:69` | Risk accepted | Open; to be dismissed as *Won't fix* |
-| 2 | `js/client-side-request-forgery` (CWE-918) | Medium (5.0) | `web/static/js/core.js:29`, source `web/static/js/pages/groups.js:102` | Fix | Open; fix and rescan pending |
+| 1 | `go/sql-injection` (CWE-89) | High (8.8) | `internal/migration/explain.go:69` | Risk accepted | Still reported by the rescan; dismiss on GitHub as *Won't fix* (see finding 1) |
+| 2 | `js/client-side-request-forgery` (CWE-918) | Medium (5.0) | `web/static/js/core.js:29`, source `web/static/js/pages/groups.js:102` | Fix | Fixed in `451e33d`; the rescan reports no JavaScript results |
 
 The GitHub Actions analysis reported no results.
 
@@ -106,13 +106,34 @@ migration editor already does:
 [query plan preview guide](migrations.md#query-plan-preview-explain) documents
 the behavior.
 
+**Dismissal on GitHub.** Once the alert appears in **Security → Code
+scanning**, dismiss it with the reason *Won't fix* and this comment (232 of
+the 280 allowed characters):
+
+```text
+By design: EXPLAIN preview plans the editor's own SQL. Needs View+Edit and CSRF; one prepared statement; read-only or always rolled-back tx; 5s timeout. The same permission already authors migration SQL. See docs/security-codeql.md.
+```
+
+A user with write access can also dismiss it through the API, where
+`ALERT_NUMBER` is the number shown on the alert page:
+
+```sh
+gh api -X PATCH repos/wafhr/IF3110_K01-13/code-scanning/alerts/ALERT_NUMBER \
+  -f state=dismissed -f dismissed_reason="won't fix" \
+  -f dismissed_comment="By design: EXPLAIN preview plans the editor's own SQL. Needs View+Edit and CSRF; one prepared statement; read-only or always rolled-back tx; 5s timeout. The same permission already authors migration SQL. See docs/security-codeql.md."
+```
+
+The rule stays enabled, so a new SQL injection elsewhere still raises a new
+alert.
+
 ### 2. `js/client-side-request-forgery`: request URL depends on a user-provided value
 
 **Location.** The sink is the `fetch` call in `web/static/js/core.js:29`. The
 source is the `group` query parameter read from `location.search` in
-`web/static/js/pages/groups.js:102`. That value is placed in request paths
-without encoding at `groups.js:107` (`/admin/groups/${selectedID}/members`) and
-`groups.js:108` (`/admin/groups/${selectedID}/databases`).
+`web/static/js/pages/groups.js:102`. Before the fix, that value was placed in
+request paths without encoding at `groups.js:107`
+(`/admin/groups/${selectedID}/members`) and `groups.js:108`
+(`/admin/groups/${selectedID}/databases`).
 
 **Potential impact.** A crafted link such as
 `/manage/groups?group=../users` could make a Platform Admin's browser send
@@ -121,14 +142,49 @@ two requests are `GET` without a body. The page's state-changing requests
 already encode the ID (`groups.js:76`). The impact would therefore be limited
 to reading data that the admin can already see.
 
-**Current mitigation.** The requests are sent only when `selectedID` exactly
-matches the ID of a group returned by `/admin/groups` (`groups.js:103-105`).
-Today no crafted value reaches `fetch`. CodeQL does not treat that comparison
-as a sanitizer, and the protection would disappear if the check changed.
+**Mitigation before the fix.** The requests were sent only when `selectedID`
+exactly matched the ID of a group returned by `/admin/groups`
+(`groups.js:103-105`), so no crafted value reached `fetch`. CodeQL does not
+treat that comparison as a sanitizer, and the protection would have
+disappeared if the check changed.
 
-**Decision: fix.** The pattern is valid even though it cannot be exploited
-today. Build both paths from the matched `group.id` with `encodeURIComponent`,
-as `bindGroup` already does. Then rescan to confirm that the alert closes.
+**Decision: fix.** The pattern is valid even though it could not be exploited.
+
+**Fix.** Commit `451e33d` builds both paths from the matched `group.id` with
+`encodeURIComponent`, as `bindGroup` already does, and binds the group actions
+only when a group matched. The page was checked in a browser against a stubbed
+API:
+
+| URL | Requests after the group, user, and database list calls |
+|---|---|
+| `/manage/groups?group=<existing ID>` | `GET .../members` and `GET .../databases` with the encoded ID; *Save leader* sends `PUT .../leader` |
+| `/manage/groups` | The same two requests for the first group |
+| `/manage/groups?group=../users` | None; the page shows "Select a group" |
+
+## Fix and rescan
+
+The rescan ran on commit `451e33d` with the same CodeQL version, commands, and
+query suites as the triage scan.
+
+| Language | Results before | Results after |
+|---|---|---|
+| Go | 1 (`go/sql-injection`) | 1 (`go/sql-injection`, risk accepted) |
+| JavaScript | 1 (`js/client-side-request-forgery`) | 0 |
+| GitHub Actions | 0 | 0 |
+
+## Evidence on GitHub
+
+After this branch is pushed and a pull request to `develop` or `main` is
+opened, or after it is merged, the workflow uploads the results:
+
+- **Actions → CodeQL** shows a successful run for the analyzed commit, with
+  one job per language.
+- **Security → Code scanning** (tool: CodeQL) lists the `go/sql-injection`
+  alert, which is then dismissed as described in finding 1. The JavaScript
+  alert does not appear, because the fix is in the analyzed code. If an
+  earlier commit was analyzed, the alert appears as closed.
+
+Alert pages show the rule, severity, location, and data flow described above.
 
 ## Limitations
 
