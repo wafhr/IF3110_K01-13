@@ -114,6 +114,97 @@ Jika port terpakai, atur `OBS_APP_PORT` atau `OBS_GRAFANA_PORT` sebelum menjalan
 Hentikan stack dengan `docker compose -f compose.observability.yaml down`.
 Volume demo tetap tersedia untuk sesi berikutnya.
 
+## Bonus Stress Testing dengan k6
+
+Dari root repository, jalankan kedua skenario secara berurutan dengan Docker
+aktif. Tiap skenario memakai server, worker, dan PostgreSQL sementara pada
+jaringan Docker tersendiri. Perintah `down` menghapus data uji sementara agar
+skenario berikutnya mulai dari kondisi awal yang sama.
+
+```sh
+docker compose -f compose.k6.yaml run --build --rm -e STRESS_TARGETS=same k6
+docker compose -f compose.k6.yaml down
+docker compose -f compose.k6.yaml run --build --rm -e STRESS_TARGETS=different k6
+docker compose -f compose.k6.yaml down
+```
+
+[Skrip k6](k6/stress.js) mendaftarkan dua database target, mengatur grant
+dan leader grup, dan membuat definisi migration melalui API. Saat beban
+berjalan, pengguna virtual membaca data tabel pada kedua target dan
+mengirim job secara bersamaan. Setiap job ditinjau dan disetujui sebelum
+pengajuan. Mode `same` mengarahkan seluruh job ke satu target, sedangkan
+`different` membagi job bergantian ke dua target. Setiap migration
+memperbarui satu baris dan menambah waktu kerja SQL sintetis 350 ms.
+
+| Fase (12 detik per fase) | Target baca tabel per detik | Target pengajuan job per detik |
+| --- | ---: | ---: |
+| Normal | 10 | 1 |
+| Menengah | 30 | 4 |
+| Puncak | 60 | 8 |
+| Pemulihan | 10 | 1 |
+
+Ambang tiap fase adalah **p95 respons API < 500 ms** dan **error rate < 1%**.
+Keduanya dihitung dari request pembacaan tabel dan pengajuan job. Request
+review, approval, dan pemantauan status tetap menghasilkan beban selama
+pengujian. k6 mencetak ringkasan JSON dan memberikan exit code nonzero saat
+ada ambang yang terlewati.
+
+K6 memantau job yang diterima hingga selesai atau sampai batas pemantauan
+15 detik. Waktu antrean dihitung dari waktu job dibuat sampai mulai dikerjakan.
+Durasi migration dihitung dari waktu mulai hingga selesai untuk job yang
+`succeeded`. Jumlah diterima, sukses, gagal, dan belum selesai dikelompokkan
+berdasarkan fase pengajuan. Throughput job sukses dihitung berdasarkan waktu
+job selesai, termasuk penyelesaian sesudah fase pemulihan yang dilaporkan
+sebagai `drain`.
+
+### Hasil pengujian lokal
+
+Pengujian dijalankan berurutan di Docker Desktop (24 vCPU, 7.61 GiB RAM),
+dengan PostgreSQL 18 di penyimpanan sementara dan satu worker dengan
+concurrency 4. Kedua run memulai dari database kosong.
+
+| Skenario | Fase | p50 API (ms) | p95 API (ms) | Request/s | Error API |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Satu target | Normal | 17.3 | 43.1 | 11.17 | 0.00% |
+| Satu target | Menengah | 17.0 | 39.5 | 34.17 | 3.17% |
+| Satu target | Puncak | 17.5 | 40.9 | 68.17 | 0.98% |
+| Satu target | Pemulihan | 16.8 | 38.5 | 11.08 | 0.00% |
+| Dua target | Normal | 19.0 | 48.3 | 11.17 | 0.00% |
+| Dua target | Menengah | 17.6 | 40.3 | 34.08 | 5.13% |
+| Dua target | Puncak | 18.1 | 41.5 | 68.08 | 3.18% |
+| Dua target | Pemulihan | 17.5 | 38.8 | 11.00 | 0.00% |
+
+| Skenario | Fase | Diterima / sukses / gagal / belum selesai | p95 antrean (ms) | p95 durasi migration sukses (ms) | Job sukses/s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Satu target | Normal | 13 / 13 / 0 / 0 | 82.6 | 429.8 | 1.00 |
+| Satu target | Menengah | 36 / 17 / 19 / 0 | 236.0 | 424.0 | 1.42 |
+| Satu target | Puncak | 89 / 20 / 69 / 0 | 386.8 | 430.0 | 1.67 |
+| Satu target | Pemulihan | 13 / 12 / 1 / 0 | 192.4 | 422.4 | 1.00 |
+| Dua target | Normal | 13 / 13 / 0 / 0 | 34.0 | 436.8 | 1.00 |
+| Dua target | Menengah | 28 / 26 / 2 / 0 | 50.3 | 428.8 | 2.17 |
+| Dua target | Puncak | 70 / 34 / 36 / 0 | 240.1 | 444.4 | 2.75 |
+| Dua target | Pemulihan | 12 / 11 / 1 / 0 | 140.9 | 427.0 | 1.08 |
+
+- **Normal.** Semua job pada kedua skenario sukses. Beban ini dipakai
+  sebagai pembanding untuk fase berikutnya.
+- **Menengah.** Ambang error API terlewati pada kedua skenario. Dua target
+  menyelesaikan 2.17 job per detik, dengan p95 antrean 50.3 ms. Pada satu
+  target, hasilnya 1.42 job per detik dan 236.0 ms.
+- **Puncak.** Dua target mencapai 2.75 job sukses per detik dan p95 antrean
+  240.1 ms, dibanding 1.67 job per detik dan 386.8 ms pada satu target.
+  Error API dua target masih melewati ambang. Seluruh p95 respons API
+  di kedua run tetap di bawah ambang 500 ms.
+- **Pemulihan.** Error API kembali ke 0%, tetapi p95 antrean masih lebih
+  tinggi daripada fase normal. Satu job pada skenario satu target selesai
+  setelah periode 12 detik pemulihan berakhir.
+
+Pada kedua run, seluruh error API yang terukur terjadi saat pengajuan job.
+Database platform mencatat `migration conflict` untuk 89 job gagal pada
+satu target dan 39 pada dua target. Approval mengikat rencana ke riwayat
+terakhir target. Saat job sebelumnya commit, rencana job lain pada target yang
+sama dapat menjadi kedaluwarsa saat worker memvalidasi ulang. Kedua run tidak
+menjatuhkan iterasi k6, dan semua job yang diterima mencapai status akhir.
+
 ## Test
 
 Unit test (`*_test.go`) berada satu folder dengan package yang diuji.
