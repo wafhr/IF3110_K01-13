@@ -134,12 +134,18 @@ func (w *Worker) process(ctx context.Context, claimed job.Job) {
 		}
 	}
 	run := w.runner.Run
+	action := string(claimed.Request.Plan.Action)
 	if claimed.Operation == job.Compensate {
 		run = w.runner.Compensate
+		action = string(job.Compensate)
 	}
 	var execution migration.Execution
 	runErr := TraceAttempt(attemptCtx, claimed.Request, claimed.ID, claimed.Attempts, func(ctx context.Context) (err error) {
+		metrics := telemetry.MetricsFromContext(ctx)
+		metrics.ObserveQueueWait(ctx, claimed.QueueWaitSeconds)
+		started := time.Now()
 		execution, err = run(ctx, claimed.Request, report)
+		metrics.ObserveMigration(ctx, action, time.Since(started), err)
 		return err
 	})
 	interruption := context.Cause(attemptCtx)
@@ -193,6 +199,9 @@ func (w *Worker) settle(ctx context.Context, claimed job.Job, execution migratio
 		decision := w.config.Retry.Decide(runErr, claimed.Attempts)
 		if decision.Retry {
 			err = w.queue.Retry(ctx, claimed.ID, w.config.ID, decision.Reason, decision.Delay)
+			if err == nil {
+				telemetry.MetricsFromContext(ctx).RecordRetry()
+			}
 			slog.WarnContext(ctx, "job_retry_scheduled", "status", "failed", "reason", decision.Reason, "retry_delay_ms", decision.Delay.Milliseconds())
 		} else {
 			err = w.queue.Fail(ctx, claimed.ID, w.config.ID, decision.Reason, committed)

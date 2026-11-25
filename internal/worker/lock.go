@@ -25,6 +25,12 @@ func lockDatabase(ctx context.Context, conn *sql.Conn, dbms database.DBMS, datab
 	}
 	lockCtx, activity := telemetry.StartActivity(ctx, "migration_lock_acquire", slog.String("database_id", databaseID))
 	defer activity.End(&lockErr)
+	started := time.Now()
+	defer func() {
+		if lockErr == nil {
+			telemetry.MetricsFromContext(lockCtx).ObserveLockWait(lockCtx, time.Since(started))
+		}
+	}()
 	if dbms == database.MySQL {
 		return lockMySQL(ctx, lockCtx, conn, databaseID)
 	}

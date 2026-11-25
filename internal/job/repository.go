@@ -88,9 +88,11 @@ func (r *Repository) Claim(ctx context.Context, workerID string, lease time.Dura
 	if workerID == "" || lease < time.Millisecond {
 		return Job{}, errors.New("claim requires a worker ID and a lease of at least one millisecond")
 	}
+	var waitSeconds float64
 	job, err := scanJob(r.db.QueryRowContext(ctx, `
 		WITH candidate AS (
-			SELECT next.id
+			SELECT next.id, GREATEST(EXTRACT(EPOCH FROM (now() - CASE
+                WHEN next.status = 'running' THEN next.lease_expires_at ELSE next.available_at END)), 0)::double precision AS wait_seconds
 			FROM migration_jobs next
 			WHERE ((next.status = 'pending' AND next.available_at <= now())
 			    OR (next.status = 'running' AND next.lease_expires_at <= now()))
@@ -114,11 +116,36 @@ func (r *Repository) Claim(ctx context.Context, workerID string, lease time.Dura
 		    started_at = COALESCE(j.started_at, now()), updated_at = now()
 		FROM candidate
 		WHERE j.id = candidate.id
-		RETURNING `+jobColumns, workerID, lease.Milliseconds()))
+		RETURNING `+jobColumns+`, candidate.wait_seconds`, workerID, lease.Milliseconds()), &waitSeconds)
+	job.QueueWaitSeconds = waitSeconds
 	if errors.Is(err, sql.ErrNoRows) {
 		return Job{}, ErrNoJob
 	}
 	return job, err
+}
+
+// CountByStatus membaca status persisten dari antrean bersama untuk setiap scrape.
+func (r *Repository) CountByStatus(ctx context.Context) (map[string]int64, error) {
+	counts := map[string]int64{
+		string(Pending): 0, string(Running): 0, string(Partial): 0, string(PartiallyReverted): 0,
+		string(Succeeded): 0, string(Reverted): 0, string(Failed): 0,
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT status, count(*) FROM migration_jobs GROUP BY status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status string
+		var count int64
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		if _, known := counts[status]; known {
+			counts[status] = count
+		}
+	}
+	return counts, rows.Err()
 }
 
 // Heartbeat extends the lease while the worker still owns the job.
@@ -338,14 +365,14 @@ func (r *Repository) ListAttempts(ctx context.Context, databaseID string, limit 
 
 type rowScanner interface{ Scan(...any) error }
 
-func scanJob(row rowScanner) (Job, error) {
+func scanJob(row rowScanner, extra ...any) (Job, error) {
 	var job Job
 	var payload []byte
 	var startedAt, finishedAt sql.NullTime
-	err := row.Scan(&job.ID, &payload, &job.Status, &job.Operation, &job.Attempts, &job.Progress.CommittedBatches,
+	dest := []any{&job.ID, &payload, &job.Status, &job.Operation, &job.Attempts, &job.Progress.CommittedBatches,
 		&job.Progress.CommittedRows, &job.Progress.TotalRows, &job.LastError, &job.AvailableAt, &job.CreatedAt,
-		&startedAt, &finishedAt)
-	if err != nil {
+		&startedAt, &finishedAt}
+	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return Job{}, err
 	}
 	if err := json.Unmarshal(payload, &job.Request); err != nil {

@@ -36,7 +36,7 @@ func (c *Connector) Open(ctx context.Context, settings database.ConnectionConfig
 	if err != nil {
 		return nil, database.ErrInvalidInput
 	}
-	db := sql.OpenDB(telemetry.SQLConnector(connector, "mysql", "target", settings.DatabaseName))
+	db := telemetry.OpenSQLPool(ctx, connector, "mysql", "target", settings.DatabaseName)
 	db.SetMaxOpenConns(5)
 	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(30 * time.Minute)

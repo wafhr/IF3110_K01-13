@@ -1,0 +1,57 @@
+extensions:
+  file_storage:
+    directory: /var/log/if3110/offsets
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+  filelog:
+    include: [/var/log/if3110/server.jsonl, /var/log/if3110/worker.jsonl]
+    start_at: beginning
+    storage: file_storage
+    retry_on_failure:
+      enabled: true
+    operators:
+      - type: json_parser
+        timestamp:
+          parse_from: attributes.time
+          layout_type: gotime
+          layout: '2006-01-02T15:04:05.999999999Z07:00'
+        severity:
+          parse_from: attributes.level
+      - type: trace_parser
+        if: 'attributes.trace_id != nil and attributes.span_id != nil'
+        trace_id:
+          parse_from: attributes.trace_id
+        span_id:
+          parse_from: attributes.span_id
+      - type: move
+        from: attributes.service
+        to: resource["service.name"]
+
+processors:
+  attributes/logs:
+    actions:
+      - {key: trace_id, action: delete}
+      - {key: span_id, action: delete}
+  batch:
+
+exporters:
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+  otlphttp/tempo:
+    endpoint: http://tempo:4318
+
+service:
+  extensions: [file_storage]
+  pipelines:
+    logs:
+      receivers: [filelog]
+      processors: [attributes/logs, batch]
+      exporters: [otlphttp/loki]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/tempo]

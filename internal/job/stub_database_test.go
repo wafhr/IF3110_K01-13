@@ -84,7 +84,11 @@ func (s *stubDatabase) Query(query string, args []driver.NamedValue) (driver.Row
 			if rule.err != nil {
 				return nil, rule.err
 			}
-			return &testsql.Rows{Names: jobColumnNames, Values: rule.rows}, nil
+			columns := jobColumnNames
+			if rule.fragment == jobClaim {
+				columns = append(append([]string(nil), columns...), "wait_seconds")
+			}
+			return &testsql.Rows{Names: columns, Values: rule.rows}, nil
 		}
 	}
 	return nil, fmt.Errorf("unexpected query: %s", query)
@@ -107,4 +111,3 @@ var jobColumnNames = []string{
 	"id", "payload", "status", "operation", "attempts", "committed_batches", "committed_rows",
 	"total_rows", "last_error", "available_at", "created_at", "started_at", "finished_at",
 }
-

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/wafhr/IF3110_K01-13/internal/job"
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 	"github.com/wafhr/IF3110_K01-13/internal/worker"
@@ -296,5 +298,65 @@ func TestTelemetryHTTPPanicPrivacyIntegration(t *testing.T) {
 	records := telemetryRecords(t, capture.logs.snapshot())
 	if len(records) != 1 || records[0]["error_type"] != "panic" || records[0]["status"] != "failed" {
 		t.Fatal("kegagalan HTTP tidak tercatat aman")
+	}
+}
+
+func TestTelemetryMetricsIntegration(t *testing.T) {
+	newTelemetryFixture(t)
+	f := newMigrationFixture(t)
+	f.seedBatchAccounts(t)
+	definition := f.createBatchMigration(t, "uji metrik batch",
+		"UPDATE batch_accounts SET balance_cents = balance_cents + 1 WHERE id BETWEEN $1 AND $2",
+		"UPDATE batch_accounts SET balance_cents = balance_cents - 1 WHERE id BETWEEN $1 AND $2")
+	traceID := "abcdef0123456789abcdef0123456789"
+	queued := f.queueAction(t, definition, migration.Apply, withTelemetryParent(traceID))
+
+	metrics := telemetry.NewMetrics()
+	metrics.RegisterJobCounts(f.jobs.CountByStatus)
+	scrape := func() string {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		request.Header.Set("Accept", "application/openmetrics-text;version=1.0.0")
+		response := httptest.NewRecorder()
+		metrics.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("scrape gagal: %s", response.Body.String())
+		}
+		return response.Body.String()
+	}
+	if body := scrape(); !strings.Contains(body, `if3110_migration_jobs{status="pending"} 1`) {
+		t.Fatal("job pending belum terlihat pada metrik antrean")
+	}
+
+	outages := &atomic.Int32{}
+	outages.Store(1)
+	runner := f.workerExecutor(t, outages)
+	done := f.processJobContext(t, metrics.Context(context.Background()), runner, queued, 15*time.Second)
+	if done.Status != job.Succeeded || done.Attempts != 2 {
+		t.Fatalf("job uji tidak sukses setelah retry: %s", done.Status)
+	}
+	rollback := f.queueAction(t, definition, migration.Rollback, withTelemetryParent(traceID))
+	reverted := f.processJobContext(t, metrics.Context(context.Background()), runner, rollback, 15*time.Second)
+	if reverted.Status != job.Succeeded {
+		t.Fatalf("rollback batch uji gagal: %s", reverted.Status)
+	}
+
+	body := scrape()
+	for _, sample := range []string{
+		`if3110_migration_jobs{status="pending"} 0`, `if3110_migration_jobs{status="succeeded"} 2`,
+		"if3110_migration_retries_total 1",
+		"if3110_migration_queue_wait_seconds_count 3", "if3110_migration_lock_wait_seconds_count 2",
+		`if3110_migration_duration_seconds_count{action="apply",outcome="failed"} 1`,
+		`if3110_migration_duration_seconds_count{action="apply",outcome="success"} 1`,
+		`if3110_migration_batches_total{operation="execute"} 5`, `if3110_migration_rows_total{operation="execute"} 5000`,
+		`if3110_migration_batches_total{operation="revert"} 5`, `if3110_migration_rows_total{operation="revert"} 5000`,
+		`trace_id="` + traceID + `"`,
+	} {
+		if !strings.Contains(body, sample) {
+			t.Errorf("hasil scrape tidak memuat %q", sample)
+		}
+	}
+	if strings.Contains(body, queued.ExecutionID) || strings.Contains(body, f.databaseID) || strings.Contains(body, f.actorID) {
+		t.Fatal("ID dengan kardinalitas tinggi muncul dalam metrik")
 	}
 }

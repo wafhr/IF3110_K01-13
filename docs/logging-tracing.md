@@ -5,7 +5,7 @@
 `cmd/server/main.go` installs the JSON logger before loading configuration, then
 initializes the OpenTelemetry provider before opening database connections.
 Application logs use stdout, one JSON object per line, with minimum level INFO
-and UTC timestamps. Console spans use stderr through a batch exporter. The
+and UTC timestamps. The default console exporter writes spans to stderr in batches. The
 server resource has `service.name=server`.
 
 The provider uses parent-based sampling with sampling enabled for root spans.
@@ -21,6 +21,103 @@ root after configuring `.env`.
 go build -o server.exe ./cmd/server
 .\server.exe 1> application.jsonl 2> spans.jsonl
 ```
+
+## Prometheus and Collector integration points
+
+The server and worker accept an optional OTLP/HTTP trace endpoint through
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. The exporter uses the same redaction as the
+console exporter. Without an endpoint, spans go to the console. The JSON log
+stream on stdout remains the input for the Collector log receiver. Its
+`trace_id` and `span_id` fields carry the same trace context as the spans.
+
+`SERVER_METRICS_ADDR` and `WORKER_METRICS_ADDR` enable independent `GET /metrics`
+listeners. Each process reports its own pool statistics. The server reads job
+counts from the shared database. Each worker reports the activity it processes.
+
+| Metric | Meaning |
+|---|---|
+| `if3110_migration_jobs{status}` | Persisted job count by status, exported by the server |
+| `if3110_migration_retries_total` | Retries successfully requeued by this worker |
+| `if3110_migration_queue_wait_seconds` | Time from eligibility to claim, measured by the queue database clock |
+| `if3110_migration_lock_wait_seconds` | Time for successful target lock acquisitions |
+| `if3110_migration_duration_seconds{action,outcome}` | Duration of each worker attempt including lock acquisition and execution |
+| `if3110_migration_batches_total{operation}`, `if3110_migration_rows_total{operation}` | Batches and affected rows observed on successful commits, with `execute` or `revert` |
+| `if3110_db_pool_connections{role,db_system,state}` | Connections in use or idle, summed over live pools |
+| `if3110_db_pool_waits_total{role,db_system}`, `if3110_db_pool_wait_seconds_total{role,db_system}` | Cumulative connection wait count and time, including pools closed by the process |
+
+Worker counters measure commits observed by that process. The persisted job and
+checkpoint records remain the source of truth for committed progress. Duration
+histograms expose sampled trace IDs as exemplars when scraped as OpenMetrics.
+Metric labels use fixed categories so job, actor, and database IDs stay out of
+the time series.
+
+## Local observability stack
+
+Start the demo using the [README](../README.md#bonus-observability). Compose
+provides a separate PostgreSQL instance for the platform and a sample target.
+The server and worker write JSON lines to a shared Docker volume. The Collector
+forwards those logs to Loki, persists its read offsets, and forwards OTLP
+traces to Tempo. Prometheus scrapes the server and worker metrics endpoints
+using OpenMetrics and stores exemplars. Grafana provisions the three data
+sources and the IF3110 Observability dashboard from the files under
+[`observability/`](../observability/).
+
+### Demo migration and signal correlation
+
+1. Sign in to the platform as `demo_admin`. Open **Target databases** and
+   register a PostgreSQL connection with the following values.
+
+   | Field | Value |
+   | --- | --- |
+   | Name | `Observability demo` |
+   | Host / port | `postgres` / `5432` |
+   | Database / username | `if3110_target` / `if3110_target` |
+   | Password | `if3110-target-demo` |
+   | SSL/TLS | `disable` |
+
+2. In **Groups & access**, create a group, add `demo_admin` as a member,
+   make that user the group leader, and grant **View and edit** access to the
+   demo database.
+3. Open the demo database workspace and select **Migrations**. Create a
+   definition with the SQL below. In **Batch configuration**, set Table to
+   `public.observability_demo`, Key column to `id`, and Batch size to `2`.
+
+   SQL up
+
+   ```sql
+   UPDATE public.observability_demo SET visits = visits + 1 WHERE id BETWEEN $1 AND $2;
+   ```
+
+   SQL down
+
+   ```sql
+   UPDATE public.observability_demo SET visits = visits - 1 WHERE id BETWEEN $1 AND $2;
+   ```
+
+4. Select **Save definition → Review apply → Approve → Queue approved action**.
+   The job should reach `succeeded` after committing four batches and eight rows.
+5. In Grafana **Explore**, select **Loki** and run the query below. Expand
+   the log for your job and select **View trace** to open the same attempt in
+   Tempo. The trace contains the server submission and the `worker_attempt` span.
+
+   ```logql
+   {service_name="worker"} |= "worker_attempt_completed"
+   ```
+
+6. On the dashboard, hover over an exemplar marker in **Migration attempt
+   duration (p95)** and follow its Tempo link. The exemplar and worker log
+   carry the same trace ID. The **Committed batches and affected rows**
+   panel shows the worker counters. Allow a few seconds for scraping and export.
+
+An end-to-end demo run produced the following results.
+
+| Signal | Observed result |
+| --- | --- |
+| Job | `11cf6919-215d-4fb0-851e-65d9aa7f4276`, status `succeeded` |
+| Loki | `worker_attempt_completed` with trace ID `9b0776294ee6ccb2fa634ef695d734f6` |
+| Tempo | The same trace ID contains the `worker_attempt` span `b95a92931c0d73ee` |
+| Prometheus | A migration-duration histogram exemplar with the same `trace_id`; the single observed attempt took 0.259 seconds |
+| Worker counters | Four committed batches and eight affected rows for `operation="execute"` |
 
 ## Log fields
 

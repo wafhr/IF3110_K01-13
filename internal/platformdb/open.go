@@ -19,7 +19,7 @@ func Open(ctx context.Context, connectionURL string) (*sql.DB, error) {
 	if err != nil {
 		return nil, errors.New("configure platform database connection")
 	}
-	db := sql.OpenDB(telemetry.SQLConnector(stdlib.GetConnector(*config), "postgresql", "platform", config.Database))
+	db := telemetry.OpenSQLPool(ctx, stdlib.GetConnector(*config), "postgresql", "platform", config.Database)
 	db.SetMaxOpenConns(20)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(30 * time.Minute)

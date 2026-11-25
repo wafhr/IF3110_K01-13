@@ -115,12 +115,12 @@ func TestClaim(t *testing.T) {
 		}
 	})
 	t.Run("leases the next job", func(t *testing.T) {
-		database := (&stubDatabase{}).onQuery(jobClaim, jobRow(t, testRequest(), Running, 1))
+		database := (&stubDatabase{}).onQuery(jobClaim, append(jobRow(t, testRequest(), Running, 1), float64(1.25)))
 		job, err := database.repository(t).Claim(context.Background(), testWorkerID, 90*time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if job.Status != Running || job.Attempts != 1 || job.StartedAt == nil || job.Request.TraceContext != testRequest().TraceContext {
+		if job.Status != Running || job.Attempts != 1 || job.QueueWaitSeconds != 1.25 || job.StartedAt == nil || job.Request.TraceContext != testRequest().TraceContext {
 			t.Fatalf("claimed job = %+v", job)
 		}
 		claim := database.executed(jobClaim)[0]

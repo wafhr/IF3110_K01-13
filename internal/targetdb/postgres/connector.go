@@ -27,7 +27,6 @@ type Options struct {
 
 type Connector struct {
 	options Options
-	openDB  func(pgx.ConnConfig) *sql.DB
 }
 
 // NewConnector uses defaults for zero-valued options. The timeout covers the
@@ -55,9 +54,7 @@ func NewConnector(options Options) (*Connector, error) {
 	if options.MaxIdleConns > options.MaxOpenConns {
 		return nil, errors.New("target idle connections must not exceed maximum open connections")
 	}
-	return &Connector{options: options, openDB: func(config pgx.ConnConfig) *sql.DB {
-		return sql.OpenDB(telemetry.SQLConnector(stdlib.GetConnector(config), "postgresql", "target", config.Database))
-	}}, nil
+	return &Connector{options: options}, nil
 }
 
 func (c *Connector) Open(ctx context.Context, settings database.ConnectionConfig) (*sql.DB, error) {
@@ -70,7 +67,7 @@ func (c *Connector) Open(ctx context.Context, settings database.ConnectionConfig
 	if err != nil {
 		return nil, err
 	}
-	db := c.openDB(*config)
+	db := telemetry.OpenSQLPool(ctx, stdlib.GetConnector(*config), "postgresql", "target", config.Database)
 	db.SetMaxOpenConns(c.options.MaxOpenConns)
 	db.SetMaxIdleConns(c.options.MaxIdleConns)
 	db.SetConnMaxLifetime(c.options.ConnMaxLifetime)
