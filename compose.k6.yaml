@@ -1,0 +1,75 @@
+name: if3110-k6
+
+x-app-build: &app-build
+  context: .
+  dockerfile: Dockerfile.observability
+
+x-app-environment: &app-environment
+  PLATFORM_DATABASE_URL: postgres://stress_platform:if3110-stress-platform@postgres:5432/stress_platform?sslmode=disable
+  DATABASE_ENCRYPTION_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: stress_platform
+      POSTGRES_USER: stress_platform
+      POSTGRES_PASSWORD: if3110-stress-platform
+    tmpfs:
+      - /var/lib/postgresql
+    volumes:
+      - ./k6/postgres-init.sql:/docker-entrypoint-initdb.d/10-stress.sql:ro
+    healthcheck:
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, stress_platform, -d, stress_platform]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  server:
+    build: *app-build
+    command: [/app/server]
+    environment:
+      <<: *app-environment
+      BOOTSTRAP_ADMIN_USERNAME: stress_admin
+      BOOTSTRAP_ADMIN_PASSWORD: if3110-stress-admin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:8080/health']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    build: *app-build
+    command: [/app/worker]
+    environment:
+      <<: *app-environment
+      WORKER_CONCURRENCY: 4
+      WORKER_POLL_INTERVAL: 100ms
+      WORKER_METRICS_ADDR: 0.0.0.0:9465
+    depends_on:
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:9465/metrics']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  k6:
+    image: grafana/k6:1.6.1
+    command: [run, /scripts/stress.js]
+    environment:
+      STRESS_TARGETS: 'same'
+    volumes:
+      - ./k6/stress.js:/scripts/stress.js:ro
+    depends_on:
+      worker:
+        condition: service_healthy
+    profiles: [k6]
+
+networks:
+  default:
+    internal: true

@@ -19,7 +19,7 @@ func TestRoutes(t *testing.T) {
 	} {
 		t.Run(tc.method+tc.path, func(t *testing.T) {
 			response := httptest.NewRecorder()
-			app.Routes().ServeHTTP(response, httptest.NewRequest(tc.method, tc.path, nil))
+			app.RoutesWith(app.Modules{}).ServeHTTP(response, httptest.NewRequest(tc.method, tc.path, nil))
 			if response.Code != tc.status {
 				t.Fatalf("status = %d, want %d", response.Code, tc.status)
 			}
@@ -41,7 +41,7 @@ func TestModuleRouting(t *testing.T) {
 			_, _ = w.Write([]byte(name))
 		})
 	}
-	handler := app.RoutesWithModulesAndFrontend(module("access"), module("database"), module("viewer"), module("migration"), nil)
+	handler := app.RoutesWith(app.Modules{Access: module("access"), Database: module("database"), Viewer: module("viewer"), Migration: module("migration")})
 	for _, tc := range []struct{ method, path, module string }{
 		{"POST", "/auth/login", "access"},
 		{"GET", "/admin/groups", "access"},
@@ -54,9 +54,13 @@ func TestModuleRouting(t *testing.T) {
 		{"GET", "/databases/id/schemas", "viewer"},
 		{"GET", "/databases/id/schemas/migrations/tables", "viewer"},
 		{"GET", "/databases/id/schemas/public/tables/migrations/data", "viewer"},
-		{"GET", "/databases/id/migrations", "migration"},
-		{"POST", "/databases/id/migrations", "migration"},
+		{"GET", "/databases/id/migrations/definitions", "migration"},
+		{"POST", "/databases/id/migrations/definitions", "migration"},
 		{"GET", "/databases/id/migrations/1", "migration"},
+		{"POST", "/databases/id/migrations/definitions", "migration"},
+		{"PUT", "/databases/id/migrations/definitions/migration-id", "migration"},
+		{"GET", "/databases/id/migrations/definitions/migration-id/revisions/1", "migration"},
+		{"GET", "/databases/id/migrations/history/execution-id", "migration"},
 	} {
 		t.Run(tc.method+tc.path, func(t *testing.T) {
 			response := httptest.NewRecorder()
@@ -74,15 +78,15 @@ func TestCombinedModuleAndFrontendRouting(t *testing.T) {
 			_, _ = w.Write([]byte(name))
 		})
 	}
-	handler := app.RoutesWithModulesAndFrontend(
-		module("access"), module("database"), module("viewer"), module("migration"), module("frontend"),
-	)
+	handler := app.RoutesWith(app.Modules{
+		Access: module("access"), Database: module("database"), Viewer: module("viewer"), Migration: module("migration"), Frontend: module("frontend"),
+	})
 	for _, tc := range []struct{ path, want string }{
 		{"/login", "frontend"},
 		{"/admin/databases", "database"},
 		{"/databases/id/access", "access"},
 		{"/databases/id/schemas", "viewer"},
-		{"/databases/id/migrations", "migration"},
+		{"/databases/id/migrations/history", "migration"},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			response := httptest.NewRecorder()
@@ -103,7 +107,7 @@ func TestApplicationRoutesSeparateFrontendFromAccessAPI(t *testing.T) {
 		w.Header().Set("X-Route", "frontend")
 		w.WriteHeader(http.StatusNoContent)
 	})
-	handler := app.RoutesWithModulesAndFrontend(accessHandler, nil, nil, nil, frontendHandler)
+	handler := app.RoutesWith(app.Modules{Access: accessHandler, Frontend: frontendHandler})
 	for _, tc := range []struct{ path, route string }{
 		{"/auth/me", "access"}, {"/", "frontend"}, {"/login", "frontend"}, {"/assets/css/app.css", "frontend"},
 	} {
@@ -112,6 +116,34 @@ func TestApplicationRoutesSeparateFrontendFromAccessAPI(t *testing.T) {
 			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, tc.path, nil))
 			if response.Code != http.StatusNoContent || response.Header().Get("X-Route") != tc.route {
 				t.Fatalf("route = %q status=%d, want %q", response.Header().Get("X-Route"), response.Code, tc.route)
+			}
+		})
+	}
+}
+
+func TestJobRoutesBelongToTheJobModule(t *testing.T) {
+	module := func(name string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(name))
+		})
+	}
+	handler := app.RoutesWith(app.Modules{
+		Access: module("access"), Viewer: module("viewer"), Migration: module("migration"), Job: module("job"), Frontend: module("frontend"),
+	})
+	for _, tc := range []struct{ path, want string }{
+		{"/databases/id/jobs", "job"},
+		{"/databases/id/jobs/job-id", "job"},
+		{"/databases/id/jobs/job-id/resume", "job"},
+		{"/databases/id/attempts", "job"},
+		{"/databases/id/migrations/history", "migration"},
+		{"/databases/id/schemas/jobs/tables", "viewer"},
+		{"/jobs", "frontend"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			if response.Body.String() != tc.want {
+				t.Fatalf("route = %q, want %q", response.Body.String(), tc.want)
 			}
 		})
 	}

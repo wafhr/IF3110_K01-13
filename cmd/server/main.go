@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,26 +11,33 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+
 	"github.com/wafhr/IF3110_K01-13/internal/access"
 	"github.com/wafhr/IF3110_K01-13/internal/app"
 	"github.com/wafhr/IF3110_K01-13/internal/config"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
 	databasehttp "github.com/wafhr/IF3110_K01-13/internal/database/http"
+	"github.com/wafhr/IF3110_K01-13/internal/job"
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/platformdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb/drivers"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 	"github.com/wafhr/IF3110_K01-13/web"
 )
 
 func main() {
+	slog.SetDefault(telemetry.NewLogger(os.Stdout, "server"))
 	if err := run(); err != nil {
-		slog.Error("server stopped", "error", err)
+		slog.Error("server_stopped", "actor", "system", "status", "failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("server_stopped", "actor", "system", "status", "success")
 }
 
-func run() error {
+func run() (runErr error) {
 	if err := config.LoadDotEnv(); err != nil {
 		return err
 	}
@@ -39,8 +45,29 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 15*time.Second)
+	slog.SetDefault(telemetry.NewLogger(os.Stdout, "server",
+		cfg.PlatformDatabaseURL, cfg.DatabaseEncryptionKey, cfg.BootstrapAdminPassword))
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		slog.Error("telemetry_failed", "actor", "system", "status", "failed", "error", err)
+	}))
+	metrics := telemetry.NewMetrics()
+	startupCtx, cancelStartup := context.WithTimeout(metrics.Context(context.Background()), 15*time.Second)
 	defer cancelStartup()
+	tracerProvider, err := telemetry.NewRuntimeTracerProvider(startupCtx, os.Stderr, "server", cfg.TraceEndpoint,
+		cfg.PlatformDatabaseURL, cfg.DatabaseEncryptionKey, cfg.BootstrapAdminPassword)
+	if err != nil {
+		return err
+	}
+	otel.SetTracerProvider(tracerProvider)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	defer func() {
+		// Context shutdown terpisah agar pembatalan request tidak membatalkan flush.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		if err := tracerProvider.Shutdown(shutdownCtx); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("shutdown tracing: %w", err))
+		}
+	}()
 	db, err := platformdb.Open(startupCtx, cfg.PlatformDatabaseURL)
 	if err != nil {
 		return err
@@ -66,14 +93,31 @@ func run() error {
 	if err := accessService.Initialize(startupCtx, cfg.BootstrapAdminUsername, cfg.BootstrapAdminPassword); err != nil {
 		return err
 	}
-	migrationService := migration.NewService(func(ctx context.Context, id string) (*sql.DB, database.DBMS, error) {
-		connection, err := databaseRegistry.GetConnectionConfig(ctx, id)
-		if err != nil {
-			return nil, "", err
-		}
-		db, err := targetConnector.Open(ctx, connection)
-		return db, connection.DBMS, err
-	})
+	migrationRepository, err := migration.NewRepository(db)
+	if err != nil {
+		return err
+	}
+	if err := migrationRepository.Initialize(startupCtx); err != nil {
+		return err
+	}
+	jobRepository, err := job.NewRepository(db)
+	if err != nil {
+		return err
+	}
+	if err := jobRepository.Initialize(startupCtx); err != nil {
+		return err
+	}
+	jobService, err := job.NewService(jobRepository)
+	if err != nil {
+		return err
+	}
+	migrationService, _ := app.NewMigrationService(db, databaseRegistry, targetConnector, migrationRepository, jobService)
+	metrics.RegisterJobCounts(jobRepository.CountByStatus)
+	stopMetrics, err := metrics.Serve(cfg.MetricsAddress, cfg.ShutdownTimeout)
+	if err != nil {
+		return err
+	}
+	defer func() { runErr = errors.Join(runErr, stopMetrics()) }()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	accessHandler := access.NewHTTPHandler(accessService, cfg.SecureCookie)
@@ -81,9 +125,13 @@ func run() error {
 	viewerHandler := databasehttp.NewViewerHandler(databaseRegistry, drivers.NewInspector(databaseRegistry, targetConnections), accessHandler)
 	schemaInspector := drivers.NewInspector(databaseRegistry, targetConnections)
 	migrationHandler := migration.NewHTTPHandler(migrationService, accessHandler, schemaInspector)
+	routes := app.RoutesWith(app.Modules{
+		Access: accessHandler, Database: databaseHandler, Viewer: viewerHandler, Migration: migrationHandler,
+		Job: job.NewHTTPHandler(jobService, accessHandler), Frontend: web.NewHandler(accessHandler),
+	})
 	server := &http.Server{
 		Addr:              cfg.Address(),
-		Handler:           app.RoutesWithModulesAndFrontend(accessHandler, databaseHandler, viewerHandler, migrationHandler, web.NewHandler(accessService, accessHandler)),
+		Handler:           telemetry.HTTPHandler(metrics.Attach(routes)),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -91,7 +139,7 @@ func run() error {
 	}
 	result := make(chan error, 1)
 	go func() { result <- server.ListenAndServe() }()
-	slog.Info("starting HTTP server", "address", server.Addr)
+	slog.Info("server_starting", "actor", "system", "status", "running", "address", server.Addr)
 	select {
 	case err := <-result:
 		if errors.Is(err, http.ErrServerClosed) {
@@ -99,9 +147,9 @@ func run() error {
 		}
 		return fmt.Errorf("serve HTTP: %w", err)
 	case <-ctx.Done():
-		stop() // A second interrupt uses the default signal behavior.
+		stop() // Interupsi kedua mengikuti perilaku sinyal bawaan.
 	}
-	slog.Info("shutting down HTTP server")
+	slog.Info("server_stopping", "actor", "system", "status", "running")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {

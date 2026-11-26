@@ -12,11 +12,11 @@ import (
 
 func TestLoginPageAndStylesheet(t *testing.T) {
 	auth := access.NewHTTPHandler(nil, false)
-	handler := web.NewHandler(nil, auth)
+	handler := web.NewHandler(auth)
 	for _, tc := range []struct {
 		path, contentType, contains string
 	}{
-		{"/login", "text/html; charset=utf-8", "Welcome back"},
+		{"/login", "text/html; charset=utf-8", "spa.js"},
 		{"/assets/css/app.css", "text/css; charset=utf-8", "--green:"},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
@@ -34,11 +34,12 @@ func TestLoginPageAndStylesheet(t *testing.T) {
 
 func TestFrontendAssetsAndProtectedWorkspaceRoutes(t *testing.T) {
 	auth := access.NewHTTPHandler(nil, false)
-	handler := web.NewHandler(nil, auth)
-	for _, path := range []string{
-		"/assets/js/platform.js", "/assets/js/workspace.js", "/assets/js/database-admin.js",
-		"/assets/js/database-viewer.js", "/assets/js/migrations.js",
-	} {
+	handler := web.NewHandler(auth)
+	assets := []string{"/assets/js/spa.js", "/assets/js/core.js"}
+	for _, page := range []string{"login", "home", "users", "groups", "databases", "workspace", "migrations"} {
+		assets = append(assets, "/assets/js/pages/"+page+".js")
+	}
+	for _, path := range assets {
 		t.Run(path, func(t *testing.T) {
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))

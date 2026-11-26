@@ -4,11 +4,13 @@ package drivers
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 
 	"github.com/wafhr/IF3110_K01-13/internal/database"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb/mysql"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb/postgres"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 type Connector struct {
@@ -78,7 +80,10 @@ func (i *Inspector) reader(ctx context.Context, id string) (SchemaReader, error)
 	return reader, nil
 }
 
-func (i *Inspector) Schemas(ctx context.Context, id string) ([]database.Schema, error) {
+func (i *Inspector) Schemas(ctx context.Context, id string) (result []database.Schema, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "schemas_list", slog.String("database_id", id))
+	defer activity.End(&activityErr)
+
 	reader, err := i.reader(ctx, id)
 	if err != nil {
 		return nil, err
@@ -86,7 +91,10 @@ func (i *Inspector) Schemas(ctx context.Context, id string) ([]database.Schema, 
 	return reader.Schemas(ctx, id)
 }
 
-func (i *Inspector) Tables(ctx context.Context, id, schema string) ([]database.Table, error) {
+func (i *Inspector) Tables(ctx context.Context, id, schema string) (result []database.Table, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "tables_list", slog.String("database_id", id))
+	defer activity.End(&activityErr)
+
 	reader, err := i.reader(ctx, id)
 	if err != nil {
 		return nil, err
@@ -94,7 +102,10 @@ func (i *Inspector) Tables(ctx context.Context, id, schema string) ([]database.T
 	return reader.Tables(ctx, id, schema)
 }
 
-func (i *Inspector) Table(ctx context.Context, id, schema, table string) (database.TableDetails, error) {
+func (i *Inspector) Table(ctx context.Context, id, schema, table string) (result database.TableDetails, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "table_inspect", slog.String("database_id", id))
+	defer activity.End(&activityErr)
+
 	reader, err := i.reader(ctx, id)
 	if err != nil {
 		return database.TableDetails{}, err
@@ -102,7 +113,10 @@ func (i *Inspector) Table(ctx context.Context, id, schema, table string) (databa
 	return reader.Table(ctx, id, schema, table)
 }
 
-func (i *Inspector) Data(ctx context.Context, id, schema, table string, options database.PageOptions) (database.DataPage, error) {
+func (i *Inspector) Data(ctx context.Context, id, schema, table string, options database.PageOptions) (result database.DataPage, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "table_data_read", slog.String("database_id", id))
+	defer activity.End(&activityErr)
+
 	reader, err := i.reader(ctx, id)
 	if err != nil {
 		return database.DataPage{}, err

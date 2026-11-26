@@ -13,11 +13,20 @@ CREATE TABLE IF NOT EXISTS access_groups (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE access_groups ADD COLUMN IF NOT EXISTS leader_user_id UUID;
+
 CREATE TABLE IF NOT EXISTS access_group_members (
     group_id UUID NOT NULL REFERENCES access_groups(id) ON DELETE CASCADE,
     user_id UUID NOT NULL REFERENCES access_users(id) ON DELETE CASCADE,
     PRIMARY KEY (group_id, user_id)
 );
+
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'access_groups_leader_membership_fkey') THEN
+        ALTER TABLE access_groups ADD CONSTRAINT access_groups_leader_membership_fkey
+            FOREIGN KEY (id, leader_user_id) REFERENCES access_group_members(group_id, user_id);
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS access_group_database_permissions (
     group_id UUID NOT NULL REFERENCES access_groups(id) ON DELETE CASCADE,
@@ -37,12 +46,21 @@ CREATE TABLE IF NOT EXISTS access_sessions (
     created_at TIMESTAMPTZ NOT NULL,
     last_seen_at TIMESTAMPTZ NOT NULL,
     rotated_at TIMESTAMPTZ NOT NULL,
+    rotation_required BOOLEAN NOT NULL DEFAULT FALSE,
     absolute_expires_at TIMESTAMPTZ NOT NULL
 );
 
 ALTER TABLE access_sessions ADD COLUMN IF NOT EXISTS current_token_during_grace TEXT;
 ALTER TABLE access_sessions ADD COLUMN IF NOT EXISTS current_token_grace_expires_at TIMESTAMPTZ;
+ALTER TABLE access_sessions ADD COLUMN IF NOT EXISTS rotation_required BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS access_sessions_user_id_idx ON access_sessions(user_id);
 CREATE INDEX IF NOT EXISTS access_group_members_user_id_idx ON access_group_members(user_id);
 CREATE INDEX IF NOT EXISTS access_permissions_database_id_idx ON access_group_database_permissions(database_id);
+
+-- Monotonic policy epochs make any grant, membership, or leader change revoke
+-- existing migration approvals, even if a prior configuration is restored.
+CREATE TABLE IF NOT EXISTS access_database_approval_epochs (
+    database_id UUID PRIMARY KEY,
+    epoch BIGINT NOT NULL DEFAULT 1 CHECK (epoch > 0)
+);

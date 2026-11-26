@@ -1,0 +1,7 @@
+apiVersion: 1
+
+providers:
+  - name: IF3110
+    type: file
+    options:
+      path: /var/lib/if3110-dashboards

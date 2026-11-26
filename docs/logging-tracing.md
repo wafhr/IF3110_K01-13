@@ -1,0 +1,331 @@
+# Activity Logging and Tracing
+
+## Runtime setup
+
+`cmd/server/main.go` installs the JSON logger before loading configuration, then
+initializes the OpenTelemetry provider before opening database connections.
+Application logs use stdout, one JSON object per line, with minimum level INFO
+and UTC timestamps. The default console exporter writes spans to stderr in batches. The
+server resource has `service.name=server`.
+
+The provider uses parent-based sampling with sampling enabled for root spans.
+An incoming unsampled parent retains correlation IDs in logs. Completed sampled
+spans are flushed during provider shutdown with a fresh context bounded by
+`SHUTDOWN_TIMEOUT`.
+
+The standard startup configuration from the README is sufficient. To capture
+runtime streams separately from build output, use PowerShell from the repository
+root after configuring `.env`.
+
+```powershell
+go build -o server.exe ./cmd/server
+.\server.exe 1> application.jsonl 2> spans.jsonl
+```
+
+## Prometheus and Collector integration points
+
+The server and worker accept an optional OTLP/HTTP trace endpoint through
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. The exporter uses the same redaction as the
+console exporter. Without an endpoint, spans go to the console. The JSON log
+stream on stdout remains the input for the Collector log receiver. Its
+`trace_id` and `span_id` fields carry the same trace context as the spans.
+
+`SERVER_METRICS_ADDR` and `WORKER_METRICS_ADDR` enable independent `GET /metrics`
+listeners. Each process reports its own pool statistics. The server reads job
+counts from the shared database. Each worker reports the activity it processes.
+
+| Metric | Meaning |
+|---|---|
+| `if3110_migration_jobs{status}` | Persisted job count by status, exported by the server |
+| `if3110_migration_retries_total` | Retries successfully requeued by this worker |
+| `if3110_migration_queue_wait_seconds` | Time from eligibility to claim, measured by the queue database clock |
+| `if3110_migration_lock_wait_seconds` | Time for successful target lock acquisitions |
+| `if3110_migration_duration_seconds{action,outcome}` | Duration of each worker attempt including lock acquisition and execution |
+| `if3110_migration_batches_total{operation}`, `if3110_migration_rows_total{operation}` | Batches and affected rows observed on successful commits, with `execute` or `revert` |
+| `if3110_db_pool_connections{role,db_system,state}` | Connections in use or idle, summed over live pools |
+| `if3110_db_pool_waits_total{role,db_system}`, `if3110_db_pool_wait_seconds_total{role,db_system}` | Cumulative connection wait count and time, including pools closed by the process |
+
+Worker counters measure commits observed by that process. The persisted job and
+checkpoint records remain the source of truth for committed progress. Duration
+histograms expose sampled trace IDs as exemplars when scraped as OpenMetrics.
+Metric labels use fixed categories so job, actor, and database IDs stay out of
+the time series.
+
+## Local observability stack
+
+Start the demo using the [README](../README.md#bonus-observability). Compose
+provides a separate PostgreSQL instance for the platform and a sample target.
+The server and worker write JSON lines to a shared Docker volume. The Collector
+forwards those logs to Loki, persists its read offsets, and forwards OTLP
+traces to Tempo. Prometheus scrapes the server and worker metrics endpoints
+using OpenMetrics and stores exemplars. Grafana provisions the three data
+sources and the IF3110 Observability dashboard from the files under
+[`observability/`](../observability/).
+
+### Demo migration and signal correlation
+
+1. Sign in to the platform as `demo_admin`. Open **Target databases** and
+   register a PostgreSQL connection with the following values.
+
+   | Field | Value |
+   | --- | --- |
+   | Name | `Observability demo` |
+   | Host / port | `postgres` / `5432` |
+   | Database / username | `if3110_target` / `if3110_target` |
+   | Password | `if3110-target-demo` |
+   | SSL/TLS | `disable` |
+
+2. In **Groups & access**, create a group, add `demo_admin` as a member,
+   make that user the group leader, and grant **View and edit** access to the
+   demo database.
+3. Open the demo database workspace and select **Migrations**. Create a
+   definition with the SQL below. In **Batch configuration**, set Table to
+   `public.observability_demo`, Key column to `id`, and Batch size to `2`.
+
+   SQL up
+
+   ```sql
+   UPDATE public.observability_demo SET visits = visits + 1 WHERE id BETWEEN $1 AND $2;
+   ```
+
+   SQL down
+
+   ```sql
+   UPDATE public.observability_demo SET visits = visits - 1 WHERE id BETWEEN $1 AND $2;
+   ```
+
+4. Select **Save definition → Review apply → Approve → Queue approved action**.
+   The job should reach `succeeded` after committing four batches and eight rows.
+5. In Grafana **Explore**, select **Loki** and run the query below. Expand
+   the log for your job and select **View trace** to open the same attempt in
+   Tempo. The trace contains the server submission and the `worker_attempt` span.
+
+   ```logql
+   {service_name="worker"} |= "worker_attempt_completed"
+   ```
+
+6. On the dashboard, hover over an exemplar marker in **Migration attempt
+   duration (p95)** and follow its Tempo link. The exemplar and worker log
+   carry the same trace ID. The **Committed batches and affected rows**
+   panel shows the worker counters. Allow a few seconds for scraping and export.
+
+An end-to-end demo run produced the following results.
+
+| Signal | Observed result |
+| --- | --- |
+| Job | `11cf6919-215d-4fb0-851e-65d9aa7f4276`, status `succeeded` |
+| Loki | `worker_attempt_completed` with trace ID `9b0776294ee6ccb2fa634ef695d734f6` |
+| Tempo | The same trace ID contains the `worker_attempt` span `b95a92931c0d73ee` |
+| Prometheus | A migration-duration histogram exemplar with the same `trace_id`; the single observed attempt took 0.259 seconds |
+| Worker counters | Four committed batches and eight affected rows for `operation="execute"` |
+
+## Log fields
+
+| Field | Meaning |
+|---|---|
+| `time`, `level`, `event`, `service` | UTC timestamp, severity, event name, and process identity |
+| `actor` | Verified user ID, `anonymous` during unauthenticated requests, or `system` for background work |
+| `status` | `running`, `success`, `failed`, or a driver fallback marked `skipped` |
+| `trace_id`, `span_id` | Active OpenTelemetry context when a valid span is available |
+| `database` | Physical database name on SQL records |
+| `database_id`, `migration_id`, `revision` | Registry and immutable migration identifiers when available |
+| `job_id`, `execution_id`, `attempt`, `batch` | Scope supplied by the queued request and executor |
+| `duration_ms` | Elapsed operation time in milliseconds |
+
+`WithLogAttrs` creates an operation scope whose metadata is inherited by SQL
+logs and spans. Explicit record or bound logger attributes take precedence over
+context attributes. Attributes follow the logger's active slog group.
+`WithActor` propagates the verified identity to HTTP completion logging across
+request copies.
+
+## Activity and HTTP events
+
+Domain operations emit `<operation>_started` and `<operation>_completed`.
+Completion uses the returned error after the operation and its deferred cleanup.
+Creation events add generated IDs once available. The service/repository layer
+also covers operations invoked by browser forms.
+
+| Area | Representative operations |
+|---|---|
+| Authentication | `auth_login`, `session_validate`, `auth_logout` |
+| Administration | `user_create`, `user_update`, `group_create`, `group_membership_set`, `database_permission_set` |
+| Registry and viewer | `database_register`, `database_update`, `database_connection_check`, `schemas_list`, `tables_list`, `table_inspect`, `table_data_read` |
+| Migration | `migration_define`, `migration_revise`, `migration_submit`, `migration_enqueue`, `migration_execution_prepare`, `migration_history_stage` |
+| Attempt and lock | `worker_attempt`, plus lock activities supplied by the executor |
+
+`HTTPHandler` creates a server span, extracts W3C trace context, and returns
+`X-Trace-ID` when the span context is valid. `http_request_completed` includes
+method, registered router pattern, response status when available, and duration.
+Router patterns can be mount prefixes in nested middleware. Missing routes use
+the HTTP method as the span name. Request URL values, query strings, headers,
+and bodies are excluded from this middleware's attributes.
+
+HTTP 4xx responses produce WARN completion records. HTTP 5xx responses,
+cancellation, and panic produce ERROR records and error span status. Access
+checks emit `access_denied` with a fixed reason such as
+`database_permission_required`, `invalid_session`, or `invalid_csrf`.
+
+Activity instrumentation records a generic panic category and preserves the
+original panic for its caller. The outer HTTP middleware records that category
+and propagates `http.ErrAbortHandler`. This sentinel preserves the server
+connection-abort behavior and keeps the original panic value inside the handler.
+
+## SQL observations
+
+`SQLConnector` wraps the platform PostgreSQL connector and the PostgreSQL/MySQL
+target connectors. Instrumentation covers direct and prepared execution,
+connection establishment, ping, begin, commit, rollback, and result streaming.
+Each operation has separate started and completed events, such as
+`sql_exec_started`, `sql_exec_completed`, and `sql_commit_completed`.
+
+SQL records include `database_role` (`platform` or `target`), `db_system`,
+`operation`, `query_template`, `parameters`, `parameter_count`, and duration as
+applicable. The template is derived from the SQL actually passed to the driver
+for each attempt. It preserves table/column identifiers and SQL structure while
+replacing literals and parameter placeholders with `?`. Comments are removed.
+Account, role, ownership, and grant statements are fully redacted to protect
+account identifiers. Unrecognized tokens also cause full query redaction. Each
+SQL record stores `[REDACTED]` in `parameters` and the number of supplied values
+in `parameter_count`.
+
+Successful Exec operations include `rows_affected` when supported. Query
+operations include `rows_read` and `rows_complete`. The query span lasts until
+the result is closed, so streaming and close failures are captured. Partial
+reads retain their observed count with `rows_complete=false`.
+
+Errors use safe categories (`sql_error`, `driver_error`, `connection_error`,
+`canceled`, or `timeout`) and a validated five-character `sqlstate` when
+available. The original driver error continues to the caller. Driver fallback
+through `ErrSkip` emits `status=skipped` and allows prepared execution to proceed.
+Each `ErrBadConn` retry is observable through its own driver attempt.
+
+`migration_history_stage_completed` includes `commit_pending=true`. The executor
+establishes the final commit outcome. A duplicate execution can report
+`commit_proof=true` after the preparation hook finds an existing committed record.
+
+## Queue propagation and worker integration
+
+`ExecutionRequest.trace_context` carries W3C `traceparent` and `tracestate`.
+`migration_enqueue` is a PRODUCER span. Its context is captured after approval
+validation and serialized with the full approved execution snapshot. The queue
+adapter persists that payload before returning a job ID.
+
+`worker.TraceAttempt(workerCtx, request, jobID, attempt, run)` restores the
+serialized parent and creates a CONSUMER span. The callback receives actor,
+database, migration, revision, execution, job, and attempt metadata. Lock, batch,
+SQL, history, and commit/rollback work use that callback context. A batch can add
+its number through `WithLogAttrs` or `StartActivity`.
+
+The caller supplies a process-owned worker context and a positive attempt
+number. The callback returns nil after its outcome and commit evidence are
+established. Retries retain the stored producer parent and execution ID while
+creating distinct attempt spans. The worker context supplies cancellation and
+deadlines for execution.
+Payloads with missing or invalid trace context start a fresh trace. W3C
+propagation excludes baggage from the serialized carrier.
+
+```mermaid
+flowchart LR
+    H[HTTP request] --> S[migration_submit]
+    S --> P[migration_enqueue PRODUCER]
+    P --> Q[ExecutionRequest JSONB]
+    Q --> W[TraceAttempt CONSUMER]
+    W --> L[Executor lock and batch scope]
+    L --> D[SQL and history transaction]
+    D --> C[Commit or rollback]
+```
+
+### Current integration boundary
+
+The server wires the workflow approval provider and the job queue. The worker
+initializes the logger and tracer provider with
+`service.name=worker`, runs every attempt inside `TraceAttempt`, passes the
+attempt context to lock, SQL, history, and commit/rollback, and shuts the
+provider down on exit. Each batch runs inside a `migration_batch` activity, and
+each compensated batch inside `migration_batch_compensation`; both add the
+`batch` number to the SQL logs of that batch.
+
+The integration suite exercises the diagram using real PostgreSQL transactions,
+the production job queue, a fixture approval adapter, and `TraceAttempt` callbacks. The
+fixture callback assigns a batch scope around a transaction. Production batch
+selection and recovery belong to the executor implementation.
+
+## Redaction
+
+The logger and console exporter apply shared rules to sensitive field names,
+nested structures, credential-pattern text, and configured secret literals.
+Server setup registers the platform connection URL, database encryption key,
+and bootstrap password. URL passwords are also recognized in decoded form.
+
+- Password, username, token, session, cookie, authorization, encryption-key,
+  connection-string, body, and raw SQL/parameter fields are masked.
+- Free text containing credential assignments, credential URLs, or authorization
+  patterns is fully redacted.
+- SQL templates preserve operational object identifiers and mask literals.
+  Account/role/ownership/grant statements and SQL parameters are fully redacted.
+  Result row values are excluded from telemetry. Object names containing
+  sensitive information require registration as known secrets or a stricter
+  call-site redaction policy.
+- SQL and worker failure logs record safe error categories and validated SQLSTATE.
+  Worker retry and stop events use these fields in place of the driver message.
+  Activity error and panic messages use safe categories.
+- Trace names, attributes, events, links, status descriptions, resource
+  attributes, and instrumentation scopes pass through redaction.
+
+Logging additional application data requires appropriate sensitive field names
+or registration of known secret literals. Raw unlabeled values need explicit
+handling at their call site.
+
+## Example output
+
+The following illustrative records use fictional IDs and selected fields from
+JSON log and console span output.
+
+```json
+{"time":"2026-11-09T05:00:00Z","level":"INFO","event":"sql_exec_completed","service":"worker","database":"app","database_role":"target","operation":"exec","query_template":"UPDATE customers SET active = ? WHERE id = ?","parameters":"[REDACTED]","parameter_count":2,"rows_affected":1,"status":"success","actor":"00000000-0000-4000-8000-000000000001","execution_id":"00000000-0000-4000-8000-000000000002","job_id":"00000000-0000-4000-8000-000000000003","attempt":1,"batch":1,"trace_id":"11111111111111111111111111111111","span_id":"2222222222222222"}
+```
+
+```json
+{
+  "Name": "db.exec",
+  "SpanContext": {
+    "TraceID": "11111111111111111111111111111111",
+    "SpanID": "2222222222222222",
+    "TraceFlags": "01",
+    "TraceState": "",
+    "Remote": false
+  },
+  "Attributes": [
+    {"Key":"db.operation.name","Value":{"Type":"STRING","Value":"exec"}},
+    {"Key":"db.query.summary","Value":{"Type":"STRING","Value":"UPDATE customers SET active = ? WHERE id = ?"}}
+  ]
+}
+```
+
+## Verification
+
+Unit tests reside beside their implementations.
+
+```powershell
+go test ./...
+```
+
+Use the dedicated disposable PostgreSQL service for the telemetry integration
+suite. `TEST_DATABASE_URL` is read from the test process environment.
+
+```powershell
+docker compose -f compose.test.yaml up -d --wait postgres-test
+$env:TEST_DATABASE_URL = 'postgres://if3110_test_admin:if3110-integration-password@localhost:55432/postgres?sslmode=disable'
+go test -tags=integration -count=1 ./tests -run '^TestTelemetry.*Integration$'
+docker compose -f compose.test.yaml stop postgres-test
+```
+
+`tests/telemetry_test.go` verifies HTTP/domain/platform SQL correlation,
+read-only queries, access denial, privacy, JSONB propagation across server and
+worker provider identities, SQLSTATE, rollback, commit, lock spans, retry scopes,
+duplicate commit evidence, and HTTP panic privacy through a real server. Tests
+restore process-wide logging/tracing state and use synchronized capture buffers. The fixture follows the server's HTTP and
+platform SQL instrumentation entry points.
+
+The complete PostgreSQL/MySQL integration instructions are in the database
+management guide. [Database management](database-management.md#integration-test).

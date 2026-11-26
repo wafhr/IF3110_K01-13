@@ -8,10 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/wafhr/IF3110_K01-13/internal/database"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 func TestNewRepositoryRejectsInvalidKey(t *testing.T) {
@@ -363,5 +366,42 @@ func assertStorageError(t *testing.T, got, want error) {
 	}
 	if got != nil && strings.Contains(got.Error(), "private-password") {
 		t.Fatal("error disclosed private credentials")
+	}
+}
+
+func TestRegistryAuditRecordsCreatedIDWithoutCredentials(t *testing.T) {
+	var output bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(telemetry.NewLogger(&output, "server"))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	repository := testRepository(t, metadataStep("INSERT INTO managed_databases", "fixture-private-name"))
+	config := validConfig()
+	config.Password = "fixture-private-password"
+	ctx := telemetry.WithActor(context.Background(), "platform-admin")
+	metadata, err := repository.Create(ctx, "fixture-private-name", config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := output.String()
+	decoder := json.NewDecoder(&output)
+	found := false
+	for {
+		var record map[string]any
+		err := decoder.Decode(&record)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if record["event"] == "database_register_completed" {
+			found = true
+			if record["database_id"] != metadata.ID || record["actor"] != "platform-admin" || record["status"] != "success" {
+				t.Fatal("identitas hasil registry tidak tercatat")
+			}
+		}
+	}
+	if !found || strings.Contains(raw, "fixture-private-") {
+		t.Fatal("audit registry hilang atau mencatat credential/nama input")
 	}
 }

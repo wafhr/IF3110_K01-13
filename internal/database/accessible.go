@@ -1,10 +1,18 @@
 package database
 
-import "context"
+import (
+	"context"
+	"log/slog"
+
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
+)
 
 // ListAccessible resolves group grants in one query. View + Edit wins when
 // several groups grant access; Platform Admin status does not bypass grants.
-func (r *Repository) ListAccessible(ctx context.Context, userID string) ([]AccessibleDatabase, error) {
+func (r *Repository) ListAccessible(ctx context.Context, userID string) (result []AccessibleDatabase, activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "accessible_databases_list", slog.String("user_id", userID))
+	defer activity.End(&activityErr)
+
 	if !validID(userID) {
 		return nil, ErrNotFound
 	}

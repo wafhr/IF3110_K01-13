@@ -6,20 +6,21 @@ import (
 	"strconv"
 
 	"github.com/wafhr/IF3110_K01-13/internal/database"
+	"github.com/wafhr/IF3110_K01-13/internal/httpjson"
 )
 
 func (h *ViewerHandler) tableData(w http.ResponseWriter, r *http.Request) {
 	options, err := pagination(r.URL.RawQuery)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid pagination parameters")
+		httpjson.Error(w, http.StatusBadRequest, "invalid pagination parameters")
 		return
 	}
 	page, err := h.schemas.Data(r.Context(), r.PathValue("databaseID"), r.PathValue("schema"), r.PathValue("table"), options)
 	if err != nil {
-		writeViewerError(w, err)
+		writeViewerError(w, r.Context(), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": page})
+	httpjson.Write(w, http.StatusOK, map[string]any{"data": page})
 }
 
 func pagination(rawQuery string) (database.PageOptions, error) {

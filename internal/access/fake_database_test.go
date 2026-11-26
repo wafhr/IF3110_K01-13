@@ -1,0 +1,193 @@
+package access
+
+import (
+	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/wafhr/IF3110_K01-13/internal/testsql"
+)
+
+const (
+	testSessionToken = "test-session-token"
+	testCSRFToken    = "test-csrf-token"
+	testUserID       = "00000000-0000-4000-8000-000000000001"
+	testDatabaseID   = "00000000-0000-4000-8000-000000000002"
+	testGroupID      = "00000000-0000-4000-8000-000000000003"
+	testUsername     = "reader"
+
+	sessionLookup    = "FROM access_sessions s JOIN access_users u"
+	leadershipLock   = "FROM access_groups WHERE id = $1 FOR UPDATE"
+	permissionLookup = "bool_or(p.permission = 'view_edit')"
+)
+
+var sessionColumns = []string{
+	"token_hash", "is_current", "grace_token", "grace_expiry", "csrf_token", "last_seen_at", "rotated_at",
+	"rotation_required", "absolute_expires_at", "user_id", "username", "is_platform_admin", "is_active", "created_at",
+}
+
+type statement struct {
+	query string
+	args  []driver.Value
+}
+
+type queryRule struct {
+	fragment string
+	columns  []string
+	rows     [][]driver.Value
+	err      error
+}
+
+type execRule struct {
+	fragment string
+	affected int64
+	err      error
+}
+
+// fakeDatabase answers SQL by matching statement fragments, records every
+// executed statement, and treats unmatched writes as affecting one row.
+type fakeDatabase struct {
+	mu         sync.Mutex
+	queries    []queryRule
+	execs      []execRule
+	statements []statement
+}
+
+func newFakeDatabase() *fakeDatabase { return &fakeDatabase{} }
+
+// withLeadership answers the group leadership lock with a leader ID, empty for
+// none, and whether the group holds database grants.
+func (f *fakeDatabase) withLeadership(leaderID string, hasGrants bool) *fakeDatabase {
+	var leader driver.Value
+	if leaderID != "" {
+		leader = leaderID
+	}
+	return f.onQuery(leadershipLock, []string{"leader_user_id", "has_grants"}, []driver.Value{leader, hasGrants})
+}
+
+func (f *fakeDatabase) onQuery(fragment string, columns []string, rows ...[]driver.Value) *fakeDatabase {
+	f.queries = append(f.queries, queryRule{fragment: fragment, columns: columns, rows: rows})
+	return f
+}
+
+func (f *fakeDatabase) failQuery(fragment string, err error) *fakeDatabase {
+	f.queries = append(f.queries, queryRule{fragment: fragment, err: err})
+	return f
+}
+
+func (f *fakeDatabase) onExec(fragment string, affected int64) *fakeDatabase {
+	f.execs = append(f.execs, execRule{fragment: fragment, affected: affected})
+	return f
+}
+
+func (f *fakeDatabase) failExec(fragment string, err error) *fakeDatabase {
+	f.execs = append(f.execs, execRule{fragment: fragment, err: err})
+	return f
+}
+
+func (f *fakeDatabase) withSession(row sessionRow) *fakeDatabase {
+	return f.onQuery(sessionLookup, sessionColumns, row.values())
+}
+
+func (f *fakeDatabase) withoutSession() *fakeDatabase {
+	return f.onQuery(sessionLookup, sessionColumns)
+}
+
+func (f *fakeDatabase) withPermission(permission Permission) *fakeDatabase {
+	if permission == "" {
+		return f.onQuery(permissionLookup, []string{"permission"})
+	}
+	return f.onQuery(permissionLookup, []string{"permission"}, []driver.Value{string(permission)})
+}
+
+func (f *fakeDatabase) executed(fragment string) []statement {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var matches []statement
+	for _, s := range f.statements {
+		if strings.Contains(s.query, fragment) {
+			matches = append(matches, s)
+		}
+	}
+	return matches
+}
+
+func (f *fakeDatabase) ran(fragment string) bool { return len(f.executed(fragment)) > 0 }
+
+func (f *fakeDatabase) open(t *testing.T) *sql.DB { return testsql.Open(t, f) }
+
+func (f *fakeDatabase) record(query string, args []driver.NamedValue) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statements = append(f.statements, statement{query: query, args: testsql.Values(args)})
+}
+
+func (f *fakeDatabase) Query(query string, args []driver.NamedValue) (driver.Rows, error) {
+	f.record(query, args)
+	for _, rule := range f.queries {
+		if strings.Contains(query, rule.fragment) {
+			if rule.err != nil {
+				return nil, rule.err
+			}
+			return &testsql.Rows{Names: rule.columns, Values: rule.rows}, nil
+		}
+	}
+	return nil, fmt.Errorf("unexpected query: %s", query)
+}
+
+func (f *fakeDatabase) Exec(query string, args []driver.NamedValue) (driver.Result, error) {
+	f.record(query, args)
+	for _, rule := range f.execs {
+		if strings.Contains(query, rule.fragment) {
+			if rule.err != nil {
+				return nil, rule.err
+			}
+			return driver.RowsAffected(rule.affected), nil
+		}
+	}
+	return driver.RowsAffected(1), nil
+}
+
+type sessionRow struct {
+	current          bool
+	graceToken       string
+	graceExpiry      time.Time
+	lastSeen         time.Time
+	rotatedAt        time.Time
+	rotationRequired bool
+	absoluteExpiry   time.Time
+	platformAdmin    bool
+	inactive         bool
+}
+
+func activeSession(now time.Time) sessionRow {
+	return sessionRow{current: true, lastSeen: now.Add(-time.Minute), rotatedAt: now.Add(-time.Minute), absoluteExpiry: now.Add(time.Hour)}
+}
+
+func (r sessionRow) values() []driver.Value {
+	var graceToken, graceExpiry driver.Value
+	if r.graceToken != "" {
+		graceToken, graceExpiry = r.graceToken, r.graceExpiry
+	}
+	return []driver.Value{
+		tokenHash(testSessionToken), r.current, graceToken, graceExpiry, testCSRFToken, r.lastSeen, r.rotatedAt,
+		r.rotationRequired, r.absoluteExpiry, testUserID, testUsername, r.platformAdmin, !r.inactive, r.lastSeen,
+	}
+}
+
+type sqlStateError string
+
+func (e sqlStateError) Error() string    { return "sql state " + string(e) }
+func (e sqlStateError) SQLState() string { return string(e) }
+
+var errDatabaseDown = errors.New("connection refused by db.internal:5432")
+
+func newTestService(t *testing.T, database *fakeDatabase, now time.Time) *Service {
+	t.Helper()
+	return &Service{db: database.open(t), now: func() time.Time { return now }}
+}

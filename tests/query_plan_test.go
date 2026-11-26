@@ -25,7 +25,7 @@ func TestQueryPlanPreviewIntegration(t *testing.T) {
 		Group access.Group `json:"group"`
 	}
 	decode(t, admin.do(t, "POST", "/admin/groups", map[string]string{"name": "Plan editors"}, 201), &group)
-	admin.do(t, "PUT", "/admin/groups/"+group.Group.ID+"/members/"+user.User.ID, nil, 204)
+	leadGroup(t, admin, group.Group.ID, user.User.ID)
 	admin.do(t, "PUT", "/admin/groups/"+group.Group.ID+"/databases/"+registered.Database.ID, map[string]string{"permission": "view_edit"}, 204)
 	execFixture(t, f.target, "GRANT UPDATE ON public.customers TO "+pgx.Identifier{f.createdRole}.Sanitize())
 	editor := f.login(t, "editor", memberPassword)

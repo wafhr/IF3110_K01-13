@@ -50,7 +50,7 @@ func TestMySQLTargetIntegration(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if table != "" && migrationTable != "" {
-			_, _ = db.ExecContext(ctx, "DROP TABLE IF EXISTS `"+table+"`, `"+migrationTable+"`, `platform_migrations`")
+			_, _ = db.ExecContext(ctx, "DROP TABLE IF EXISTS `"+table+"`, `"+migrationTable+"`, `platform_migration_executions`, `platform_migrations`")
 		}
 		_ = db.Close()
 	})
@@ -78,7 +78,7 @@ func TestMySQLTargetIntegration(t *testing.T) {
 		Group access.Group `json:"group"`
 	}
 	decode(t, admin.do(t, "POST", "/admin/groups", map[string]string{"name": "mysql integration"}, 201), &group)
-	admin.do(t, "PUT", "/admin/groups/"+group.Group.ID+"/members/"+current.User.ID, nil, 204)
+	leadGroup(t, admin, group.Group.ID, current.User.ID)
 	admin.do(t, "PUT", "/admin/groups/"+group.Group.ID+"/databases/"+registered.Database.ID,
 		map[string]string{"permission": "view_edit"}, 204)
 
@@ -163,18 +163,15 @@ func TestMySQLTargetIntegration(t *testing.T) {
 	}
 	admin.do(t, "POST", planEndpoint, map[string]any{"sql": "SELECT 1; SELECT 2"}, 400)
 	assertCount(t, db, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='platform_migrations'", 0)
-	rejectedSQL := "INSERT INTO `" + table + "` (amount,note) VALUES (3,'marker; COMMIT'); /* runner owns the transaction */ COMMIT; SELECT * FROM `missing_integration_table`"
-	admin.do(t, "POST", migrationPath, map[string]string{"name": "reject transaction control", "sql": rejectedSQL}, 400)
-	assertCount(t, db, "SELECT COUNT(*) FROM `"+table+"`", 2)
-	autocommitSQL := "INSERT INTO `" + table + "` (amount,note) VALUES (4,'autocommit'); SET @migration_flag = 1, autocommit = 1; SELECT * FROM `missing_integration_table`"
-	admin.do(t, "POST", migrationPath, map[string]string{"name": "reject autocommit change", "sql": autocommitSQL}, 400)
-	assertCount(t, db, "SELECT COUNT(*) FROM `"+table+"`", 2)
 
 	createdSQL := "CREATE TABLE `" + migrationTable + "` (id INTEGER PRIMARY KEY, note VARCHAR(80) DEFAULT 'literal; COMMIT') ENGINE=InnoDB"
 	var result struct {
 		Migration migration.Record `json:"migration"`
 	}
-	decode(t, admin.do(t, "POST", migrationPath, map[string]string{"name": "create mysql target table", "sql": createdSQL}, 201), &result)
+	result.Migration, err = f.seedLegacyMigration(context.Background(), databaseID, current.User.ID, "create mysql target table", createdSQL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if result.Migration.Status != migration.Success || result.Migration.Version != 1 || result.Migration.ExecutedBy != current.User.ID {
 		t.Fatalf("unexpected MySQL migration result: %+v", result.Migration)
 	}
@@ -186,32 +183,34 @@ func TestMySQLTargetIntegration(t *testing.T) {
 		Group access.Group `json:"group"`
 	}
 	decode(t, admin.do(t, "POST", "/admin/groups", map[string]string{"name": "mysql viewer"}, 201), &viewerGroup)
-	admin.do(t, "PUT", "/admin/groups/"+viewerGroup.Group.ID+"/members/"+viewerUser.User.ID, nil, 204)
+	leadGroup(t, admin, viewerGroup.Group.ID, viewerUser.User.ID)
 	admin.do(t, "PUT", "/admin/groups/"+viewerGroup.Group.ID+"/databases/"+databaseID,
 		map[string]string{"permission": "view_only"}, 204)
 	viewer := f.login(t, "mysql_viewer", memberPassword)
 	viewer.do(t, "GET", "/databases/"+databaseID+"/schemas", nil, 200)
-	viewer.do(t, "POST", migrationPath, map[string]string{"name": "must be denied", "sql": "COMMIT"}, 403)
+	viewer.do(t, "POST", migrationPath+"/definitions", map[string]string{"name": "must be denied", "sql_up": "SELECT 1", "sql_down": "SELECT 2"}, 403)
 	viewer.do(t, "POST", planEndpoint, map[string]any{"sql": "SELECT 1"}, 403)
 
 	failedSQL := "INSERT INTO `" + table + "` (amount) VALUES (3); SELECT * FROM `missing_integration_table`"
-	decode(t, admin.do(t, "POST", migrationPath, map[string]string{"name": "rollback mysql insert", "sql": failedSQL}, 422), &result)
+	result.Migration, err = f.seedLegacyMigration(context.Background(), databaseID, current.User.ID, "rollback mysql insert", failedSQL)
+	if err == nil {
+		t.Fatal("SQL legacy yang gagal diterima")
+	}
 	if result.Migration.Status != migration.Failed || result.Migration.Version != 2 {
 		t.Fatalf("unexpected failed MySQL migration: %+v", result.Migration)
 	}
-	var history struct {
-		Migrations []migration.Record `json:"migrations"`
-	}
-	decode(t, admin.do(t, "GET", migrationPath, nil, 200), &history)
-	if len(history.Migrations) != 2 || history.Migrations[0].Status != migration.Failed || history.Migrations[1].Status != migration.Success {
-		t.Fatalf("unexpected MySQL migration history: %+v", history.Migrations)
+	var history migration.ExecutionHistory
+	decode(t, admin.do(t, "GET", migrationPath+"/history", nil, 200), &history)
+	if len(history.Executions) != 1 || history.Executions[0].LegacyVersion == nil || len(history.LegacyAttempts) != 1 ||
+		history.LegacyAttempts[0].Status != migration.Failed {
+		t.Fatalf("unexpected MySQL migration history: %+v", history)
 	}
 	var detail struct {
-		Migration migration.Record `json:"migration"`
+		Execution migration.Execution `json:"execution"`
 	}
-	decode(t, admin.do(t, "GET", migrationPath+"/1", nil, 200), &detail)
-	if detail.Migration.SQL != createdSQL || detail.Migration.ExecutedBy != current.User.ID {
-		t.Fatalf("unexpected MySQL migration detail: %+v", detail.Migration)
+	decode(t, admin.do(t, "GET", migrationPath+"/history/"+history.Executions[0].ID, nil, 200), &detail)
+	if detail.Execution.SQL != createdSQL || detail.Execution.ExecutedBy != current.User.ID {
+		t.Fatalf("unexpected MySQL migration detail: %+v", detail.Execution)
 	}
 	assertCount(t, db, "SELECT COUNT(*) FROM `"+table+"`", 2)
 }

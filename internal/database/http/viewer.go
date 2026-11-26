@@ -7,6 +7,7 @@ import (
 
 	"github.com/wafhr/IF3110_K01-13/internal/access"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
+	"github.com/wafhr/IF3110_K01-13/internal/httpjson"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 )
 
@@ -44,61 +45,61 @@ func (h *ViewerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) { serv
 func (h *ViewerHandler) listAccessible(w http.ResponseWriter, r *http.Request) {
 	user, ok := access.UserFromContext(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		httpjson.Error(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	databases, err := h.registry.ListAccessible(r.Context(), user.ID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r.Context(), err)
 		return
 	}
 	if databases == nil {
 		databases = []database.AccessibleDatabase{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"databases": databases})
+	httpjson.Write(w, http.StatusOK, map[string]any{"databases": databases})
 }
 
 func (h *ViewerHandler) listSchemas(w http.ResponseWriter, r *http.Request) {
 	schemas, err := h.schemas.Schemas(r.Context(), r.PathValue("databaseID"))
 	if err != nil {
-		writeViewerError(w, err)
+		writeViewerError(w, r.Context(), err)
 		return
 	}
 	if schemas == nil {
 		schemas = []database.Schema{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"schemas": schemas})
+	httpjson.Write(w, http.StatusOK, map[string]any{"schemas": schemas})
 }
 
 func (h *ViewerHandler) listTables(w http.ResponseWriter, r *http.Request) {
 	tables, err := h.schemas.Tables(r.Context(), r.PathValue("databaseID"), r.PathValue("schema"))
 	if err != nil {
-		writeViewerError(w, err)
+		writeViewerError(w, r.Context(), err)
 		return
 	}
 	if tables == nil {
 		tables = []database.Table{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tables": tables})
+	httpjson.Write(w, http.StatusOK, map[string]any{"tables": tables})
 }
 
 func (h *ViewerHandler) tableDetails(w http.ResponseWriter, r *http.Request) {
 	table, err := h.schemas.Table(r.Context(), r.PathValue("databaseID"), r.PathValue("schema"), r.PathValue("table"))
 	if err != nil {
-		writeViewerError(w, err)
+		writeViewerError(w, r.Context(), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"table": table})
+	httpjson.Write(w, http.StatusOK, map[string]any{"table": table})
 }
 
-func writeViewerError(w http.ResponseWriter, err error) {
+func writeViewerError(w http.ResponseWriter, ctx context.Context, err error) {
 	if errors.Is(err, targetdb.ErrPermissionDenied) {
-		writeError(w, http.StatusForbidden, "target database access denied")
+		httpjson.Error(w, http.StatusForbidden, "target database access denied")
 		return
 	}
 	if errors.Is(err, database.ErrInvalidInput) {
-		writeError(w, http.StatusBadRequest, "invalid schema or table name")
+		httpjson.Error(w, http.StatusBadRequest, "invalid schema or table name")
 		return
 	}
-	writeServiceError(w, err)
+	writeServiceError(w, ctx, err)
 }

@@ -1,0 +1,169 @@
+{
+  "uid": "if3110-observability",
+  "title": "IF3110 Observability",
+  "schemaVersion": 39,
+  "editable": false,
+  "refresh": "10s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Migration jobs by status",
+      "description": "Job counts persisted in the platform database.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "if3110-prometheus"},
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "if3110_migration_jobs",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Migration attempt duration (p95)",
+      "description": "The p95 since worker startup. Each exemplar links to the Tempo trace for a recorded attempt.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "if3110-prometheus"},
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, action, outcome) (if3110_migration_duration_seconds_bucket))",
+          "legendFormat": "{{action}} / {{outcome}}",
+          "exemplar": true,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Queue and lock wait (p95)",
+      "description": "Observed time from readiness to claim, and time to acquire a target lock.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "if3110-prometheus"},
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(if3110_migration_queue_wait_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "Queue wait"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(if3110_migration_lock_wait_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "Lock wait"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Retries scheduled (last 5 minutes)",
+      "description": "Retries recorded by workers over a rolling window.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "if3110-prometheus"},
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(if3110_migration_retries_total{job=\"worker\"}[5m]))",
+          "legendFormat": "Retries"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Committed batches and affected rows",
+      "description": "Cumulative counts since worker startup, grouped by execution or reversion.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "if3110-prometheus"},
+      "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (operation) (if3110_migration_batches_total{job=\"worker\"})",
+          "legendFormat": "Batches / {{operation}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (operation) (if3110_migration_rows_total{job=\"worker\"})",
+          "legendFormat": "Rows / {{operation}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Database pool connections",
+      "description": "Live in-use and idle connections for each process and database role.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "if3110-prometheus"},
+      "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (job, role, db_system, state) (if3110_db_pool_connections)",
+          "legendFormat": "{{job}} / {{role}} / {{db_system}} / {{state}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Database pool waits (last 5 minutes)",
+      "description": "Connection acquisitions that had to wait for space in the pool.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "if3110-prometheus"},
+      "gridPos": {"x": 0, "y": 24, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (job, role, db_system) (increase(if3110_db_pool_waits_total[5m]))",
+          "legendFormat": "{{job}} / {{role}} / {{db_system}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Average database pool wait",
+      "description": "Mean time per acquisition that waited in the last five minutes.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "if3110-prometheus"},
+      "gridPos": {"x": 12, "y": 24, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (job, role, db_system) (increase(if3110_db_pool_wait_seconds_total[5m])) / (sum by (job, role, db_system) (increase(if3110_db_pool_waits_total[5m])) > 0)",
+          "legendFormat": "{{job}} / {{role}} / {{db_system}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Migration activity logs",
+      "description": "Open a log record and select View trace to follow its trace ID in Tempo.",
+      "type": "logs",
+      "datasource": {"type": "loki", "uid": "if3110-loki"},
+      "gridPos": {"x": 0, "y": 32, "w": 24, "h": 10},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service_name=~\"server|worker\"} |~ \"(migration_|worker_attempt_)\" | event=~\"migration_.*|worker_attempt_.*\"",
+          "queryType": "range",
+          "maxLines": 100
+        }
+      ]
+    }
+  ]
+}

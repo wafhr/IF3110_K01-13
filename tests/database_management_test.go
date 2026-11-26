@@ -46,7 +46,7 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 			Group access.Group `json:"group"`
 		}
 		decode(t, admin.do(t, "POST", "/admin/groups", map[string]string{"name": permission}, 201), &group)
-		admin.do(t, "PUT", "/admin/groups/"+group.Group.ID+"/members/"+user.User.ID, nil, 204)
+		leadGroup(t, admin, group.Group.ID, user.User.ID)
 		admin.do(t, "PUT", "/admin/groups/"+group.Group.ID+"/databases/"+id, map[string]string{"permission": permission}, 204)
 		if permission == "view_only" {
 			readerGroupID = group.Group.ID
@@ -58,26 +58,33 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 	viewer := f.login(t, "viewer", memberPassword)
 	path := tableURL(id, quotedSchema, quotedTable)
 
-	t.Run("browser workspace pages respect authorization and render feature flows", func(t *testing.T) {
-		adminPage := string(admin.page(t, "/manage/databases"))
-		if !strings.Contains(adminPage, "Register database") || !strings.Contains(adminPage, "database-admin.js") {
-			t.Fatal("database admin page did not render its form and browser client")
+	t.Run("browser routes serve the SPA behind authentication", func(t *testing.T) {
+		for _, route := range []string{"/", "/workspace/databases/" + id, "/workspace/databases/" + id + "/migrations"} {
+			if page := string(viewer.page(t, route)); !strings.Contains(page, `<div id="app">`) || !strings.Contains(page, "/assets/js/spa.js") {
+				t.Fatalf("%s did not serve the SPA shell", route)
+			}
 		}
-		workspace := string(member.page(t, "/"))
-		if !strings.Contains(workspace, "workspace.js") || !strings.Contains(workspace, "Your workspaces") {
-			t.Fatal("home page did not render the accessible workspace client")
+		if page := string(admin.page(t, "/manage/databases")); !strings.Contains(page, "/assets/js/spa.js") {
+			t.Fatal("admin page did not serve the SPA shell")
 		}
-		viewerPage := string(member.page(t, "/workspace/databases/"+id))
-		if !strings.Contains(viewerPage, "database-viewer.js") || !strings.Contains(viewerPage, "SCHEMA EXPLORER") {
-			t.Fatal("database workspace did not render the schema browser")
+		for _, test := range []struct {
+			client          *apiClient
+			route, location string
+		}{
+			{client: viewer, route: "/manage/databases", location: "/"},
+			{client: f.anonymous(), route: "/workspace/databases/" + id + "/migrations", location: "/login"},
+		} {
+			if got := browserRedirect(t, test.client, test.route); got != test.location {
+				t.Fatalf("%s redirected to %q, want %q", test.route, got, test.location)
+			}
 		}
-		migrationPage := string(viewer.page(t, "/workspace/databases/"+id+"/migrations"))
-		if !strings.Contains(migrationPage, "migrations.js") || !strings.Contains(migrationPage, "Run a migration") {
-			t.Fatal("migration page did not render history and editor shell")
+		response, err := viewer.client.Get(viewer.baseURL + "/assets/js/spa.js")
+		if err != nil {
+			t.Fatal(err)
 		}
-		viewerAdminPage := string(viewer.page(t, "/manage/databases"))
-		if !strings.Contains(viewerAdminPage, "Good to see you, viewer") || strings.Contains(viewerAdminPage, "Register database") {
-			t.Fatal("non-admin was not redirected away from database administration")
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK || !strings.Contains(response.Header.Get("Content-Type"), "javascript") {
+			t.Fatalf("SPA script status/content-type = %d/%q", response.StatusCode, response.Header.Get("Content-Type"))
 		}
 	})
 
@@ -286,42 +293,49 @@ func TestDatabaseManagementIntegration(t *testing.T) {
 	})
 
 	t.Run("migration uses registered encrypted credentials alongside viewer", func(t *testing.T) {
-		// The migration runner needs DDL rights in addition to the viewer's SELECT.
+		// Fixture history lama memerlukan hak DDL selain SELECT untuk viewer.
 		execFixture(t, f.target, `GRANT CREATE ON SCHEMA public TO `+pgx.Identifier{f.createdRole}.Sanitize())
-		migrationPath := "/databases/" + id + "/migrations"
-		admin.do(t, "GET", migrationPath, nil, 403)
-		outsider.do(t, "GET", migrationPath, nil, 403)
-		f.anonymous().do(t, "GET", migrationPath, nil, 401)
-		viewer.do(t, "GET", migrationPath, nil, 200)
+		historyPath := "/databases/" + id + "/migrations/history"
+		admin.do(t, "GET", historyPath, nil, 403)
+		outsider.do(t, "GET", historyPath, nil, 403)
+		f.anonymous().do(t, "GET", historyPath, nil, 401)
+		viewer.do(t, "GET", historyPath, nil, 200)
 		input := map[string]string{"name": "create integration table", "sql": "CREATE TABLE public.integration_created (id INTEGER PRIMARY KEY)"}
-		viewer.do(t, "POST", migrationPath, input, 403)
-		member.do(t, "POST", migrationPath, input, 403, func(r *http.Request) { r.Header.Del("X-CSRF-Token") })
+		definition := map[string]string{"name": input["name"], "sql_up": input["sql"], "sql_down": "DROP TABLE public.integration_created"}
+		viewer.do(t, "POST", "/databases/"+id+"/migrations/definitions", definition, 403)
+		member.do(t, "POST", "/databases/"+id+"/migrations/definitions", definition, 403, func(r *http.Request) { r.Header.Del("X-CSRF-Token") })
 		var created struct {
 			Migration migration.Record `json:"migration"`
 		}
-		decode(t, member.do(t, "POST", migrationPath, input, 201), &created)
+		var err error
+		created.Migration, err = f.seedLegacyMigration(context.Background(), id, user.User.ID, input["name"], input["sql"])
+		if err != nil {
+			t.Fatal(err)
+		}
 		if created.Migration.Status != migration.Success || created.Migration.Version != 1 || created.Migration.ExecutedBy != user.User.ID {
 			t.Fatalf("unexpected migration result: %+v", created.Migration)
 		}
-		var detail struct {
-			Migration migration.Record `json:"migration"`
-		}
-		decode(t, viewer.do(t, "GET", migrationPath+"/1", nil, 200), &detail)
-		if detail.Migration.SQL != input["sql"] {
-			t.Fatal("migration detail lost SQL text")
-		}
 		input = map[string]string{"name": "rollback integration insert", "sql": "INSERT INTO public.integration_created VALUES (1); SELECT * FROM public.integration_missing;"}
-		decode(t, member.do(t, "POST", migrationPath, input, 422), &created)
+		created.Migration, err = f.seedLegacyMigration(context.Background(), id, user.User.ID, input["name"], input["sql"])
+		if err == nil {
+			t.Fatal("SQL legacy yang gagal diterima")
+		}
 		if created.Migration.Status != migration.Failed || created.Migration.Version != 2 {
 			t.Fatalf("unexpected failed migration: %+v", created.Migration)
 		}
 		assertCount(t, f.target, `SELECT count(*) FROM public.integration_created`, 0)
-		var history struct {
-			Migrations []migration.Record `json:"migrations"`
+		var history migration.ExecutionHistory
+		decode(t, viewer.do(t, "GET", historyPath, nil, 200), &history)
+		if len(history.Executions) != 1 || history.Executions[0].LegacyVersion == nil || *history.Executions[0].LegacyVersion != 1 ||
+			len(history.LegacyAttempts) != 1 || history.LegacyAttempts[0].Status != migration.Failed {
+			t.Fatalf("unexpected migration history: %+v", history)
 		}
-		decode(t, viewer.do(t, "GET", migrationPath, nil, 200), &history)
-		if len(history.Migrations) != 2 || history.Migrations[0].Status != migration.Failed || history.Migrations[1].Status != migration.Success {
-			t.Fatalf("unexpected migration history: %+v", history.Migrations)
+		var detail struct {
+			Execution migration.Execution `json:"execution"`
+		}
+		decode(t, viewer.do(t, "GET", historyPath+"/"+history.Executions[0].ID, nil, 200), &detail)
+		if detail.Execution.SQL != "CREATE TABLE public.integration_created (id INTEGER PRIMARY KEY)" || detail.Execution.ExecutedBy != user.User.ID {
+			t.Fatalf("migration detail = %+v", detail.Execution)
 		}
 		readPage(t, tableURL(id, "public", "integration_created")+"/data")
 		readPage(t, path+"/data") // Migration pool cleanup must not close the viewer pool.
@@ -344,4 +358,25 @@ CREATE TRIGGER integration_reject_delete BEFORE DELETE ON access_group_database_
 		assertCount(t, f.target, `SELECT count(*) FROM "Sales / Data"."Order""Items"`, 3)
 		admin.do(t, "DELETE", "/admin/databases/"+hidden.Database.ID, nil, 204)
 	})
+}
+
+// browserRedirect returns the Location of a browser page request without following it.
+func browserRedirect(t *testing.T, client *apiClient, path string) string {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, client.baseURL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Accept", "text/html")
+	noFollow := *client.client
+	noFollow.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := noFollow.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("GET %s: status %d, want 303", path, response.StatusCode)
+	}
+	return response.Header.Get("Location")
 }

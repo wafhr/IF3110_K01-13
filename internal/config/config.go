@@ -19,6 +19,8 @@ type Config struct {
 	BootstrapAdminUsername string
 	BootstrapAdminPassword string
 	SecureCookie           bool
+	MetricsAddress         string
+	TraceEndpoint          string
 }
 
 // LoadDotEnv loads local settings from .env in the working
@@ -65,7 +67,76 @@ func Load() (Config, error) {
 		BootstrapAdminUsername: os.Getenv("BOOTSTRAP_ADMIN_USERNAME"),
 		BootstrapAdminPassword: os.Getenv("BOOTSTRAP_ADMIN_PASSWORD"),
 		SecureCookie:           secureCookie,
+		MetricsAddress:         os.Getenv("SERVER_METRICS_ADDR"),
+		TraceEndpoint:          os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"),
 	}, nil
 }
 
 func (c Config) Address() string { return net.JoinHostPort("", c.Port) }
+
+// Worker holds the settings of the migration worker process.
+type Worker struct {
+	ID             string
+	Concurrency    int
+	PollInterval   time.Duration
+	Lease          time.Duration
+	MaxAttempts    int
+	MetricsAddress string
+}
+
+// LoadWorker reads worker settings. The ID defaults to the host name and
+// process ID so every worker process holds distinct job leases.
+func LoadWorker() (Worker, error) {
+	id := os.Getenv("WORKER_ID")
+	if id == "" {
+		host, err := os.Hostname()
+		if err != nil {
+			host = "worker"
+		}
+		id = fmt.Sprintf("%s-%d", host, os.Getpid())
+	}
+	concurrency, err := positiveInt("WORKER_CONCURRENCY", 4)
+	if err != nil {
+		return Worker{}, err
+	}
+	maxAttempts, err := positiveInt("WORKER_MAX_ATTEMPTS", 5)
+	if err != nil {
+		return Worker{}, err
+	}
+	pollInterval, err := positiveDuration("WORKER_POLL_INTERVAL", time.Second)
+	if err != nil {
+		return Worker{}, err
+	}
+	lease, err := positiveDuration("WORKER_LEASE", 30*time.Second)
+	if err != nil {
+		return Worker{}, err
+	}
+	if lease < 3*time.Second {
+		return Worker{}, errors.New("WORKER_LEASE must be at least 3s")
+	}
+	return Worker{ID: id, Concurrency: concurrency, PollInterval: pollInterval, Lease: lease, MaxAttempts: maxAttempts, MetricsAddress: os.Getenv("WORKER_METRICS_ADDR")}, nil
+}
+
+func positiveInt(name string, fallback int) (int, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback, nil
+	}
+	number, err := strconv.Atoi(value)
+	if err != nil || number < 1 {
+		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return number, nil
+}
+
+func positiveDuration(name string, fallback time.Duration) (time.Duration, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration, for example 5s", name)
+	}
+	return duration, nil
+}

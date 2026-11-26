@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"sync"
 
 	"github.com/wafhr/IF3110_K01-13/internal/database"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 )
 
 type Registry interface {
@@ -98,7 +100,10 @@ func (m *Manager) Get(ctx context.Context, id string) (*sql.DB, error) {
 
 // Check verifies a saved registration using a temporary pool. It always tries a
 // fresh connection, even if Get has already cached a pool for the same target.
-func (m *Manager) Check(ctx context.Context, id string) error {
+func (m *Manager) Check(ctx context.Context, id string) (activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "database_connection_check", slog.String("database_id", id))
+	defer activity.End(&activityErr)
+
 	m.mu.Lock()
 	closed := m.closed
 	m.mu.Unlock()
@@ -113,7 +118,10 @@ func (m *Manager) Check(ctx context.Context, id string) error {
 }
 
 // Test verifies unsaved settings without modifying the registry or pool cache.
-func (m *Manager) Test(ctx context.Context, config database.ConnectionConfig) error {
+func (m *Manager) Test(ctx context.Context, config database.ConnectionConfig) (activityErr error) {
+	ctx, activity := telemetry.StartActivity(ctx, "database_connection_test")
+	defer activity.End(&activityErr)
+
 	m.mu.Lock()
 	closed := m.closed
 	m.mu.Unlock()

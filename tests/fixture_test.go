@@ -12,12 +12,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,9 +29,11 @@ import (
 	"github.com/wafhr/IF3110_K01-13/internal/app"
 	"github.com/wafhr/IF3110_K01-13/internal/database"
 	databasehttp "github.com/wafhr/IF3110_K01-13/internal/database/http"
+	"github.com/wafhr/IF3110_K01-13/internal/job"
 	"github.com/wafhr/IF3110_K01-13/internal/migration"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb"
 	"github.com/wafhr/IF3110_K01-13/internal/targetdb/drivers"
+	"github.com/wafhr/IF3110_K01-13/internal/telemetry"
 	"github.com/wafhr/IF3110_K01-13/web"
 )
 
@@ -42,6 +46,7 @@ const quotedTable = `Order"Items`
 type fixture struct {
 	admin, platform, target *sql.DB
 	registry                *database.Repository
+	openTarget              migration.TargetOpener
 	pools                   *targetdb.Manager
 	inspector               *drivers.Inspector
 	server                  *httptest.Server
@@ -81,7 +86,8 @@ func newFixture(t *testing.T) *fixture {
 	}
 	platformConfig, targetConfig := config.Copy(), config.Copy()
 	platformConfig.Database, targetConfig.Database = f.createdDatabases[0], f.createdDatabases[1]
-	f.platform, f.target = stdlib.OpenDB(*platformConfig), stdlib.OpenDB(*targetConfig)
+	f.platform = sql.OpenDB(telemetry.SQLConnector(stdlib.GetConnector(*platformConfig), "postgresql", "platform", platformConfig.Database))
+	f.target = stdlib.OpenDB(*targetConfig)
 	role := prefix + "_reader"
 	execFixture(t, f.admin, "CREATE ROLE "+pgx.Identifier{role}.Sanitize()+" LOGIN PASSWORD '"+targetPassword+"'")
 	f.createdRole = role
@@ -111,19 +117,23 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	f.inspector = drivers.NewInspector(f.registry, f.pools)
-	migrations := migration.NewService(func(ctx context.Context, id string) (*sql.DB, database.DBMS, error) {
+	f.openTarget = func(ctx context.Context, id string) (*sql.DB, database.DBMS, error) {
 		connection, err := f.registry.GetConnectionConfig(ctx, id)
 		if err != nil {
 			return nil, "", err
 		}
 		db, err := connector.Open(ctx, connection)
 		return db, connection.DBMS, err
-	})
+	}
+	migrations := migration.NewService(f.openTarget)
 	auth := access.NewHTTPHandler(authService, false)
-	f.server = httptest.NewServer(app.RoutesWithModulesAndFrontend(auth,
-		databasehttp.NewHandler(f.registry, f.pools, auth),
-		databasehttp.NewViewerHandler(f.registry, f.inspector, auth),
-		migration.NewHTTPHandler(migrations, auth), web.NewHandler(authService, auth)))
+	f.server = httptest.NewServer(telemetry.HTTPHandler(app.RoutesWith(app.Modules{
+		Access:    auth,
+		Database:  databasehttp.NewHandler(f.registry, f.pools, auth),
+		Viewer:    databasehttp.NewViewerHandler(f.registry, f.inspector, auth),
+		Migration: migration.NewHTTPHandler(migrations, auth),
+		Frontend:  web.NewHandler(auth),
+	})))
 	f.settings = database.ConnectionConfig{Host: config.Host, Port: int(config.Port), DatabaseName: targetConfig.Database,
 		DBMS: database.PostgreSQL, Username: role, Password: targetPassword, SSLMode: "disable"}
 	return f
@@ -323,6 +333,14 @@ func (c *apiClient) page(t *testing.T, path string) []byte {
 	return content
 }
 
+// leadGroup adds userID to the group and makes it the leader, which a database
+// grant requires.
+func leadGroup(t *testing.T, admin *apiClient, groupID, userID string) {
+	t.Helper()
+	admin.do(t, "PUT", "/admin/groups/"+groupID+"/members/"+userID, nil, 204)
+	admin.do(t, "PUT", "/admin/groups/"+groupID+"/leader", map[string]string{"user_id": userID}, 204)
+}
+
 func decode(t *testing.T, body []byte, output any) {
 	t.Helper()
 	if err := json.Unmarshal(body, output); err != nil {
@@ -337,4 +355,280 @@ func registration(name string, settings database.ConnectionConfig) map[string]an
 
 func tableURL(id, schema, table string) string {
 	return fmt.Sprintf("/databases/%s/schemas/%s/tables/%s", id, url.PathEscape(schema), url.PathEscape(table))
+}
+
+// migrationFixture menghubungkan API dan repository nyata dengan provider uji
+// approval serta antrean. Pelaksanaan job dipanggil langsung melalui hook migration.
+type migrationFixture struct {
+	*fixture
+	definitions                        *migration.Repository
+	migrations                         *migration.Service
+	approvals                          *migrationTestApprovals
+	jobs                               *job.Repository
+	editor, reader, platformAdmin      *apiClient
+	databaseID, actorID, editorGroupID string
+}
+
+type migrationTestApproval struct {
+	actorID string
+	plan    migration.ActionPlan
+}
+
+type migrationTestApprovals struct {
+	mu        sync.Mutex
+	snapshots map[string]migrationTestApproval
+	next      int
+}
+
+func (a *migrationTestApprovals) ValidateApproval(_ context.Context, request migration.ExecutionRequest) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	approved, exists := a.snapshots[request.ApprovalID]
+	if !exists || approved.actorID != request.ActorID || approved.plan != request.Plan {
+		return migration.ErrApprovalRequired
+	}
+	return nil
+}
+
+func newMigrationFixture(t *testing.T) *migrationFixture {
+	t.Helper()
+	f := newFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	definitions, err := migration.NewRepository(f.platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := definitions.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	jobs := newJobQueue(t, f)
+	queue, err := job.NewService(jobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execFixture(t, f.target, `GRANT CREATE ON SCHEMA public TO `+pgx.Identifier{f.createdRole}.Sanitize())
+	approvals := &migrationTestApprovals{snapshots: make(map[string]migrationTestApproval)}
+	authService := access.NewService(f.platform)
+	migrations := migration.NewServiceWithExecution(f.openTarget, definitions, migration.ExecutionDependencies{
+		Authorizer: authService, Approvals: approvals, Queue: queue,
+	})
+	auth := access.NewHTTPHandler(authService, false)
+	f.server.Close()
+	f.server = httptest.NewServer(telemetry.HTTPHandler(app.RoutesWith(app.Modules{
+		Access:    auth,
+		Database:  databasehttp.NewHandler(f.registry, f.pools, auth),
+		Viewer:    databasehttp.NewViewerHandler(f.registry, f.inspector, auth),
+		Migration: migration.NewHTTPHandler(migrations, auth),
+		Job:       job.NewHTTPHandler(queue, auth),
+	})))
+	result := &migrationFixture{fixture: f, definitions: definitions, migrations: migrations, approvals: approvals, jobs: jobs}
+	result.platformAdmin = f.login(t, "admin", adminPassword)
+	var registered struct {
+		Database database.Database `json:"database"`
+	}
+	decode(t, result.platformAdmin.do(t, "POST", "/admin/databases", registration("Migration target", f.settings), 201), &registered)
+	result.databaseID = registered.Database.ID
+	for _, permission := range []access.Permission{access.ViewEdit, access.ViewOnly} {
+		var user struct {
+			User access.User `json:"user"`
+		}
+		username := "migration_" + string(permission)
+		decode(t, result.platformAdmin.do(t, "POST", "/admin/users", map[string]any{"username": username, "password": memberPassword}, 201), &user)
+		var group struct {
+			Group access.Group `json:"group"`
+		}
+		decode(t, result.platformAdmin.do(t, "POST", "/admin/groups", map[string]string{"name": username}, 201), &group)
+		leadGroup(t, result.platformAdmin, group.Group.ID, user.User.ID)
+		result.platformAdmin.do(t, "PUT", "/admin/groups/"+group.Group.ID+"/databases/"+result.databaseID, map[string]any{"permission": permission}, 204)
+		if permission == access.ViewEdit {
+			result.actorID, result.editorGroupID = user.User.ID, group.Group.ID
+			result.editor = f.login(t, username, memberPassword)
+		} else {
+			result.reader = f.login(t, username, memberPassword)
+		}
+	}
+	return result
+}
+
+func (f *migrationFixture) migrationPath() string {
+	return "/databases/" + f.databaseID + "/migrations"
+}
+
+func (f *migrationFixture) createMigration(t *testing.T, name, up, down string) migration.Migration {
+	t.Helper()
+	var result struct {
+		Migration migration.Migration `json:"migration"`
+	}
+	decode(t, f.editor.do(t, "POST", f.migrationPath()+"/definitions", map[string]any{
+		"name": name, "sql_up": up, "sql_down": down,
+	}, 201), &result)
+	return result.Migration
+}
+
+func (f *migrationFixture) queueAction(t *testing.T, definition migration.Migration, action migration.Action, modify ...func(*http.Request)) migration.ExecutionRequest {
+	t.Helper()
+	plan, err := f.migrations.PrepareAction(context.Background(), f.databaseID, definition.ID, action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.approvals.mu.Lock()
+	f.approvals.next++
+	approvalID := fmt.Sprintf("00000000-0000-4000-8000-%012d", f.approvals.next)
+	f.approvals.snapshots[approvalID] = migrationTestApproval{actorID: f.actorID, plan: plan}
+	f.approvals.mu.Unlock()
+	var receipt migration.QueuedAction
+	decode(t, f.editor.do(t, "POST", f.migrationPath()+"/definitions/"+definition.ID+"/actions", map[string]any{
+		"action": action, "approval_id": approvalID,
+	}, 202, modify...), &receipt)
+	if receipt.JobID == "" || receipt.ExecutionID == "" {
+		t.Fatal("pengajuan tidak menghasilkan identitas job dan execution")
+	}
+	queued, err := f.jobs.Get(context.Background(), receipt.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := queued.Request
+	if queued.Status != job.Pending || request.ExecutionID != receipt.ExecutionID || request.Plan != plan || request.ActorID != f.actorID {
+		t.Fatal("payload antrean berbeda dari snapshot pengajuan")
+	}
+	return request
+}
+
+// executeJob menguji kontrak transaksi milik migration dengan koneksi registry.
+// Pengujian loop worker, retry, dan status job menjadi cakupan modul eksekusi.
+func (f *migrationFixture) executeJob(request migration.ExecutionRequest) (migration.Execution, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return f.executeJobContext(ctx, request)
+}
+
+// executeJobContext menghubungkan hook transaksi dengan context attempt pengujian.
+func (f *migrationFixture) executeJobContext(ctx context.Context, request migration.ExecutionRequest) (migration.Execution, error) {
+	db, _, err := f.openTarget(ctx, request.Plan.DatabaseID)
+	if err != nil {
+		return migration.Execution{}, err
+	}
+	defer db.Close()
+	connection, err := db.Conn(ctx)
+	if err != nil {
+		return migration.Execution{}, err
+	}
+	defer connection.Close()
+	key, err := migration.MigrationLockKey(request.Plan.DatabaseID)
+	if err != nil {
+		return migration.Execution{}, err
+	}
+	acquire := func() (lockErr error) {
+		lockCtx, activity := telemetry.StartActivity(ctx, "migration_lock_acquire", slog.String("database_id", request.Plan.DatabaseID))
+		defer activity.End(&lockErr)
+		_, lockErr = connection.ExecContext(lockCtx, `SELECT pg_advisory_lock($1)`, key)
+		return lockErr
+	}
+	if err := acquire(); err != nil {
+		return migration.Execution{}, err
+	}
+	defer func() {
+		cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer stop()
+		_, _ = connection.ExecContext(cleanup, `SELECT pg_advisory_unlock($1)`, key)
+	}()
+	tx, err := connection.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return migration.Execution{}, err
+	}
+	defer tx.Rollback()
+	prepared, err := f.migrations.PrepareExecution(ctx, tx, request)
+	if err != nil {
+		return migration.Execution{}, err
+	}
+	if committed, exists := prepared.Committed(); exists {
+		return committed, nil
+	}
+	started := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, prepared.Plan().SQL); err != nil {
+		return migration.Execution{}, err
+	}
+	execution, err := prepared.Record(ctx, started)
+	if err != nil {
+		return migration.Execution{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return migration.Execution{}, err
+	}
+	return execution, nil
+}
+
+func (f *migrationFixture) runAction(t *testing.T, definition migration.Migration, action migration.Action) migration.Execution {
+	t.Helper()
+	execution, err := f.executeJob(f.queueAction(t, definition, action))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return execution
+}
+
+func (f *migrationFixture) executionHistory(t *testing.T, hideRollback bool) migration.ExecutionHistory {
+	t.Helper()
+	var result migration.ExecutionHistory
+	decode(t, f.reader.do(t, "GET", f.migrationPath()+"/history?hide_rollback="+fmt.Sprint(hideRollback), nil, 200), &result)
+	return result
+}
+
+// seedLegacyMigration membuat data kompatibilitas Milestone 1 pada database uji.
+// SQL fixture bersifat tetap. Eksekusi aplikasi memakai kontrak queue/worker.
+func (f *fixture) seedLegacyMigration(ctx context.Context, databaseID, actorID, name, statement string) (migration.Record, error) {
+	db, system, err := f.openTarget(ctx, databaseID)
+	if err != nil {
+		return migration.Record{}, err
+	}
+	defer db.Close()
+	schema := `CREATE TABLE IF NOT EXISTS platform_migrations (version BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name TEXT NOT NULL, sql TEXT NOT NULL, status TEXT NOT NULL, executed_by UUID NOT NULL, started_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ)`
+	insert := `INSERT INTO platform_migrations(name,sql,status,executed_by) VALUES($1,$2,'running',$3) RETURNING version,started_at`
+	update := `UPDATE platform_migrations SET status=$1,finished_at=$2 WHERE version=$3`
+	if system == database.MySQL {
+		schema = "CREATE TABLE IF NOT EXISTS platform_migrations (version BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(160) NOT NULL, `sql` LONGTEXT NOT NULL, status VARCHAR(16) NOT NULL, executed_by CHAR(36) NOT NULL, started_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), finished_at DATETIME(6)) ENGINE=InnoDB"
+		insert = "INSERT INTO platform_migrations(name,`sql`,status,executed_by) VALUES(?,?,'running',?)"
+		update = `UPDATE platform_migrations SET status=?,finished_at=? WHERE version=?`
+	}
+	if _, err := db.ExecContext(ctx, schema); err != nil {
+		return migration.Record{}, err
+	}
+	record := migration.Record{Name: name, SQL: statement, Status: migration.Running, ExecutedBy: actorID}
+	if system == database.MySQL {
+		result, err := db.ExecContext(ctx, insert, name, statement, actorID)
+		if err != nil {
+			return record, err
+		}
+		record.Version, err = result.LastInsertId()
+		if err != nil {
+			return record, err
+		}
+		if err := db.QueryRowContext(ctx, `SELECT started_at FROM platform_migrations WHERE version=?`, record.Version).Scan(&record.StartedAt); err != nil {
+			return record, err
+		}
+	} else if err := db.QueryRowContext(ctx, insert, name, statement, actorID).Scan(&record.Version, &record.StartedAt); err != nil {
+		return record, err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return record, err
+	}
+	defer tx.Rollback()
+	_, executionErr := tx.ExecContext(ctx, statement)
+	finished := time.Now().UTC()
+	record.FinishedAt = &finished
+	if executionErr != nil {
+		_ = tx.Rollback()
+		record.Status = migration.Failed
+		if _, err := db.ExecContext(ctx, update, record.Status, finished, record.Version); err != nil {
+			return record, err
+		}
+		return record, executionErr
+	}
+	record.Status = migration.Success
+	if _, err := tx.ExecContext(ctx, update, record.Status, finished, record.Version); err != nil {
+		return record, err
+	}
+	return record, tx.Commit()
 }

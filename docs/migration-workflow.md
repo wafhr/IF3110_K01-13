@@ -1,0 +1,106 @@
+# Migration workflow and approval
+
+Migration definitions are drafts until an editor submits an action for review. Review snapshots bind the database registration, migration ID, revision, action, SQL plan, rollback/forward position, and batch settings. Editing a definition creates a new immutable revision; an earlier review stays in the record but is reported as `draft` and cannot authorize the changed plan.
+
+Every group with a grant to the database must approve, including `view_only` groups. Each group has one leader. A leader must be an active user who is a member of that group. If one user leads several groups, one approval request by that user records approval for each of those groups. A database grant can only be given to a group that has a leader, and that leader stays assigned while the group holds a grant. Deactivating a leader still clears the assignment so access can always be revoked; until another leader is set, that group's approval remains outstanding and the SPA marks the group as missing a leader.
+
+## States and transitions
+
+| State | Meaning | Transition |
+|---|---|---|
+| `draft` | No current review exists, or the definition has advanced beyond the latest submitted revision | An editor submits an action for review |
+| `pending_review` | A snapshot exists and at least one current required leader approval is missing | Current group leaders approve; policy changes require a new review |
+| `approved` | Every group currently granted access has approved the exact snapshot | The editor submits the matching action to the migration queue |
+
+The normal path is `draft → pending_review → approved → queued`. Approval does not itself enqueue or execute SQL. The existing action endpoint remains the queue boundary and accepts the review ID as `approval_id`. The worker validates the plan, permission, policy epoch, leader set, and every required approval again while holding the target database lock before executing SQL.
+
+## Access policy changes
+
+The platform stores a monotonic approval policy epoch for each database registration. Changing a database grant, group membership, or leader advances the epoch in the same transaction as the access change. Deactivating a leader clears the leader assignment and advances epochs for affected databases. Therefore, any such change invalidates all outstanding approvals for that database, even if the previous grant or leader is later restored. Submit a new review after the access policy is stable.
+
+Changing a draft creates a new revision through the existing revision API. The new revision is a draft, and the old workflow cannot authorize it. A definition that has been frozen by a migration attempt cannot be revised; create a new migration instead.
+
+## Group leader administration
+
+Platform Admins set a group leader through the existing admin API. The selected user must be active and already belong to the group. Send an empty `user_id` to clear the assignment of a group without database grants.
+
+```http
+PUT /admin/groups/{groupID}/leader
+Content-Type: application/json
+X-CSRF-Token: <session token>
+
+{"user_id":"51e8..."}
+```
+
+The group listing includes `leader_id`. Attempts to assign a non-member or inactive user, to grant database access to a group without a leader, or to clear the leader of a group with grants or remove that leader from the group return `400` with the reason. Deactivating the leader clears the assignment.
+
+## Review and approval API
+
+An editor with `view_edit` submits a review for one action. The plan is computed by the migration service; clients cannot supply SQL or alter its snapshot.
+
+```http
+POST /databases/{databaseID}/migrations/definitions/{migrationID}/review
+Content-Type: application/json
+X-CSRF-Token: <session token>
+
+{"action":"apply"}
+```
+
+The response is `201` with a workflow containing its ID, state, plan hash, and the required group approvals. Actions are `apply`, `rollback`, and `forward`.
+
+Read the latest state for a definition, including its implicit draft state:
+
+```http
+GET /databases/{databaseID}/migrations/definitions/{migrationID}/workflow
+```
+
+Read a particular submitted snapshot and its approvals:
+
+```http
+GET /databases/{databaseID}/migrations/workflows/{workflowID}
+```
+
+Any user with at least `view_only` access can read workflow details. A current leader with access to the database approves through:
+
+```http
+POST /databases/{databaseID}/migrations/workflows/{workflowID}/approvals
+X-CSRF-Token: <session token>
+```
+
+The response is `200` with the updated workflow. Non-leaders receive `403`; stale policy or plan snapshots receive `409`. The approval action has no body.
+
+After all required leaders approve, the editor submits the existing action:
+
+```http
+POST /databases/{databaseID}/migrations/definitions/{migrationID}/actions
+Content-Type: application/json
+X-CSRF-Token: <session token>
+
+{"action":"apply","approval_id":"<workflowID>"}
+```
+
+The API returns `202` with a job ID. The worker repeats all approval checks; approval is not treated as a long-lived permission grant.
+
+## Storage
+
+`migration_workflows` stores each immutable plan snapshot, its SHA-256 hash, submitter, state, and the access policy epoch at submission. `migration_approvals` stores one decision per workflow and group, tied to the exact leader user ID. The access package owns `access_database_approval_epochs`. These tables live in the platform PostgreSQL database and are initialized by the existing access and migration schema initialization paths.
+
+## Verification
+
+Unit tests run against a stubbed platform database and cover 88% of the statements in `workflow.go`, `http_workflow.go`, and `internal/access/leader.go`.
+
+| Test file | Covers |
+|---|---|
+| `internal/migration/workflow_service_test.go` | Review submission stores the snapshot, its hash, and the current policy epoch, and is refused when no group has access. Status reads report `approved` only when every current leader approved, and report `draft` after a revision or access policy change. A leader of several groups approves all of them at once, while non-leaders and stale reviews are rejected. Approval validation rejects a changed plan or history position, a corrupt snapshot, a policy or revision change, and a missing leader approval. Storage failures are reported without their details |
+| `internal/migration/http_workflow_test.go` | The review, workflow, and approval endpoints through the application routes, including session, CSRF, and permission checks. View Only members read workflows and their leaders approve; View Only members cannot submit reviews (`403`); non-leaders and users without a grant get `403`; stale reviews get `409`; unknown workflows get `404`; and the endpoints return `503` without a workflow provider |
+| `internal/migration/workflow_test.go` | Stable snapshot hashing that binds the action |
+| `internal/access/leader_test.go` | Leader assignment requires an active member and stays while the group holds a grant |
+
+The PostgreSQL integration test `tests/migration_workflow_test.go` exercises the same flow on a real database. It assigns leaders, rejects a leader who is not a member, collects approvals from an editor group and a View Only group, and submits the approved action to the queue. It also checks that removing a grant or revising the definition invalidates the approval, and that a fresh review can be approved again.
+
+Run them with:
+
+```sh
+go test ./internal/migration ./internal/access -run 'Workflow|Review|Approv|Leader'
+go test -tags=integration -count=1 ./tests -run '^TestMigrationWorkflow'
+```
