@@ -78,35 +78,42 @@ func TestClaimRecordsTheInterruptedAttempt(t *testing.T) {
 
 func TestListAttemptsValidatesInput(t *testing.T) {
 	repository := (&stubDatabase{}).repository(t)
-	if _, err := repository.ListAttempts(context.Background(), "database", 10); !errors.Is(err, ErrNotFound) {
+	if _, err := repository.ListAttempts(context.Background(), "database", 10, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("malformed database ID returned %v", err)
 	}
 	for _, limit := range []int{0, MaxListLimit + 1} {
-		if _, err := repository.ListAttempts(context.Background(), testDatabaseID, limit); !errors.Is(err, ErrInvalidJob) {
+		if _, err := repository.ListAttempts(context.Background(), testDatabaseID, limit, 0); !errors.Is(err, ErrInvalidJob) {
 			t.Fatalf("limit %d returned %v", limit, err)
 		}
+	}
+	if _, err := repository.ListAttempts(context.Background(), testDatabaseID, 10, -1); !errors.Is(err, ErrInvalidJob) {
+		t.Fatalf("negative cursor returned %v", err)
 	}
 }
 
 func TestListAttemptsAPI(t *testing.T) {
 	store := newFakeStore()
-	store.attempts = []Attempt{{ID: "attempt-1", JobID: testJobID, Name: "add index", Attempt: 1, Status: "failed",
-		SQL: "CREATE INDEX orders_customer_idx ON orders (customer_id)", Error: "SQLSTATE 42P01: relation does not exist"}}
-	response := serve(t, store, allowGuard(t), "/databases/"+testDatabaseID+"/attempts?limit=20")
-	if response.Code != http.StatusOK || store.listedFor != testDatabaseID || store.listedLimit != 20 {
-		t.Fatalf("status = %d, listed %q/%d", response.Code, store.listedFor, store.listedLimit)
+	store.attemptPage = AttemptPage{
+		Attempts: []Attempt{{ID: "attempt-1", Sequence: 202, JobID: testJobID, Name: "add index", Attempt: 1, Status: "failed",
+			SQL: "CREATE INDEX orders_customer_idx ON orders (customer_id)", Error: "SQLSTATE 42P01: relation does not exist"}},
+		NextBefore: 202,
 	}
-	var body struct {
-		Attempts []Attempt `json:"attempts"`
+	path := "/databases/" + testDatabaseID + "/attempts"
+	response := serve(t, store, allowGuard(t), path+"?limit=1&before=203")
+	if response.Code != http.StatusOK || store.listedFor != testDatabaseID || store.listedLimit != 1 || store.listedBefore != 203 {
+		t.Fatalf("status = %d, listed %q/%d before %d", response.Code, store.listedFor, store.listedLimit, store.listedBefore)
 	}
+	var body AttemptPage
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Attempts) != 1 || body.Attempts[0].SQL == "" || body.Attempts[0].Status != "failed" {
-		t.Fatalf("attempts = %+v", body.Attempts)
+	if len(body.Attempts) != 1 || body.Attempts[0].SQL == "" || body.Attempts[0].Status != "failed" || body.NextBefore != 202 {
+		t.Fatalf("attempt page = %+v", body)
 	}
-	if response := serve(t, store, allowGuard(t), "/databases/"+testDatabaseID+"/attempts?limit=0"); response.Code != http.StatusBadRequest {
-		t.Fatalf("invalid limit status = %d", response.Code)
+	for _, query := range []string{"?limit=0", "?before=0", "?before=-1", "?before=abc", "?before=9223372036854775808"} {
+		if response := serve(t, store, allowGuard(t), path+query); response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid query %q status = %d", query, response.Code)
+		}
 	}
 	if response := serve(t, store, denyGuard(), "/databases/"+testDatabaseID+"/attempts"); response.Code != http.StatusForbidden {
 		t.Fatalf("denied status = %d", response.Code)

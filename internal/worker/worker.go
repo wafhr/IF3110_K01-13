@@ -111,7 +111,7 @@ func (w *Worker) poll(ctx, attempts context.Context) {
 			w.process(attempts, claimed)
 			continue
 		case !errors.Is(err, job.ErrNoJob) && ctx.Err() == nil:
-			slog.ErrorContext(ctx, "job_claim_failed", "actor", "system", "status", "failed", "error", err)
+			telemetry.LogFailure(ctx, slog.LevelError, "job_claim_failed", err, slog.String("actor", "system"))
 		}
 		select {
 		case <-ctx.Done():
@@ -130,7 +130,7 @@ func (w *Worker) process(ctx context.Context, claimed job.Job) {
 		if err := w.queue.UpdateProgress(attemptCtx, claimed.ID, w.config.ID, latest); errors.Is(err, job.ErrLeaseLost) {
 			cancel(job.ErrLeaseLost)
 		} else if err != nil {
-			slog.WarnContext(attemptCtx, "job_progress_update_failed", "job_id", claimed.ID, "status", "failed", "error", err)
+			telemetry.LogFailure(attemptCtx, slog.LevelWarn, "job_progress_update_failed", err, slog.String("job_id", claimed.ID))
 		}
 	}
 	run := w.runner.Run
@@ -170,7 +170,7 @@ func (w *Worker) keepLease(ctx context.Context, jobID string, cancel context.Can
 					cancel(job.ErrLeaseLost)
 					return
 				} else if err != nil && ctx.Err() == nil {
-					slog.WarnContext(ctx, "job_heartbeat_failed", "job_id", jobID, "status", "failed", "error", err)
+					telemetry.LogFailure(ctx, slog.LevelWarn, "job_heartbeat_failed", err, slog.String("job_id", jobID))
 				}
 			}
 		}
@@ -202,13 +202,14 @@ func (w *Worker) settle(ctx context.Context, claimed job.Job, execution migratio
 			if err == nil {
 				telemetry.MetricsFromContext(ctx).RecordRetry()
 			}
-			slog.WarnContext(ctx, "job_retry_scheduled", "status", "failed", "reason", decision.Reason, "retry_delay_ms", decision.Delay.Milliseconds())
+			telemetry.LogFailure(ctx, slog.LevelWarn, "job_retry_scheduled", runErr,
+				slog.Int64("retry_delay_ms", decision.Delay.Milliseconds()))
 		} else {
 			err = w.queue.Fail(ctx, claimed.ID, w.config.ID, decision.Reason, committed)
-			slog.ErrorContext(ctx, "job_stopped", "status", "failed", "reason", decision.Reason, "operation", string(claimed.Operation))
+			telemetry.LogFailure(ctx, slog.LevelError, "job_stopped", runErr, slog.String("operation", string(claimed.Operation)))
 		}
 	}
 	if err != nil {
-		slog.ErrorContext(ctx, "job_state_update_failed", "status", "failed", "error", err)
+		telemetry.LogFailure(ctx, slog.LevelError, "job_state_update_failed", err)
 	}
 }

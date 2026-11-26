@@ -12,7 +12,7 @@ type Store interface {
 	Enqueue(context.Context, migration.ExecutionRequest) (Job, error)
 	Get(context.Context, string) (Job, error)
 	ListByDatabase(context.Context, string, int) ([]Job, error)
-	ListAttempts(context.Context, string, int) ([]Attempt, error)
+	ListAttempts(context.Context, string, int, int64) (AttemptPage, error)
 	Resume(context.Context, string) error
 	Cancel(context.Context, string) error
 }
@@ -85,7 +85,7 @@ func (s *Service) Jobs(ctx context.Context, databaseID string, limit int) ([]Job
 	return s.store.ListByDatabase(ctx, databaseID, limit)
 }
 
-// Attempts returns every recorded attempt of the database, newest first.
-func (s *Service) Attempts(ctx context.Context, databaseID string, limit int) ([]Attempt, error) {
-	return s.store.ListAttempts(ctx, databaseID, limit)
+// Attempts mengembalikan satu halaman attempt, diurutkan dari yang terbaru.
+func (s *Service) Attempts(ctx context.Context, databaseID string, limit int, before int64) (AttemptPage, error) {
+	return s.store.ListAttempts(ctx, databaseID, limit, before)
 }

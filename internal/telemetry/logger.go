@@ -194,6 +194,19 @@ func (a *Activity) SetAttributes(attrs ...slog.Attr) {
 	a.span.SetAttributes(spanAttrs(contextAttrs(a.ctx))...)
 }
 
+// LogFailure mencatat kategori error dan SQLSTATE tanpa pesan mentah driver.
+func LogFailure(ctx context.Context, level slog.Level, event string, err error, attrs ...slog.Attr) {
+	category, state := sqlError(err)
+	if category == "driver_error" {
+		category = "operation_failed"
+	}
+	attrs = append(attrs, slog.String("status", "failed"), slog.String("error", category))
+	if state != "" {
+		attrs = append(attrs, slog.String("sqlstate", state))
+	}
+	slog.LogAttrs(ctx, level, event, attrs...)
+}
+
 // End wajib dipasang langsung dengan defer agar panic tercatat sebagai kegagalan.
 // Pesan error dan nilai panic mentah tidak dimasukkan ke telemetry.
 func (a *Activity) End(operationErr *error) {

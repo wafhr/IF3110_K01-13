@@ -105,6 +105,11 @@ type Attempt struct {
 	FinishedAt       time.Time        `json:"finished_at"`
 }
 
+type AttemptPage struct {
+	Attempts   []Attempt `json:"attempts"`
+	NextBefore int64     `json:"next_before,omitempty,string"`
+}
+
 func (j *Job) describe() {
 	j.ExecutionID = j.Request.ExecutionID
 	j.DatabaseID = j.Request.Plan.DatabaseID

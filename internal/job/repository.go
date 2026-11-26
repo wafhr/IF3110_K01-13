@@ -338,29 +338,43 @@ func attemptValues(source, status, reason, finishedAt string) string {
 const attemptListColumns = `a.id::text, a.sequence, a.job_id::text, a.execution_id::text, a.migration_id::text, a.name, a.revision, a.action,
 	a.operation, a.attempt, a.actor_id::text, a.sql, a.status, a.error, a.committed_batches, a.committed_rows, a.started_at, a.finished_at`
 
-// ListAttempts returns the most recent attempts of a database registration first.
-func (r *Repository) ListAttempts(ctx context.Context, databaseID string, limit int) ([]Attempt, error) {
+// ListAttempts mengambil attempt sebelum nomor urut yang diberikan. Nilai nol
+// memulai halaman pertama dari attempt terbaru.
+func (r *Repository) ListAttempts(ctx context.Context, databaseID string, limit int, before int64) (AttemptPage, error) {
 	if !uuid.Valid(databaseID) {
-		return nil, ErrNotFound
+		return AttemptPage{}, ErrNotFound
 	}
 	if limit < 1 || limit > MaxListLimit {
-		return nil, invalid("limit")
+		return AttemptPage{}, invalid("limit")
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT `+attemptListColumns+` FROM migration_attempts a WHERE a.database_id = $1 ORDER BY a.sequence DESC LIMIT $2`, databaseID, limit)
+	if before < 0 {
+		return AttemptPage{}, invalid("before")
+	}
+	query := `SELECT ` + attemptListColumns + ` FROM migration_attempts a WHERE a.database_id = $1`
+	args := []any{databaseID, limit + 1}
+	if before != 0 {
+		query += ` AND a.sequence < $3`
+		args = append(args, before)
+	}
+	rows, err := r.db.QueryContext(ctx, query+` ORDER BY a.sequence DESC LIMIT $2`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list attempts: %w", err)
+		return AttemptPage{}, fmt.Errorf("list attempts: %w", err)
 	}
 	defer rows.Close()
-	attempts := make([]Attempt, 0)
+	page := AttemptPage{Attempts: make([]Attempt, 0)}
 	for rows.Next() {
+		if len(page.Attempts) == limit {
+			page.NextBefore = page.Attempts[limit-1].Sequence
+			break
+		}
 		var a Attempt
 		if err := rows.Scan(&a.ID, &a.Sequence, &a.JobID, &a.ExecutionID, &a.MigrationID, &a.Name, &a.Revision, &a.Action, &a.Operation,
 			&a.Attempt, &a.ActorID, &a.SQL, &a.Status, &a.Error, &a.CommittedBatches, &a.CommittedRows, &a.StartedAt, &a.FinishedAt); err != nil {
-			return nil, fmt.Errorf("read attempt: %w", err)
+			return AttemptPage{}, fmt.Errorf("read attempt: %w", err)
 		}
-		attempts = append(attempts, a)
+		page.Attempts = append(page.Attempts, a)
 	}
-	return attempts, rows.Err()
+	return page, rows.Err()
 }
 
 type rowScanner interface{ Scan(...any) error }

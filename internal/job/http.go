@@ -55,17 +55,27 @@ func (h *HTTPHandler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTPHandler) attempts(w http.ResponseWriter, r *http.Request) {
-	limit, ok := listLimit(r.URL.Query().Get("limit"))
+	query := r.URL.Query()
+	limit, ok := listLimit(query.Get("limit"))
 	if !ok {
 		httpjson.Error(w, http.StatusBadRequest, "limit must be between 1 and 100")
 		return
 	}
-	attempts, err := h.service.Attempts(r.Context(), r.PathValue("databaseID"), limit)
+	var before int64
+	if raw := query.Get("before"); raw != "" {
+		cursor, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || cursor < 1 {
+			httpjson.Error(w, http.StatusBadRequest, "before must be a positive integer")
+			return
+		}
+		before = cursor
+	}
+	page, err := h.service.Attempts(r.Context(), r.PathValue("databaseID"), limit, before)
 	if err != nil {
 		writeServiceError(w, r, err)
 		return
 	}
-	httpjson.Write(w, http.StatusOK, map[string]any{"attempts": attempts})
+	httpjson.Write(w, http.StatusOK, page)
 }
 
 func (h *HTTPHandler) get(w http.ResponseWriter, r *http.Request) {

@@ -266,8 +266,9 @@ and bootstrap password. URL passwords are also recognized in decoded form.
   Result row values are excluded from telemetry. Object names containing
   sensitive information require registration as known secrets or a stricter
   call-site redaction policy.
-- Driver error messages use safe categories and SQLSTATE. Activity error and
-  panic messages use safe categories.
+- SQL and worker failure logs record safe error categories and validated SQLSTATE.
+  Worker retry and stop events use these fields in place of the driver message.
+  Activity error and panic messages use safe categories.
 - Trace names, attributes, events, links, status descriptions, resource
   attributes, and instrumentation scopes pass through redaction.
 

@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -51,7 +53,9 @@ type execOnly struct{}
 func (execOnly) Query(string, []driver.NamedValue) (driver.Rows, error) {
 	return nil, errors.New("unsupported query")
 }
-func (execOnly) Exec(string, []driver.NamedValue) (driver.Result, error) { return driver.RowsAffected(1), nil }
+func (execOnly) Exec(string, []driver.NamedValue) (driver.Result, error) {
+	return driver.RowsAffected(1), nil
+}
 
 func TestTraceAttemptPreservesProducerParentAcrossRetryAndSQLScopes(t *testing.T) {
 	recorder, logs := setupWorkerTracing(t)
@@ -440,6 +444,49 @@ func TestWorkerSettlesFailedAttempts(t *testing.T) {
 			settled := nextSettlement(t, queue)
 			if settled.kind != test.wantKind || settled.delay != test.wantDelay || settled.reason == "" {
 				t.Fatalf("settlement = %+v", settled)
+			}
+		})
+	}
+}
+
+func TestWorkerRedactsDriverMessagesInFailureLogs(t *testing.T) {
+	const privateMessage = "fixture-private-customer-note"
+	tests := []struct {
+		event, kind, state string
+		err                error
+	}{
+		{"job_retry_scheduled", "retry", "HY000", &mysql.MySQLError{
+			Number: 1205, SQLState: [5]byte{'H', 'Y', '0', '0', '0'}, Message: privateMessage,
+		}},
+		{"job_stopped", "fail", "22012", &pgconn.PgError{Code: "22012", Message: privateMessage}},
+	}
+	for _, test := range tests {
+		t.Run(test.event, func(t *testing.T) {
+			_, logs := setupWorkerTracing(t)
+			queue := newFakeQueue(claimedJob("a", 1))
+			stop := startWorker(t, queue, runnerFunc(func(context.Context, migration.ExecutionRequest) (migration.Execution, error) {
+				return migration.Execution{}, test.err
+			}), testConfig())
+			settled := nextSettlement(t, queue)
+			stop()
+			if settled.kind != test.kind || !strings.Contains(settled.reason, privateMessage) {
+				t.Fatal("hasil attempt atau detail yang disimpan berubah")
+			}
+			if strings.Contains(logs.String(), privateMessage) {
+				t.Fatal("pesan driver mentah muncul di log worker")
+			}
+			decoder := json.NewDecoder(logs)
+			for {
+				var record map[string]any
+				if err := decoder.Decode(&record); err != nil {
+					t.Fatalf("log %s tidak ditemukan: %v", test.event, err)
+				}
+				if record["event"] == test.event {
+					if record["status"] != "failed" || record["error"] != "sql_error" || record["sqlstate"] != test.state || record["job_id"] != "a" {
+						t.Fatalf("atribut log kegagalan salah: %+v", record)
+					}
+					break
+				}
 			}
 		})
 	}

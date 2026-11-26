@@ -12,13 +12,14 @@ import (
 const otherDatabaseID = "10000000-0000-4000-8000-000000000099"
 
 type fakeStore struct {
-	jobs        map[string]Job
-	err         error
-	enqueued    []migration.ExecutionRequest
-	listedFor   string
-	listedLimit int
-	resumed     []string
-	attempts    []Attempt
+	jobs         map[string]Job
+	err          error
+	enqueued     []migration.ExecutionRequest
+	listedFor    string
+	listedLimit  int
+	listedBefore int64
+	resumed      []string
+	attemptPage  AttemptPage
 }
 
 func newFakeStore(jobs ...Job) *fakeStore {
@@ -62,12 +63,12 @@ func (s *fakeStore) ListByDatabase(_ context.Context, databaseID string, limit i
 	return jobs, nil
 }
 
-func (s *fakeStore) ListAttempts(_ context.Context, databaseID string, limit int) ([]Attempt, error) {
-	s.listedFor, s.listedLimit = databaseID, limit
+func (s *fakeStore) ListAttempts(_ context.Context, databaseID string, limit int, before int64) (AttemptPage, error) {
+	s.listedFor, s.listedLimit, s.listedBefore = databaseID, limit, before
 	if s.err != nil {
-		return nil, s.err
+		return AttemptPage{}, s.err
 	}
-	return s.attempts, nil
+	return s.attemptPage, nil
 }
 
 func (s *fakeStore) Resume(_ context.Context, jobID string) error {

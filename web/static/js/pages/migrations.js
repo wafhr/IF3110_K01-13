@@ -170,15 +170,19 @@ export async function migrationPage(path) {
   const apiBase = `${base}/migrations`;
   const jobsRoot = `${base}/jobs`;
   const db = await accessibleDatabase(id);
-  const hide = new URLSearchParams(location.search).get('hide_rollback') === 'true';
-  const historyPath = `${apiBase}/history${hide ? '?hide_rollback=true' : ''}`;
+  let hide = new URLSearchParams(location.search).get('hide_rollback') === 'true';
+  const historyPath = () => `${apiBase}/history${hide ? '?hide_rollback=true' : ''}`;
   const attemptsPath = `${base}/attempts?limit=100`;
-  const [{ migrations = [] }, { executions = [], legacy_attempts: legacy = [] }, { jobs = [] }, { attempts = [] }] = await Promise.all([
-    api(`${apiBase}/definitions`), api(historyPath), api(jobsRoot), api(attemptsPath),
+  const readAttempts = (before) => api(before ? `${attemptsPath}&before=${encodeURIComponent(before)}` : attemptsPath);
+  const [{ migrations = [] }, initialHistory, { jobs = [] }, initialAttempts] = await Promise.all([
+    api(`${apiBase}/definitions`), api(historyPath()), api(jobsRoot), readAttempts(),
   ]);
   const isEdit = db.permission === 'view_edit';
   let latestJobs = jobs;
-  let latestAttempts = attempts;
+  let history = initialHistory;
+  let historyVersion = 0;
+  let nextBefore = initialAttempts.next_before;
+  const latestAttempts = new Map(initialAttempts.attempts.map((attempt) => [attempt.id, attempt]));
 
   shell(`
     ${heading('DATABASE WORKSPACE', `${db.name} · migrations`, 'Review definitions, approvals, committed history, and asynchronous job progress.')}
@@ -191,12 +195,17 @@ export async function migrationPage(path) {
     ${panel('Review & approval', '<div id="workflow-panel"><p class="muted">Choose Review apply, rollback, or forward on a definition.</p></div>')}
     ${panel('Migration history', `
       <label class="checkbox-label"><input type="checkbox" id="hide-rollback" ${hide ? 'checked' : ''}> Hide rollback pairs</label>
-      <div id="history-list">${historyTable(executions, legacy, attempts)}</div>
+      <div id="history-list"></div>
+      <div hidden><button class="button small" id="load-older-attempts" type="button">Load older attempts</button></div>
       <div id="execution-detail" class="subsection" hidden></div>`,
     'Every attempt is recorded, including failures and retries. Hide rollback only filters committed rollback pairs.')}
     ${panel('Asynchronous jobs', `<div id="job-list">${table(jobHeaders, jobs.map((j) => jobRow(j, isEdit)).join(''))}</div>`,
     'Jobs run through the worker. Progress updates while this page is open.')}`,
   'Migrations');
+
+  const historyList = root.querySelector('#history-list');
+  const olderAttempts = root.querySelector('#load-older-attempts');
+  const hideRollback = root.querySelector('#hide-rollback');
 
   const showDetail = (html) => {
     const detail = root.querySelector('#execution-detail');
@@ -206,7 +215,7 @@ export async function migrationPage(path) {
   };
 
   function bindHistory() {
-    root.querySelectorAll('.execution-detail').forEach((button) => {
+    historyList.querySelectorAll('.execution-detail').forEach((button) => {
       button.onclick = async () => {
         try {
           const { execution } = await api(`${apiBase}/history/${button.dataset.id}`);
@@ -216,25 +225,51 @@ export async function migrationPage(path) {
         }
       };
     });
-    root.querySelectorAll('.attempt-detail').forEach((button) => {
+    historyList.querySelectorAll('.attempt-detail').forEach((button) => {
       button.onclick = () => {
-        const attempt = latestAttempts.find((a) => a.id === button.dataset.id);
+        const attempt = latestAttempts.get(button.dataset.id);
         if (attempt) showDetail(attemptDetail(attempt));
       };
     });
   }
 
-  // refreshHistory reloads the definitions, whose state changes once an
-  // execution is attempted, and the history.
-  async function refreshHistory() {
-    const [{ migrations: m = [] }, { executions: x = [], legacy_attempts: l = [] }, { attempts: a = [] }] = await Promise.all([
-      api(`${apiBase}/definitions`), api(historyPath), api(attemptsPath),
-    ]);
-    latestAttempts = a;
-    root.querySelector('#definition-list').innerHTML = definitionTable(m, isEdit);
-    root.querySelector('#history-list').innerHTML = historyTable(x, l, a);
-    bindDefinitions();
+  function renderHistory() {
+    const { executions = [], legacy_attempts: legacy = [] } = history;
+    historyList.innerHTML = historyTable(executions, legacy, [...latestAttempts.values()]);
+    olderAttempts.parentElement.hidden = !nextBefore;
     bindHistory();
+  }
+
+  async function refreshExecutions() {
+    const version = ++historyVersion;
+    const result = await api(historyPath());
+    if (version === historyVersion) history = result;
+  }
+
+  async function refreshAttempts() {
+    let page = await readAttempts();
+    const hasLoadedAttempts = latestAttempts.size > 0;
+    if (!hasLoadedAttempts) nextBefore = page.next_before;
+    const recent = [];
+    // Cari titik temu dengan riwayat yang sudah dimuat agar lonjakan attempt
+    // di antara dua refresh tidak meninggalkan celah.
+    for (;;) {
+      recent.push(...page.attempts);
+      if (!hasLoadedAttempts || !page.next_before || page.attempts.some((a) => latestAttempts.has(a.id))) break;
+      page = await readAttempts(page.next_before);
+    }
+    recent.forEach((attempt) => latestAttempts.set(attempt.id, attempt));
+  }
+
+  // Muat ulang definisi karena statusnya dapat berubah setelah eksekusi.
+  async function refreshHistory() {
+    const [{ migrations: m = [] }] = await Promise.all([
+      api(`${apiBase}/definitions`), refreshExecutions(), refreshAttempts(),
+    ]);
+    if (!historyList.isConnected) return;
+    root.querySelector('#definition-list').innerHTML = definitionTable(m, isEdit);
+    renderHistory();
+    bindDefinitions();
   }
 
   function bindJobActions() {
@@ -414,14 +449,41 @@ export async function migrationPage(path) {
     });
   }
 
-  root.querySelector('#hide-rollback').onchange = (event) => {
-    const url = new URL(location.href);
-    if (event.target.checked) url.searchParams.set('hide_rollback', 'true');
-    else url.searchParams.delete('hide_rollback');
-    route(url.pathname + url.search);
-    migrationPage(path);
+  olderAttempts.onclick = async () => {
+    if (!nextBefore) return;
+    olderAttempts.disabled = true;
+    try {
+      const page = await readAttempts(nextBefore);
+      page.attempts.forEach((attempt) => latestAttempts.set(attempt.id, attempt));
+      nextBefore = page.next_before;
+      if (historyList.isConnected) renderHistory();
+    } catch (error) {
+      if (historyList.isConnected) notice(error.message, true);
+    } finally {
+      olderAttempts.disabled = false;
+    }
   };
-  bindHistory();
+  hideRollback.onchange = async () => {
+    const previous = hide;
+    hide = hideRollback.checked;
+    hideRollback.disabled = true;
+    try {
+      await refreshExecutions();
+      if (!historyList.isConnected) return;
+      const url = new URL(location.href);
+      if (hide) url.searchParams.set('hide_rollback', 'true');
+      else url.searchParams.delete('hide_rollback');
+      route(url.pathname + url.search);
+      renderHistory();
+    } catch (error) {
+      hide = previous;
+      hideRollback.checked = previous;
+      if (historyList.isConnected) notice(error.message, true);
+    } finally {
+      hideRollback.disabled = false;
+    }
+  };
+  renderHistory();
   const form = root.querySelector('#migration-form');
   if (form) bindEditor(form);
   bindDefinitions();

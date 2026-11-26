@@ -268,9 +268,15 @@ it was queued for.
 |---|---|
 | `GET /databases/{databaseID}/jobs?limit=50` | `{"jobs":[...]}`, newest first; `limit` is 1 to 100 |
 | `GET /databases/{databaseID}/jobs/{jobID}` | `{"job":{...}}` |
-| `GET /databases/{databaseID}/attempts?limit=50` | `{"attempts":[...]}`, newest first, with the SQL of each attempt; `limit` is 1 to 100 |
+| `GET /databases/{databaseID}/attempts?limit=50` | `{"attempts":[...],"next_before":"123"}`, newest first, with the SQL of each attempt; `limit` is 1 to 100 |
 | `POST /databases/{databaseID}/jobs/{jobID}/resume` | `202` with `{"job":{...}}`; requires View + Edit and the CSRF token |
 | `POST /databases/{databaseID}/jobs/{jobID}/cancel` | `202` with `{"job":{...}}`; requires View + Edit and the CSRF token |
+
+Pass `next_before` as the `before` query parameter to read the next page of
+older attempts. The final page omits the cursor. In the SPA, select **Load older
+attempts** in Migration history. The **Hide rollback pairs** filter applies to
+committed execution pairs, so older failed attempts remain available with the
+filter enabled.
 
 ```json
 {

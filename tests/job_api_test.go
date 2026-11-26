@@ -5,6 +5,7 @@ package integration_test
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -75,5 +76,35 @@ func TestJobStatusAPIIntegration(t *testing.T) {
 			t.Fatalf("resubmission returned %q, %v; want %q", again, err, jobID)
 		}
 		assertCount(t, f.platform, `SELECT count(*) FROM migration_jobs WHERE execution_id = $1`, 1, request.ExecutionID)
+	})
+
+	t.Run("older attempts stay reachable when new attempts arrive", func(t *testing.T) {
+		insertAttempts := func(first, last int) {
+			t.Helper()
+			execFixture(t, f.platform, `
+				INSERT INTO migration_attempts
+					(job_id, execution_id, database_id, migration_id, name, revision, action, operation,
+					 attempt, actor_id, sql, status, started_at, finished_at)
+				SELECT $1, $2, $3, $4, 'add audit table', 1, 'apply', 'execute',
+					attempt, $5, 'CREATE TABLE audit_events (id BIGINT PRIMARY KEY)', 'failed', now(), now()
+				FROM generate_series($6::int, $7::int) AS attempt`,
+				jobID, request.ExecutionID, f.databaseID, definition.ID, f.actorID, first, last)
+		}
+		attemptsPath := "/databases/" + f.databaseID + "/attempts?limit=100"
+		insertAttempts(1, 102)
+		var newest job.AttemptPage
+		decode(t, f.reader.do(t, http.MethodGet, attemptsPath, nil, http.StatusOK), &newest)
+		if len(newest.Attempts) != 100 || newest.Attempts[0].Attempt != 102 ||
+			newest.NextBefore != newest.Attempts[99].Sequence {
+			t.Fatalf("first page has %d attempts and cursor %d", len(newest.Attempts), newest.NextBefore)
+		}
+
+		insertAttempts(103, 103)
+		var older job.AttemptPage
+		decode(t, f.reader.do(t, http.MethodGet, attemptsPath+"&before="+strconv.FormatInt(newest.NextBefore, 10),
+			nil, http.StatusOK), &older)
+		if len(older.Attempts) != 2 || older.Attempts[0].Attempt != 2 || older.Attempts[1].Attempt != 1 || older.NextBefore != 0 {
+			t.Fatalf("older page = %+v", older)
+		}
 	})
 }
