@@ -418,6 +418,13 @@ tbody tr:last-child td {
 .item-list form {
   margin:0
 }
+#app:has(> .login-card) {
+  display:grid;
+  place-items:center;
+  min-height:100vh;
+  min-height:100dvh;
+  padding:16px
+}
 .login-card {
   width:min(100%,420px);
   background:#fff;
@@ -435,6 +442,14 @@ tbody tr:last-child td {
 .login-card>.muted {
   font-size:.9rem;
   margin-bottom:23px
+}
+.login-card .stack label {
+  display:grid;
+  gap:6px
+}
+.login-card .stack input {
+  width:100%;
+  min-width:0
 }
 .stack {
   display:grid;

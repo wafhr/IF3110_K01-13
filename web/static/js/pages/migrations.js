@@ -87,9 +87,24 @@ function historyTable(executions, legacy, attempts) {
   return table(['Sequence', 'Migration', 'Action', 'Status', 'Execution ID', 'Started', 'Actor'], entries.map((e) => e.html).join(''));
 }
 
+function jobProgress(j) {
+  const { committed_rows = 0, committed_batches = 0, total_rows = 0 } = j.progress || {};
+  const compensating = j.operation === 'compensate';
+  if (j.action === 'rollback' || compensating) {
+    if (j.status === 'succeeded' || j.status === 'reverted') {
+      return compensating ? 'Compensation complete' : 'Rollback complete';
+    }
+    // Saat reversal, counter checkpoint mewakili perubahan yang masih berlaku.
+    if (!total_rows) return '—';
+    const rows = committed_rows === 1 ? 'row' : 'rows';
+    const batches = committed_batches === 1 ? 'batch' : 'batches';
+    return `${committed_rows} ${rows} still applied · ${committed_batches} ${batches} left`;
+  }
+  return `${committed_rows} / ${total_rows} rows · ${committed_batches} batches`;
+}
+
 function jobRow(j, isEdit) {
   const statusClass = ['succeeded', 'reverted'].includes(j.status) ? 'active' : j.status === 'failed' ? 'inactive' : '';
-  const progress = j.progress || {};
   let actions = '';
   if (isEdit && stoppedJobs.includes(j.status)) {
     actions = `<button class="button small resume-job" data-id="${esc(j.id)}">Resume</button>`;
@@ -99,7 +114,7 @@ function jobRow(j, isEdit) {
     <tr>
       <td><code>${esc(j.id)}</code></td><td>${esc(j.name)}</td><td>${esc(j.action)}</td>
       <td><span class="state ${statusClass}">${esc(j.status)}</span></td>
-      <td>${progress.committed_rows ?? 0} / ${progress.total_rows ?? 0} rows · ${progress.committed_batches ?? 0} batches</td>
+      <td>${esc(jobProgress(j))}</td>
       <td>${j.attempts}</td><td>${esc(j.last_error || '')}</td><td>${actions}</td>
     </tr>`;
 }

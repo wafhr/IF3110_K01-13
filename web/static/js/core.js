@@ -17,9 +17,15 @@ export function setRenderer(render) {
 
 export const route = (path) => history.pushState({}, '', path);
 
-export function navigate(path) {
+export async function navigate(path) {
+  const previousPath = location.pathname;
   route(path);
-  return renderPage();
+  const destinationPath = location.pathname;
+  const result = await renderPage();
+  if (destinationPath !== previousPath && location.pathname === destinationPath) {
+    window.scrollTo(0, 0);
+  }
+  return result;
 }
 
 export async function api(path, method = 'GET', body) {
